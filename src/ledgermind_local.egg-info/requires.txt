@@ -1,0 +1,11 @@
+pydantic<3,>=2.7
+fastapi<1,>=0.111
+PyYAML<7,>=6.0
+ledgermind-core<4.1,>=4.0.0a1
+uvicorn<1,>=0.30
+
+[dev]
+fastapi<1,>=0.111
+pytest<9,>=8
+pytest-cov<7,>=5
+ruff>=0.6
