@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from bootstrap import build_projection_names
-from config import LocalConfig
+from ledgermind_local.bootstrap import build_projection_names
+from ledgermind_local.config import LocalConfig
 
 
 def test_build_projection_names_without_markdown_audit() -> None:

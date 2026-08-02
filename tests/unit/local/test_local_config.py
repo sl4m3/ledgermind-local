@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from config import LocalConfig
+from ledgermind_local.config import LocalConfig
 
 
 def test_config_version_required() -> None:

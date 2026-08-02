@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from api.app import create_app
-from api.dependencies import Settings
+from ledgermind_local.api.app import create_app
+from ledgermind_local.api.dependencies import Settings
 
 
 def _build_client(*, database_token: str = "test-token") -> TestClient:

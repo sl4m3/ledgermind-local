@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from fastapi.testclient import TestClient
 
-from api.app import create_app
-from api.dependencies import Settings
-from persistence import migrations, open_sqlite_connection
+from ledgermind_local.api.app import create_app
+from ledgermind_local.api.dependencies import Settings
+from ledgermind_local.persistence import migrations, open_sqlite_connection
 
 
 def _checksum(value: str) -> str:
@@ -113,6 +115,42 @@ def test_ingest_atom_returns_200_for_duplicate(tmp_path) -> None:
     assert second.json()["duplicate"] is True
     assert second.json()["atom_id"] == first.json()["atom_id"]
     assert second.json()["knowledge_id"] == first.json()["knowledge_id"]
+
+
+def test_concurrent_ingest_same_idempotency_key_creates_one_atom(tmp_path) -> None:
+    database = tmp_path / "state.db"
+    _bootstrap_database(database)
+    request = _build_request(
+        idempotency_key=_checksum("concurrent"),
+        memory_space_id="space-concurrent",
+    )
+    barrier = Barrier(2)
+
+    def post_once():
+        with _build_client(database_path=database) as client:
+            barrier.wait(timeout=5)
+            return client.post(
+                "/v1/atoms",
+                headers={"Authorization": "Bearer test-token"},
+                json=request,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(lambda _: post_once(), range(2)))
+
+    assert sorted(response.status_code for response in responses) == [200, 201]
+    payloads = [response.json() for response in responses]
+    assert len({payload["atom_id"] for payload in payloads}) == 1
+    assert sum(payload["duplicate"] is False for payload in payloads) == 1
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM atoms").fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM idempotency_results WHERE memory_space_id = ?",
+                ("space-concurrent",),
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_ingest_atom_returns_409_for_idempotency_conflict(tmp_path) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from persistence import (
+from ledgermind_local.persistence import (
     Knowledge,
     SQLiteKnowledgeConcurrencyError,
     SQLiteUnitOfWork,

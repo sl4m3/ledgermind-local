@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from persistence import (
+from ledgermind_local.persistence import (
     Atom,
     SQLiteAtomRepository,
     SQLiteUnitOfWork,

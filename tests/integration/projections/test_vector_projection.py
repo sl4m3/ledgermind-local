@@ -7,15 +7,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
+from ledgermind_core.domain.events import (
+    KnowledgeCreated,
+    KnowledgeDeleted,
+    KnowledgeSuperseded,
+)
 
-from persistence import (
+from ledgermind_local.persistence import (
     Knowledge,
     SQLiteKnowledgeRepository,
     migrations,
     open_sqlite_connection,
 )
-from projections import KnowledgeVectorProjection, VectorProjectionStore
+from ledgermind_local.projections import (
+    KnowledgeVectorProjection,
+    VectorProjectionStore,
+)
 
 
 @dataclass

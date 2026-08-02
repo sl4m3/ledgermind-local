@@ -7,12 +7,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml .
-COPY README.md .
-COPY src ./src
+COPY ledgermind-core/pyproject.toml /opt/ledgermind-core/pyproject.toml
+COPY ledgermind-core/README.md /opt/ledgermind-core/README.md
+COPY ledgermind-core/src /opt/ledgermind-core/src
+RUN pip install /opt/ledgermind-core
 
-RUN pip install .
+COPY ledgermind-local/pyproject.toml /app/pyproject.toml
+COPY ledgermind-local/README.md /app/README.md
+COPY ledgermind-local/src /app/src
+RUN pip install /app
 
 EXPOSE 8765
 
-CMD ["python", "-m", "cli", "--home", "/data/ledgermind", "serve"]
+CMD ["python", "-m", "ledgermind_local.cli", "--home", "/data/ledgermind", "serve"]

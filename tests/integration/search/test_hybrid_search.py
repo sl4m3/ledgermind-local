@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from persistence import (
+from ledgermind_local.persistence import (
     migrations,
     open_sqlite_connection,
 )
-from projections import VectorProjectionStore
-from projections.vectorizer import Vectorizer
-from search import HybridKnowledgeSearchAdapter
+from ledgermind_local.projections import VectorProjectionStore
+from ledgermind_local.projections.vectorizer import Vectorizer
+from ledgermind_local.search import HybridKnowledgeSearchAdapter
 
 
 def _build_connection(path):

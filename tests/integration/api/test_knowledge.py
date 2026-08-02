@@ -6,9 +6,9 @@ import hashlib
 
 from fastapi.testclient import TestClient
 
-from api.app import create_app
-from api.dependencies import Settings
-from persistence import migrations, open_sqlite_connection
+from ledgermind_local.api.app import create_app
+from ledgermind_local.api.dependencies import Settings
+from ledgermind_local.persistence import migrations, open_sqlite_connection
 
 
 def _checksum(value: str) -> str:

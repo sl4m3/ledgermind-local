@@ -4,7 +4,10 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from persistence.database import managed_connection, open_sqlite_connection
+from ledgermind_local.persistence.database import (
+    managed_connection,
+    open_sqlite_connection,
+)
 
 
 def _pragma_value(conn: sqlite3.Connection, pragma: str) -> str | int:

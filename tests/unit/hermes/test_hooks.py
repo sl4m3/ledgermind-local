@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections import OrderedDict
 from pathlib import Path
 
-from plugins.hermes import hooks as hook_runtime
-from plugins.hermes.client import LedgerMindClientError
-from plugins.hermes.config import PluginConfig
-from plugins.hermes.delivery_worker import DeliveryWorker
-from plugins.hermes.hooks import _EXTRACTION_GUARD, PluginRuntime
-from plugins.hermes.spool import FileSpool
+from ledgermind_local.plugins.hermes import hooks as hook_runtime
+from ledgermind_local.plugins.hermes.client import LedgerMindClientError
+from ledgermind_local.plugins.hermes.config import PluginConfig
+from ledgermind_local.plugins.hermes.delivery_worker import DeliveryWorker
+from ledgermind_local.plugins.hermes.hooks import _EXTRACTION_GUARD, PluginRuntime
+from ledgermind_local.plugins.hermes.spool import FileSpool
+from ledgermind_local.plugins.hermes.state_db_reader import ResolvedRoundReference
 
 
 class _FakeClient:
@@ -95,10 +97,22 @@ def _build_runtime(tmp_path: Path, *, fail_client: bool = False, with_spool: boo
     return PluginRuntime(
         config=config,
         _client=fake_client,
-        _spool=FileSpool(tmp_path / "spool") if with_spool else FileSpool(tmp_path / "spool"),
+        _spool=FileSpool(tmp_path / "spool"),
         _cache=OrderedDict(),
         _delivery_worker=None,
     )
+
+
+def _create_state_db(path: Path, rows: list[tuple[int, str, str, str]]) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO messages (id, session_id, role, content) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        connection.commit()
 
 
 def test_pre_llm_call_returns_context_and_caches_it(tmp_path: Path) -> None:
@@ -198,12 +212,21 @@ def test_post_llm_call_enqueues_ready_atom_once(tmp_path: Path) -> None:
 
     assert len(list((runtime._spool.ready_dir).glob("*.json"))) == 1
     payload = json.loads(next(runtime._spool.ready_dir.glob("*.json")).read_text(encoding="utf-8"))
-    assert payload["atom"]["title"] == "title"
-    assert payload["source"]["source_round_id"] == "turn-123"
+    assert payload["request"]["atom"]["title"] == "title"
+    assert payload["request"]["source"]["source_round_id"] == "turn-123"
 
 
 def test_post_llm_call_selects_recent_round_for_extraction(tmp_path: Path) -> None:
     runtime = _build_runtime(tmp_path, with_spool=True)
+    _create_state_db(
+        tmp_path / "state.db",
+        [
+            (20, "s1", "user", "повторный запрос"),
+            (21, "s1", "assistant", "промежуточный ответ"),
+            (22, "s1", "tool", "новый инструментовый результат"),
+            (25, "s1", "assistant", "новый итог"),
+        ],
+    )
     llm = _FakeLLM(
         payload={
             "has_knowledge": True,
@@ -320,7 +343,7 @@ def test_post_llm_call_delivers_ready_when_stable_turn_id_is_available(tmp_path:
     assert len(list((runtime._spool.ready_dir).glob("*.json"))) == 1
     assert len(list((runtime._spool.pending_dir).glob("*.json"))) == 0
     payload = json.loads(next(runtime._spool.ready_dir.glob("*.json")).read_text(encoding="utf-8"))
-    assert payload["source"]["source_round_id"] == "turn-123"
+    assert payload["request"]["source"]["source_round_id"] == "turn-123"
 
 
 def test_post_llm_call_sends_ready_atom_to_local_service(tmp_path: Path) -> None:
@@ -339,6 +362,13 @@ def test_post_llm_call_sends_ready_atom_to_local_service(tmp_path: Path) -> None
         max_context_items=5,
     )
     client = _FakeDeliveryClient(response={"items": []})
+    _create_state_db(
+        tmp_path / "state.db",
+        [
+            (10, "s1", "user", "вопрос"),
+            (11, "s1", "assistant", "ответ"),
+        ],
+    )
     spool = FileSpool(tmp_path / "spool")
     runtime = PluginRuntime(
         config=config,
@@ -417,6 +447,36 @@ def test_post_llm_call_skips_extraction_purpose(tmp_path: Path) -> None:
     assert not llm.calls
 
 
+def test_post_llm_call_keeps_unverified_explicit_ids_pending(tmp_path: Path) -> None:
+    runtime = _build_runtime(tmp_path, with_spool=True)
+    llm = _FakeLLM(
+        payload={
+            "has_knowledge": True,
+            "title": "title",
+            "target": "target",
+            "statement": "statement",
+            "rationale": "rationale",
+            "result": "result",
+            "artifacts": [],
+        }
+    )
+
+    runtime.on_post_llm_call(
+        session_id="s1",
+        user_message="вопрос",
+        assistant_response="ответ",
+        conversation_history=[],
+        model="model",
+        platform="x",
+        llm=llm,
+        first_message_id="missing-1",
+        final_message_id="missing-2",
+    )
+
+    assert not list(runtime._spool.ready_dir.glob("*.json"))
+    assert len(list(runtime._spool.pending_dir.glob("*.json"))) == 1
+
+
 def test_post_llm_call_ignores_recursive_call_via_context_guard(tmp_path: Path) -> None:
     runtime = _build_runtime(tmp_path, with_spool=True)
     token = _EXTRACTION_GUARD.set(True)
@@ -478,5 +538,67 @@ def test_post_llm_call_uses_turn_id_for_fallback_round_reference(tmp_path: Path,
 
     pending_items = list((runtime._spool.pending_dir).glob("*.json"))
     assert len(pending_items) == 1
-    payload = json.loads(pending_items[0].read_text(encoding="utf-8"))
-    assert payload["source_reference"]["source_round_id"] == "turn-123"
+    pending_payload = json.loads(pending_items[0].read_text(encoding="utf-8"))
+    assert pending_payload["source_reference"]["source_round_id"] == "turn-123"
+
+
+def test_reprocess_pending_preserves_explicit_source_boundaries(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    runtime = _build_runtime(tmp_path, with_spool=True)
+    captured: dict[str, object] = {}
+
+    def fake_resolver(**kwargs: object) -> ResolvedRoundReference:
+        captured.update(kwargs)
+        return ResolvedRoundReference(
+            source_session_id="s1",
+            source_round_id="1:4",
+            first_message_id="1",
+            final_message_id="4",
+            message_ids=("1", "2", "3", "4"),
+            source_digest="sha256:round",
+            source_schema_version=1,
+            resolver_version=1,
+            verified=True,
+        )
+
+    monkeypatch.setattr(hook_runtime, "resolve_round_reference", fake_resolver)
+    payload = {
+        "source_reference": {
+            "source_round_id": "1:4",
+            "first_message_id": "1",
+            "final_message_id": "4",
+            "message_ids": ["1", "2", "3", "4"],
+        },
+        "session_id": "s1",
+        "user_message": "вопрос",
+        "assistant_response": "ответ",
+        "round_messages": [
+            {"role": "user", "content": "вопрос"},
+            {"role": "assistant", "content": "ответ"},
+        ],
+        "round_checksum": "sha256:round",
+    }
+
+    result = runtime._reprocess_pending(
+        payload,
+        llm=_FakeLLM(
+            payload={
+                "has_knowledge": True,
+                "title": "title",
+                "target": "target",
+                "statement": "statement",
+                "rationale": "rationale",
+                "result": "result",
+                "artifacts": [],
+            },
+        ),
+        default_platform="x",
+        default_model="model",
+    )
+
+    assert result is not None
+    assert captured["explicit_first_message_id"] == "1"
+    assert captured["explicit_final_message_id"] == "4"
+    assert captured["explicit_message_ids"] == ("1", "2", "3", "4")

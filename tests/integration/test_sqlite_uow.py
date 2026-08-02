@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from persistence.sqlite_uow import (
+from ledgermind_local.persistence.sqlite_uow import (
     SQLiteUnitOfWork,
     SQLiteUnitOfWorkError,
     SQLiteUnitOfWorkInactiveError,
@@ -103,7 +103,7 @@ def _write_uow_script(root: Path) -> Path:
             import time
             from pathlib import Path
 
-            from persistence.sqlite_uow import SQLiteUnitOfWork
+            from ledgermind_local.persistence.sqlite_uow import SQLiteUnitOfWork
 
             database = Path(sys.argv[1])
             hold = float(sys.argv[2])
@@ -136,8 +136,8 @@ def _run_uow_script(script: Path, db_path: Path, hold: float, payload: str) -> s
             str(hold),
             payload,
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
+        check=False,
         text=True,
         env=_runner_env(),
     )

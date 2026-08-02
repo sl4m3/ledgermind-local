@@ -9,6 +9,12 @@ pip install -e .[dev]
 pytest -q
 ```
 
+## Docker
+Сборка выполняется из корня workspace, чтобы образ получил оба пакета:
+```bash
+docker build -f ledgermind-local/Dockerfile -t ledgermind-local .
+```
+
 ## Переход с v3
 - Временная команда: `ledgermind-v4`
 - Миграция: `ledgermind-v4 migrate-v3 --source <старый storage_path> --dry-run`

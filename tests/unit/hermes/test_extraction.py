@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from plugins.hermes.extraction import extract_request_payload
+from ledgermind_local.plugins.hermes.extraction import extract_request_payload
 
 
 class _FakeResponse:

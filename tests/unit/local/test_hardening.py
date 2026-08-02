@@ -3,13 +3,13 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
-from cli import _build_parser, _command_migrate_v3
-from v3_migration.models import LegacyRecord
-from v3_migration.writer import write_temp_migration
+from ledgermind_local.cli import _build_parser, _command_migrate_v3
+from ledgermind_local.v3_migration.models import LegacyRecord
+from ledgermind_local.v3_migration.writer import write_temp_migration
 
 
 def test_token_file_has_private_permissions_on_posix(tmp_path: Path) -> None:
-    from cli import _command_init
+    from ledgermind_local.cli import _command_init
     home = tmp_path / "service"
     home.mkdir()
     exit_code = _command_init(

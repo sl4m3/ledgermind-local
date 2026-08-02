@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
+from ledgermind_core.domain.events import (
+    KnowledgeCreated,
+    KnowledgeDeleted,
+    KnowledgeSuperseded,
+)
 
-from persistence import migrations, open_sqlite_connection
-from projections.fts import KnowledgeFTSProjection
+from ledgermind_local.persistence import migrations, open_sqlite_connection
+from ledgermind_local.projections.fts import KnowledgeFTSProjection
 
 
 def _now() -> str:

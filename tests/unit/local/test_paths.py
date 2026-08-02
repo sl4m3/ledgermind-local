@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from bootstrap import bootstrap_local_service
-from config import LocalConfig
-from paths import ServicePaths
+from ledgermind_local.bootstrap import bootstrap_local_service
+from ledgermind_local.config import LocalConfig
+from ledgermind_local.paths import ServicePaths
 
 
 def test_default_home_uses_explicit_constant() -> None:

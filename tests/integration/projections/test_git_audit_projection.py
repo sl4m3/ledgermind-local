@@ -7,9 +7,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from domain.events import KnowledgeCreated
+from ledgermind_core.domain.events import KnowledgeCreated
 
-from projections import KnowledgeMarkdownGitAuditProjection
+from ledgermind_local.projections import KnowledgeMarkdownGitAuditProjection
 
 
 def _require_git() -> None:
@@ -122,12 +122,6 @@ def test_git_audit_projection_ignores_sensitive_files(tmp_path: Path) -> None:
         payload_json='{"event_type":"knowledge.created","aggregate_id":"k-1"}',
     )
 
-    status = subprocess.run(
-        ["git", "-C", str(root), "status", "--short"],
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout
     for ignored in ("secret.token", "state.db", "history.log"):
         check = subprocess.run(
             ["git", "-C", str(root), "check-ignore", "--quiet", ignored],
@@ -141,7 +135,7 @@ def test_git_audit_projection_ignores_sensitive_files(tmp_path: Path) -> None:
 def test_git_audit_projection_reports_missing_git_without_crash(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "markdown"
     _init_markdown_file(root)
-    monkeypatch.setattr("projections.git_audit.shutil.which", lambda _name: None)
+    monkeypatch.setattr("ledgermind_local.projections.git_audit.shutil.which", lambda _name: None)
 
     projection = KnowledgeMarkdownGitAuditProjection(markdown_root=root, enabled=True, batch_size=1)
     assert projection.rebuild() == 0

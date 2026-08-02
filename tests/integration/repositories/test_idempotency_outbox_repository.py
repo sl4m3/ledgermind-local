@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from persistence import (
+from ledgermind_local.persistence import (
     OutboxEvent,
     SQLiteUnitOfWork,
     StoredIdempotencyResult,
@@ -16,6 +16,7 @@ from persistence import (
 
 def _idempotency_payload(
     *,
+    memory_space_id: str = "space-a",
     key: str = "idem-1",
     request_hash: str = "sha256:" + "a" * 64,
     response_json: str = '{"projections_pending":true}',
@@ -23,6 +24,7 @@ def _idempotency_payload(
     expires_at: str | None = None,
 ) -> StoredIdempotencyResult:
     return StoredIdempotencyResult(
+        memory_space_id=memory_space_id,
         key=key,
         request_hash=request_hash,
         response_json=response_json,
@@ -63,7 +65,7 @@ def test_idempotency_store_and_read(tmp_path) -> None:
     with SQLiteUnitOfWork(db_path) as uow:
         migrations.apply_migrations(uow.connection)
         uow.idempotency.add(_idempotency_payload())
-        assert uow.idempotency.get("idem-1") == _idempotency_payload()
+        assert uow.idempotency.get("space-a", "idem-1") == _idempotency_payload()
         uow.commit()
 
 

@@ -16,8 +16,8 @@ for extra_root in (CORE_SRC_ROOT, PROJECT_SRC_ROOT):
     if extra_root.exists() and str(extra_root) not in sys.path:
         sys.path.insert(0, str(extra_root))
 
-from persistence import open_sqlite_connection
-from projections import VectorProjectionStore as ProjectionVectorStore
+from ledgermind_local.persistence import open_sqlite_connection
+from ledgermind_local.projections import VectorProjectionStore as ProjectionVectorStore
 
 PYTHON_PATHS = [str(path) for path in (CORE_SRC_ROOT, PROJECT_SRC_ROOT) if path.exists()]
 
@@ -45,21 +45,21 @@ def _write_recovery_script(tmp_path: Path) -> Path:
         from pathlib import Path
         from typing import Sequence
 
-        from persistence import (
+        from ledgermind_local.persistence import (
             OutboxEvent,
             SQLiteOutboxRepository,
             SQLiteUnitOfWork,
             migrations,
             open_sqlite_connection,
         )
-        from projections import (
+        from ledgermind_local.projections import (
             ProjectionDispatcher,
             KnowledgeFTSProjection,
             KnowledgeMarkdownGitAuditProjection,
             KnowledgeMarkdownProjection,
             KnowledgeVectorProjection,
         )
-        from projections.vector_store import VectorProjectionStore
+        from ledgermind_local.projections.vector_store import VectorProjectionStore
 
         _NOW = "2026-01-01T00:00:00+00:00"
 

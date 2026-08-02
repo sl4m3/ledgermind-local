@@ -6,10 +6,11 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from persistence import OutboxEvent, SQLiteUnitOfWork, migrations
-from projections.dispatcher import ProjectionDispatcher
-from scheduler import OutboxWorker
+from ledgermind_local.persistence import OutboxEvent, SQLiteUnitOfWork, migrations
+from ledgermind_local.projections.dispatcher import ProjectionDispatcher
+from ledgermind_local.scheduler import OutboxWorker
 
 
 def _build_time(value: int) -> str:
@@ -93,6 +94,30 @@ class _RecordingProjection:
 
 
 @dataclass
+class _WriteLockProbe:
+    database: Path
+    call_count: int = 0
+
+    def handle_event(
+        self,
+        *,
+        event_type: str,
+        memory_space_id: str,
+        aggregate_id: str,
+        payload_json: str,
+    ) -> bool:
+        del event_type, memory_space_id, aggregate_id, payload_json
+        self.call_count += 1
+        connection = sqlite3.connect(self.database, timeout=0.05)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.rollback()
+        finally:
+            connection.close()
+        return True
+
+
+@dataclass
 class _FlakyProjection:
     fail_times: int
     call_count: int = 0
@@ -131,6 +156,26 @@ def test_outbox_worker_delivers_to_single_projection(tmp_path) -> None:
         db,
         "SELECT processed_at FROM outbox_events WHERE event_id = ?",
         args=("evt-single",),
+    ) is not None
+
+
+def test_outbox_worker_does_not_hold_claim_write_lock_during_projection(tmp_path) -> None:
+    db = tmp_path / "state.db"
+    projection = _WriteLockProbe(db)
+    worker = OutboxWorker(
+        database_path=db,
+        dispatcher=ProjectionDispatcher({"projections.search": projection}),
+        worker_id="worker-lock-probe",
+    )
+
+    _seed_event(db, event_id="evt-lock", projection_names=("projections.search",))
+
+    assert worker.run_once() is True
+    assert projection.call_count == 1
+    assert _read_scalar(
+        db,
+        "SELECT processed_at FROM projection_deliveries WHERE projection_name = ? AND event_id = ?",
+        args=("projections.search", "evt-lock"),
     ) is not None
 
 

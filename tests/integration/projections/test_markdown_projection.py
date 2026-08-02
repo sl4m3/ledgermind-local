@@ -7,10 +7,14 @@ import json
 from pathlib import Path
 
 import pytest
-from domain import EvidenceRelation
-from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
+from ledgermind_core.domain import EvidenceRelation
+from ledgermind_core.domain.events import (
+    KnowledgeCreated,
+    KnowledgeDeleted,
+    KnowledgeSuperseded,
+)
 
-from persistence import (
+from ledgermind_local.persistence import (
     Knowledge,
     KnowledgeEvidence,
     SQLiteEvidenceRepository,
@@ -18,7 +22,7 @@ from persistence import (
     migrations,
     open_sqlite_connection,
 )
-from projections.markdown import KnowledgeMarkdownProjection
+from ledgermind_local.projections.markdown import KnowledgeMarkdownProjection
 
 
 def _bootstrap(path: Path) -> None:
@@ -475,7 +479,7 @@ def test_projection_file_path_is_safe_for_memory_space(tmp_path) -> None:
         payload_json=json.dumps({"event_type": KnowledgeCreated.EVENT_NAME, "knowledge_id": "k-safe"}),
     )
 
-    folder = list((tmp_path / "markdown" / "knowledge").iterdir())[0]
+    folder = next((tmp_path / "markdown" / "knowledge").iterdir())
     assert folder.is_dir()
     assert "/" not in folder.name
     assert folder.name == _safe_name("team/unsafe:space")

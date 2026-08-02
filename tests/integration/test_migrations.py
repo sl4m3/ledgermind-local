@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from persistence import migrations
+from ledgermind_local.persistence import migrations
 
 
 def _connect(path):

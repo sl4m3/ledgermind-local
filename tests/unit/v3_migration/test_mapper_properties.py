@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from v3_migration.mapper import map_record
-from v3_migration.models import LegacyRecord
+from ledgermind_local.v3_migration.mapper import map_record
+from ledgermind_local.v3_migration.models import LegacyRecord
 
 
 def _record_with_raw_markdown(raw_markdown: str) -> LegacyRecord:

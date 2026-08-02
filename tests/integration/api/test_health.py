@@ -6,9 +6,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from api.app import create_app
-from api.dependencies import Settings
-from service_lock import ServiceLock
+from ledgermind_local.api.app import create_app
+from ledgermind_local.api.dependencies import Settings
+from ledgermind_local.service_lock import ServiceLock
 
 
 def _build_client(

@@ -1,0 +1,7 @@
+name: ledgermind
+version: "4.0.0a1"
+description: Local autonomous knowledge core integration for Hermes
+provides_hooks:
+  - pre_llm_call
+  - post_llm_call
+  - on_session_end

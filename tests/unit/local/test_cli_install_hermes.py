@@ -6,8 +6,8 @@ import json
 
 import yaml
 
-import cli
-from cli import main
+from ledgermind_local import cli
+from ledgermind_local.cli import main
 
 
 class _FakeClient:

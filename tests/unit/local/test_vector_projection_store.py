@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from projections import VectorProjectionStore
+from ledgermind_local.projections import VectorProjectionStore
 
 
 def _write_json(path: Path, payload: object) -> None:

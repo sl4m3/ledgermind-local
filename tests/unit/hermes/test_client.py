@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from plugins.hermes.client import (
+from ledgermind_local.plugins.hermes.client import (
     LedgerMindClient,
     LedgerMindConflictError,
     LedgerMindNetworkError,

@@ -3,9 +3,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from v3_migration.reader import read_legacy_storage
-from v3_migration.validator import validate_temp_database
-from v3_migration.writer import write_temp_migration
+from ledgermind_local.v3_migration.reader import read_legacy_storage
+from ledgermind_local.v3_migration.validator import validate_temp_database
+from ledgermind_local.v3_migration.writer import write_temp_migration
 
 
 def _make_markdown_source(tmp_path: Path, count: int = 200) -> Path:

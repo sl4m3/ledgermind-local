@@ -6,12 +6,12 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-from domain.events import KnowledgeCreated
 from fastapi.testclient import TestClient
+from ledgermind_core.domain.events import KnowledgeCreated
 
-from api.app import create_app
-from api.dependencies import Settings
-from persistence import (
+from ledgermind_local.api.app import create_app
+from ledgermind_local.api.dependencies import Settings
+from ledgermind_local.persistence import (
     Atom,
     Knowledge,
     KnowledgeEvidence,
@@ -21,7 +21,7 @@ from persistence import (
     migrations,
     open_sqlite_connection,
 )
-from projections import KnowledgeFTSProjection
+from ledgermind_local.projections import KnowledgeFTSProjection
 
 
 def _now() -> str:

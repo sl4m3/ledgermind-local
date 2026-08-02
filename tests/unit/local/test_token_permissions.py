@@ -3,7 +3,7 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
-from cli import _command_init
+from ledgermind_local.cli import _command_init
 
 
 def test_token_file_has_private_permissions_on_posix(tmp_path: Path) -> None:

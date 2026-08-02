@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from plugins.hermes.config import load_config
+from ledgermind_local.plugins.hermes.config import load_config
 
 
 def test_load_config_reads_required_fields(tmp_path: Path) -> None:

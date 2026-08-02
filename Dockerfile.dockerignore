@@ -1,0 +1,12 @@
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.venv
+**/.git
+legacy.tar.gz
+ledgermind-local/build
+ledgermind-local/dist
+ledgermind-local/*.egg-info
+ledgermind-core/build
+ledgermind-core/dist
+ledgermind-core/*.egg-info

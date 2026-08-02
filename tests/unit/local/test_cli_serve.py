@@ -8,16 +8,16 @@ from argparse import Namespace
 from pathlib import Path
 from typing import Self
 
-import cli as cli_module
-from bootstrap import initialize_local_layout
-from cli import (
+import ledgermind_local.cli as cli_module
+from ledgermind_local.bootstrap import initialize_local_layout
+from ledgermind_local.cli import (
     _coalesce_optional,
     _command_serve,
     _install_signal_handlers,
     _restore_signal_handlers,
 )
-from config import LocalConfig
-from service_lock import ServiceLockError
+from ledgermind_local.config import LocalConfig
+from ledgermind_local.service_lock import ServiceLockError
 
 
 def test_coalesce_optional_returns_fallback() -> None:

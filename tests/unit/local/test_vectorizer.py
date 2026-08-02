@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from projections import Vectorizer
+from ledgermind_local.projections import Vectorizer
 
 
 class _TestVectorizer:

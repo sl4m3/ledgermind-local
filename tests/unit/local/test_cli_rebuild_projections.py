@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import bootstrap
-import cli as cli_module
-from config import LocalConfig
-from persistence import (
+from ledgermind_local import bootstrap
+from ledgermind_local import cli as cli_module
+from ledgermind_local.config import LocalConfig
+from ledgermind_local.persistence import (
     Knowledge,
     SQLiteKnowledgeRepository,
     migrations,
     open_sqlite_connection,
 )
-from projections import VectorProjectionStore
+from ledgermind_local.projections import VectorProjectionStore
 
 
 def _seed_kb_with_known_state(database_path: Path) -> None:

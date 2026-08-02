@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cli import main
-from persistence import (
+from ledgermind_local.cli import main
+from ledgermind_local.persistence import (
     Atom,
     Knowledge,
     KnowledgeEvidence,

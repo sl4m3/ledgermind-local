@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-import bootstrap
-from cli import main
+from ledgermind_local import bootstrap
+from ledgermind_local.cli import main
 
 
 def _run_init(home: Path, *args: str) -> int:

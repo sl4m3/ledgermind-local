@@ -18,7 +18,7 @@ def _write_lock_runner_script(root: Path) -> Path:
             import time
             from pathlib import Path
 
-            from service_lock import ServiceLock, ServiceLockError
+            from ledgermind_local.service_lock import ServiceLock, ServiceLockError
 
             lock = Path(sys.argv[1])
             hold = float(sys.argv[2])
@@ -40,8 +40,8 @@ def _write_lock_runner_script(root: Path) -> Path:
 def _run_runner(script: Path, lock: Path, hold_seconds: float) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(script), str(lock), str(hold_seconds)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
+        check=False,
         text=True,
     )
 

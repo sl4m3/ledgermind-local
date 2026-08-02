@@ -5,13 +5,13 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-from application.ingest_atom import IngestAtomResult
-from application.mappers import IngestAtomCommand
-from domain import AtomContent, ExtractionInfo, Phase, SourceReference
-from domain.events import AtomCreated, KnowledgeCreated
+from ledgermind_core.application.ingest_atom import IngestAtomResult
+from ledgermind_core.application.mappers import IngestAtomCommand
+from ledgermind_core.domain import AtomContent, ExtractionInfo, Phase, SourceReference
+from ledgermind_core.domain.events import AtomCreated, KnowledgeCreated
 
-from bootstrap import build_ingest_atom_handler
-from persistence import SQLiteUnitOfWork, migrations
+from ledgermind_local.bootstrap import build_ingest_atom_handler
+from ledgermind_local.persistence import SQLiteUnitOfWork, migrations
 
 _MEMORY_SPACE_ID = "space-a"
 _IDEMPOTENCY_KEY = "sha256:" + "a" * 64
@@ -110,7 +110,7 @@ def test_ingest_with_sqlite_is_persistent_and_idempotent(tmp_path) -> None:
         assert knowledge.phase == Phase.PATTERN.value
         assert uow.evidence.count_for_knowledge(_MEMORY_SPACE_ID, first.knowledge_id) == 1
         assert len(uow.revisions.list_for_knowledge(_MEMORY_SPACE_ID, first.knowledge_id)) == 1
-        assert uow.idempotency.get(_IDEMPOTENCY_KEY) is not None
+        assert uow.idempotency.get(_MEMORY_SPACE_ID, _IDEMPOTENCY_KEY) is not None
 
         uow.commit()
 
@@ -147,7 +147,7 @@ def test_ingest_with_sqlite_rolls_back_when_outbox_write_fails(tmp_path, monkeyp
     def _broken_outbox_add(self, event):
         raise RuntimeError("outbox write failed")
 
-    monkeypatch.setattr("bootstrap._CoreOutboxEventRepository.add", _broken_outbox_add)
+    monkeypatch.setattr("ledgermind_local.bootstrap._CoreOutboxEventRepository.add", _broken_outbox_add)
 
     handler = build_ingest_atom_handler(database_path=db_path)
     with pytest.raises(RuntimeError, match="outbox write failed"):

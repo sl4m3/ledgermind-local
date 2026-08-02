@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from diagnostics.integrity import run_database_integrity_checks
-from persistence import (
+from ledgermind_local.diagnostics.integrity import run_database_integrity_checks
+from ledgermind_local.persistence import (
     Atom,
     Knowledge,
     KnowledgeEvidence,

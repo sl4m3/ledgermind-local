@@ -1,3 +1,3 @@
 [console_scripts]
-ledgermind = cli:main
-ledgermind-v4 = cli:main
+ledgermind = ledgermind_local.cli:main
+ledgermind-v4 = ledgermind_local.cli:main

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from plugins.hermes.state_db_reader import resolve_round_reference
+from ledgermind_local.plugins.hermes.state_db_reader import resolve_round_reference
 
 
 def _create_full_state_db(path: Path) -> None:

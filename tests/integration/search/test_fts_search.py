@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from domain.events import KnowledgeCreated
+from ledgermind_core.domain.events import KnowledgeCreated
 
-from persistence import migrations, open_sqlite_connection
-from projections import KnowledgeFTSProjection
-from search import SQLiteKnowledgeSearchAdapter
+from ledgermind_local.persistence import migrations, open_sqlite_connection
+from ledgermind_local.projections import KnowledgeFTSProjection
+from ledgermind_local.search import SQLiteKnowledgeSearchAdapter
 
 
 def _now() -> str:

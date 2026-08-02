@@ -24,20 +24,20 @@ dev = [
 ]
 
 [project.scripts]
-ledgermind = "cli:main"
-ledgermind-v4 = "cli:main"
+ledgermind = "ledgermind_local.cli:main"
+ledgermind-v4 = "ledgermind_local.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
-py-modules = ["bootstrap", "cli", "config", "paths", "service_lock"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["api", "diagnostics", "v3_migration", "persistence", "projections", "scheduler", "search"]
+include = ["ledgermind_local*"]
 
 [tool.setuptools.package-data]
-persistence = ["migrations/*.sql"]
+"ledgermind_local.persistence" = ["migrations/*.sql"]
+"ledgermind_local.plugins.hermes" = ["plugin.yaml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -45,8 +45,7 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.10"
 strict = true
 warn_unused_ignores = true
 ignore_missing_imports = true
-mypy_path = ["/home/stanislav/Проекты/ledgermind/ledgermind-core/src"]

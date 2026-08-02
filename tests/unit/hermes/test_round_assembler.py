@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 
-from plugins.hermes.round_assembler import assemble_round, compute_round_checksum
+from ledgermind_local.plugins.hermes.round_assembler import (
+    assemble_round,
+    compute_round_checksum,
+)
 
 
 def test_round_checksum_matches_full_serialized_messages() -> None:
@@ -27,7 +30,7 @@ def test_round_checksum_matches_full_serialized_messages() -> None:
     ]
 
     checksum = compute_round_checksum(messages)
-    expected = hashlib.sha256(
+    expected = "sha256:" + hashlib.sha256(
         json.dumps(
             messages,
             ensure_ascii=False,
@@ -91,4 +94,4 @@ def test_assemble_round_falls_back_to_last_assistant_without_exact_match() -> No
     assert result[1]["tool_calls"] == [{"id": "id", "name": "a", "arguments": "{}"}]
     assert result[2]["content"] == "повторный ответ"
     assert result[2]["tool_calls"] == []
-    assert len(compute_round_checksum(result)) == 64
+    assert len(compute_round_checksum(result)) == 71

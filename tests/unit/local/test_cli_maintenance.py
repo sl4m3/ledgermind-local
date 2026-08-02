@@ -8,8 +8,8 @@ import sqlite3
 import zipfile
 from pathlib import Path
 
-from cli import main
-from persistence import migrations, open_sqlite_connection
+from ledgermind_local.cli import main
+from ledgermind_local.persistence import migrations, open_sqlite_connection
 
 
 def test_rotate_token_updates_existing_token(tmp_path: Path) -> None:
@@ -28,7 +28,7 @@ def test_rotate_token_reports_error_when_service_layout_is_unavailable(
 ) -> None:
     home = tmp_path / "service"
 
-    import cli as cli_module
+    import ledgermind_local.cli as cli_module
 
     def _fail(_: object = None, **_kwargs: object) -> None:
         raise RuntimeError("simulated initialize failure")
