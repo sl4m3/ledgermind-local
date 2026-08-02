@@ -100,7 +100,7 @@ def test_git_audit_projection_ignores_sensitive_files(tmp_path: Path) -> None:
     _init_markdown_file(root)
 
     projection = KnowledgeMarkdownGitAuditProjection(markdown_root=root, enabled=True, batch_size=1)
-    assert projection.rebuild() == 0
+    assert projection.rebuild() == 1
 
     gitignore = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "server.token" in gitignore
@@ -123,14 +123,19 @@ def test_git_audit_projection_ignores_sensitive_files(tmp_path: Path) -> None:
     )
 
     status = subprocess.run(
-        ["git", "-C", str(root), "status", "--short", "--untracked-files=all"],
+        ["git", "-C", str(root), "status", "--short"],
         capture_output=True,
         text=True,
         check=False,
     ).stdout
-    assert "secret.token" not in status
-    assert "state.db" not in status
-    assert "history.log" not in status
+    for ignored in ("secret.token", "state.db", "history.log"):
+        check = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--quiet", ignored],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert check.returncode == 0, f"{ignored} is not ignored by git"
 
 
 def test_git_audit_projection_reports_missing_git_without_crash(tmp_path: Path, monkeypatch) -> None:

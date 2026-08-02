@@ -91,6 +91,55 @@ def _add_knowledge(
     )
 
 
+def _add_atom(
+    connection,
+    *,
+    memory_space_id: str,
+    atom_id: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO atoms (
+            atom_id, memory_space_id, source_system, source_instance_id,
+            source_profile_id, source_session_id, source_round_id,
+            source_round_key, source_digest, source_schema_version,
+            resolver_version, extraction_host, extraction_provider,
+            extraction_model, extraction_prompt_version,
+            extraction_schema_version, extraction_purpose,
+            title, target, statement, rationale, result, artifacts_json,
+            content_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            atom_id,
+            memory_space_id,
+            "hermes",
+            "instance-1",
+            "profile-1",
+            "session-1",
+            "round-1",
+            f"{memory_space_id}:round-1",
+            "sha256:" + "a" * 64,
+            1,
+            1,
+            "hermes",
+            "",
+            "",
+            1,
+            1,
+            "ledgermind.atom.extract",
+            "Title",
+            "target",
+            "statement",
+            "",
+            "",
+            "[]",
+            "sha256:" + "b" * 64,
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+
+
 def _add_evidence(
     connection,
     *,
@@ -198,6 +247,11 @@ def test_projection_includes_source_atoms_in_frontmatter(tmp_path) -> None:
         title="Knowledge with atoms",
         target="target",
         statement="statement",
+    )
+    _add_atom(
+        connection,
+        memory_space_id="space-a",
+        atom_id="a-origin",
     )
     _add_evidence(
         connection,

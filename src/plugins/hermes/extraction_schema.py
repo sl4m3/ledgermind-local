@@ -55,7 +55,7 @@ def validate_extraction_payload(payload: dict[str, Any]) -> bool:
     if not isinstance(payload.get("result"), str):
         return False
     artifacts = payload.get("artifacts")
-    if not isinstance(artifacts, list) or any(not isinstance(item, str) for item in artifacts):
+    if not isinstance(artifacts, (list, tuple)) or any(not isinstance(item, str) for item in artifacts):
         return False
 
     if payload["has_knowledge"]:
@@ -66,7 +66,7 @@ def validate_extraction_payload(payload: dict[str, Any]) -> bool:
         and payload["statement"] == ""
         and payload["rationale"] == ""
         and payload["result"] == ""
-        and not artifacts
+        and not payload["artifacts"]
     )
 
 

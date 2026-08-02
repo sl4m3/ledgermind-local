@@ -197,6 +197,9 @@ def _read_extraction_response(payload: Any) -> tuple[dict[str, Any], ExtractionC
     if not isinstance(parsed, Mapping):
         raise ValueError("extraction response has no parsed payload")
 
+    if set(parsed.keys()) - set(ATOM_EXTRACTION_SCHEMA_V1["properties"].keys()):
+        raise ValueError("extraction payload violates schema")
+
     normalized = {
         "has_knowledge": bool(parsed.get("has_knowledge")),
         "title": _sanitize_text(parsed.get("title", ""))[:240],

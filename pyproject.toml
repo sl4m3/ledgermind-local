@@ -25,6 +25,7 @@ dev = [
 
 [project.scripts]
 ledgermind = "cli:main"
+ledgermind-v4 = "cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -33,7 +34,7 @@ py-modules = ["bootstrap", "cli", "config", "paths", "service_lock"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["api", "diagnostics", "persistence", "projections", "scheduler", "search"]
+include = ["api", "diagnostics", "v3_migration", "persistence", "projections", "scheduler", "search"]
 
 [tool.setuptools.package-data]
 persistence = ["migrations/*.sql"]

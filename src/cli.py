@@ -309,7 +309,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "install",
         help="Install external integrations",
     )
-    install_hermes_parser = install_parser.add_parser("hermes", help="Install Hermes plugin")
+    install_subparsers = install_parser.add_subparsers(dest="install_command", required=True)
+    install_hermes_parser = install_subparsers.add_parser("hermes", help="Install Hermes plugin")
     install_hermes_parser.add_argument(
         "--profile",
         help="Hermes profile name (default: default)",
@@ -347,6 +348,62 @@ def _build_parser() -> argparse.ArgumentParser:
     rebuild_parser.set_defaults(func=_command_rebuild_projections)
 
     return parser
+
+
+def _command_migrate_v3(args: argparse.Namespace) -> int:
+    source = args.source.expanduser().resolve()
+    dry_run = bool(args.dry_run)
+    if not source.exists():
+        print(f"legacy source does not exist: {source}")
+        return 2
+
+    from v3_migration.reader import read_legacy_storage
+    from v3_migration.writer import write_temp_migration
+    from v3_migration.validator import validate_temp_database
+    from v3_migration.models import MigrationManifest
+
+    records = read_legacy_storage(source)
+    migration_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    manifest_path = source.parent / f"ledgermind-v4-migration-{migration_id}.json"
+
+    temp_path = source.parent / f"ledgermind-v4-migration-{migration_id}.db"
+    manifests, warnings = write_temp_migration(
+        records=records,
+        destination=temp_path,
+        migration_id=migration_id,
+        apply=not dry_run,
+    )
+
+    valid, validation_messages = validate_temp_database(temp_path)
+    status = "dry_run" if dry_run else "applied"
+    print(f"migration status={status} source={source}")
+    print(f"source records={len(records)}")
+    print(f"manifest records={len(manifests)}")
+    print(f"warnings={len(warnings) + len(validation_messages)}")
+    print(f"temp_database={temp_path}")
+    print(f"manifest={manifest_path}")
+
+    payload = [
+        {
+            "migration_id": item.migration_id,
+            "legacy_fid": item.legacy_fid,
+            "atom_id": item.atom_id,
+            "knowledge_id": item.knowledge_id,
+            "action": item.action,
+            "warnings": json.loads(item.warnings_json),
+        }
+        for item in manifests
+    ]
+    manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    if not valid:
+        for message in validation_messages:
+            print(f"validation_error={message}")
+        return 1
+    return 0
 
 
 def _command_init(args: argparse.Namespace) -> int:
@@ -393,7 +450,7 @@ def _command_install_hermes(args: argparse.Namespace) -> int:
         print(f"failed to prepare hermes profile directory: {exc}")
         return 1
 
-    plugin_source_dir = Path(__file__).resolve().parent / _HERMES_PLUGIN_DIR / _HERMES_PLUGIN_NAME
+    plugin_source_dir = Path(__file__).resolve().parent / _HERMES_PLUGIN_DIR / "hermes"
     plugin_destination = profile_home / _HERMES_PLUGIN_DIR / _HERMES_PLUGIN_NAME
     try:
         _copy_hermes_plugin_artifacts(
@@ -949,20 +1006,6 @@ def _command_backup_restore(args: argparse.Namespace) -> int:
 
     print(f"restore completed: {target_database}")
     return 0
-
-
-def _command_migrate_v3(args: argparse.Namespace) -> int:
-    source = Path(args.source).expanduser()
-    if not source.exists():
-        print(f"migrate-v3 source is missing: {source}")
-        return 1
-
-    if args.dry_run:
-        print(f"migrate-v3 dry-run completed for {source}")
-        return 0
-
-    print("migrate-v3 is not implemented in ledgermind-local yet")
-    return 2
 
 
 def _is_process_running(pid: int) -> bool:

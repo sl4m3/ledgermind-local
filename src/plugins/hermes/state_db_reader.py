@@ -111,7 +111,7 @@ def _connect_state_db(path: str | Path) -> sqlite3.Connection:
 
 def _message_body(row: sqlite3.Row, columns: set[str]) -> str:
     if "api_content" in columns:
-        api_content = row.get("api_content")
+        api_content = row["api_content"]
         if _to_str(api_content) is not None:
             return str(api_content)
     return str(row["content"] or "")

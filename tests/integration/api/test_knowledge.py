@@ -121,7 +121,7 @@ def test_get_atom_isolation_requires_space(tmp_path) -> None:
     payload = _create_atom(database, memory_space_id="space-a")
 
     response = _build_client(database_path=database).get(
-        f"/v1/atoms/{payload['atom_id']}",
+        f"/v1/atoms/space-b/{payload['atom_id']}",
         headers={"Authorization": "Bearer test-token"},
     )
 

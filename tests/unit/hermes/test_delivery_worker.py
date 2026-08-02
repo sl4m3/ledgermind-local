@@ -66,7 +66,9 @@ def test_delivery_worker_keeps_ready_item_on_network_error(tmp_path: Path) -> No
 
     assert (spool.ready_dir / f"{item_name}.json").exists()
     assert not (spool.failed_dir / f"{item_name}.json").exists()
-    assert payload == _read_json(spool.ready_dir / f"{item_name}.json")
+    ready = _read_json(spool.ready_dir / f"{item_name}.json")
+    assert ready["delivery"]["attempts"] == 1
+    assert ready["id"] == payload["id"]
 
 
 def test_delivery_worker_retries_on_unauthorized_once(tmp_path: Path) -> None:

@@ -1,21 +1,15 @@
 # ledgermind-local
 
-Scaffold for the local LedgerMind service (v4 architecture).
+Локальная служба LedgerMind 4.0: SQLite как источник истины, HTTP API, Hermes plugin, проекции.
 
-Current stage: `4.4` — expose isolated atom and knowledge reads.
-
-## Быстрый старт
-
+## Локальная разработка
 ```bash
-python -m pip install -e .[dev]
-ledgermind --home ~/.ledgermind/local init
-ledgermind --home ~/.ledgermind/local status
+pip install -e ../ledgermind-core
+pip install -e .[dev]
+pytest -q
 ```
 
-```python
-from bootstrap import bootstrap_local_service
-
-paths, config = bootstrap_local_service(home="~/.ledgermind/local")
-print(paths.home)
-print(config.config_version)
-```
+## Переход с v3
+- Временная команда: `ledgermind-v4`
+- Миграция: `ledgermind-v4 migrate-v3 --source <старый storage_path> --dry-run`
+- Документация: `docs/migration-v3.md`

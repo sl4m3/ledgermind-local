@@ -13,6 +13,7 @@ src/api/context.py
 src/api/dependencies.py
 src/api/errors.py
 src/api/health.py
+src/api/http.py
 src/api/knowledge.py
 src/diagnostics/__init__.py
 src/diagnostics/health.py
@@ -41,6 +42,7 @@ src/projections/__init__.py
 src/projections/dispatcher.py
 src/projections/fts.py
 src/projections/gguf_vectorizer.py
+src/projections/git_audit.py
 src/projections/markdown.py
 src/projections/vector.py
 src/projections/vector_store.py
@@ -50,3 +52,9 @@ src/scheduler/outbox_worker.py
 src/search/__init__.py
 src/search/fts.py
 src/search/hybrid.py
+src/v3_migration/__init__.py
+src/v3_migration/mapper.py
+src/v3_migration/models.py
+src/v3_migration/reader.py
+src/v3_migration/validator.py
+src/v3_migration/writer.py

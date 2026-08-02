@@ -9,3 +9,4 @@ projections
 scheduler
 search
 service_lock
+v3_migration

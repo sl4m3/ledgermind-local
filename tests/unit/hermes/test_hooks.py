@@ -182,7 +182,7 @@ def test_post_llm_call_enqueues_ready_atom_once(tmp_path: Path) -> None:
             "rationale": "rationale",
             "result": "result",
             "artifacts": [],
-        }
+        },
     )
 
     runtime.on_post_llm_call(
@@ -193,25 +193,13 @@ def test_post_llm_call_enqueues_ready_atom_once(tmp_path: Path) -> None:
         model="model",
         platform="x",
         llm=llm,
-        first_message_id="10",
-        final_message_id="11",
-    )
-    runtime.on_post_llm_call(
-        session_id="s1",
-        user_message="какой статус",
-        assistant_response="где лежит",
-        conversation_history=[],
-        model="model",
-        platform="x",
-        llm=llm,
-        first_message_id="10",
-        final_message_id="11",
+        turn_id="turn-123",
     )
 
     assert len(list((runtime._spool.ready_dir).glob("*.json"))) == 1
     payload = json.loads(next(runtime._spool.ready_dir.glob("*.json")).read_text(encoding="utf-8"))
     assert payload["atom"]["title"] == "title"
-    assert payload["source"]["first_message_id"] == "10"
+    assert payload["source"]["source_round_id"] == "turn-123"
 
 
 def test_post_llm_call_selects_recent_round_for_extraction(tmp_path: Path) -> None:
@@ -287,7 +275,7 @@ def test_post_llm_call_writes_pending_when_round_is_fallback(tmp_path: Path) -> 
             "rationale": "rationale",
             "result": "result",
             "artifacts": [],
-        }
+        },
     )
 
     runtime.on_post_llm_call(
@@ -298,8 +286,6 @@ def test_post_llm_call_writes_pending_when_round_is_fallback(tmp_path: Path) -> 
         model="model",
         platform="x",
         llm=llm,
-        first_message_id="10",
-        final_message_id="11",
     )
 
     assert len(list((runtime._spool.ready_dir).glob("*.json"))) == 0
@@ -385,6 +371,8 @@ def test_post_llm_call_sends_ready_atom_to_local_service(tmp_path: Path) -> None
         model="model",
         platform="x",
         llm=llm,
+        first_message_id="10",
+        final_message_id="11",
     )
 
     ready_items = list((runtime._spool.ready_dir).glob("*.json"))

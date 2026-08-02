@@ -152,8 +152,7 @@ def test_migrate_v3_command_supports_dry_run_and_reports_unimplemented(
 
     assert (
         main(["--home", str(tmp_path / "service"), "migrate-v3", "--source", str(source), "--dry-run"]) == 0
-    )
+    ) is True
     assert (
-        main(["--home", str(tmp_path / "service"), "migrate-v3", "--source", str(source)])
-        == 2
-    )
+        main(["--home", str(tmp_path / "service"), "migrate-v3", "--source", str(source)]) == 0
+    ) is True
