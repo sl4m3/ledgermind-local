@@ -2,28 +2,34 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import os
 import secrets
-from datetime import datetime, timezone
+import sqlite3
 import tempfile
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from types import TracebackType
+from typing import Any, cast
 
 from application.digests import calculate_source_round_key
-from application.ingest_atom import IngestAtomHandler, JsonIngestAtomResultSerializer
 from application.get_atom import GetAtomHandler
 from application.get_knowledge import GetKnowledgeHandler
+from application.ingest_atom import IngestAtomHandler, JsonIngestAtomResultSerializer
 from application.retrieve_context import RetrieveContextHandler
 from domain import (
     Atom,
     AtomContent,
+    AtomId,
     ExtractionInfo,
     KnowledgeEvidence,
+    KnowledgeId,
     KnowledgeItem,
     KnowledgeRevision,
+    RevisionId,
     SourceReference,
 )
 from domain.policies import IsolatedPatternPolicy
@@ -43,30 +49,42 @@ from ports.repository_ports import (
     RevisionRepository,
     StoredIdempotencyResult,
 )
+
+from config import LocalConfig
+from paths import ServicePaths
 from persistence import (
     Atom as SqliteAtom,
+)
+from persistence import (
     Knowledge as SqliteKnowledge,
+)
+from persistence import (
     KnowledgeEvidence as SqliteKnowledgeEvidence,
+)
+from persistence import (
     KnowledgeRevision as SqliteKnowledgeRevision,
+)
+from persistence import (
     OutboxEvent as SqliteOutboxEvent,
-    open_sqlite_connection,
+)
+from persistence import (
+    SQLiteAtomRepository,
+    SQLiteEvidenceRepository,
     SQLiteIdempotencyRepository,
     SQLiteKnowledgeRepository,
     SQLiteMemorySpaceRepository,
     SQLiteOutboxRepository,
-    SQLiteAtomRepository,
-    SQLiteEvidenceRepository,
     SQLiteRevisionRepository,
     SQLiteUnitOfWork,
+    open_sqlite_connection,
+)
+from persistence import (
     StoredIdempotencyResult as SqliteStoredIdempotencyResult,
 )
 from search import (
     HybridKnowledgeSearchAdapter,
     SQLiteKnowledgeSearchAdapter,
 )
-from config import LocalConfig
-from paths import ServicePaths
-
 
 DEFAULT_PROJECTIONS: tuple[str, ...] = (
     "projections.search",
@@ -103,7 +121,7 @@ def _build_uow_factory(
     return _factory
 
 def _build_search_adapter(
-    connection,
+    connection: sqlite3.Connection,
     database_path: str | Path,
 ) -> KnowledgeSearch:
     vector_store_root = _build_vector_store_root(database_path)
@@ -125,7 +143,7 @@ def _build_markdown_root(database_path: str | Path) -> Path:
     return Path(database_path).with_suffix(".markdown")
 
 
-def _build_vectorizer_factory() -> Callable[[], object] | None:
+def _build_vectorizer_factory() -> Callable[[], Any] | None:
     model_path = os.environ.get("LEDGERMIND_VECTOR_MODEL_PATH")
     if not model_path:
         return None
@@ -194,7 +212,7 @@ class GetKnowledgeEvidenceQuery:
 class KnowledgeEvidenceItem:
     atom_id: str
     relation: str
-    created_at: str
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,12 +381,12 @@ def _to_sqlite_revision(item: KnowledgeRevision) -> SqliteKnowledgeRevision:
 
 def _from_sqlite_revision(row: SqliteKnowledgeRevision) -> KnowledgeRevision:
     return KnowledgeRevision.from_snapshot(
-        revision_id=row.revision_id,
-        knowledge_id=row.knowledge_id,
+        revision_id=RevisionId(row.revision_id),
+        knowledge_id=KnowledgeId(row.knowledge_id),
         version=row.version,
         event_type=row.event_type,
         snapshot=json.loads(row.snapshot_json),
-        cause_atom_id=row.cause_atom_id,
+        cause_atom_id=AtomId(row.cause_atom_id) if row.cause_atom_id is not None else None,
         created_at=_parse_timestamp(row.created_at),
     )
 
@@ -508,7 +526,7 @@ class _CoreEvidenceRepository(EvidenceRepository):
         memory_space_id: str,
         knowledge_id: str,
     ) -> list[KnowledgeEvidence]:
-        return self._delegate.list_for_knowledge(memory_space_id, knowledge_id)
+        return cast(list[KnowledgeEvidence], self._delegate.list_for_knowledge(memory_space_id, knowledge_id))
 
 
 class _CoreRevisionRepository(RevisionRepository):
@@ -641,6 +659,13 @@ class _CoreOutboxEventRepository(EventRepository):
         row = _to_sqlite_outbox_event(event)
         self._delegate.add(row, projection_names=self._projection_names)
 
+    def committed(self) -> tuple[DomainEvent, ...]:
+        return ()
+
+    @property
+    def stored_events(self) -> tuple[DomainEvent, ...]:
+        return ()
+
 
 class _SQLiteCoreUnitOfWork(UnitOfWork):
     """Core UnitOfWork adapter around :class:`persistence.SQLiteUnitOfWork`."""
@@ -668,7 +693,7 @@ class _SQLiteCoreUnitOfWork(UnitOfWork):
         self._events: _CoreOutboxEventRepository | None = None
         self._search: KnowledgeSearch | None = None
 
-    def __enter__(self) -> "_SQLiteCoreUnitOfWork":
+    def __enter__(self) -> _SQLiteCoreUnitOfWork:  # noqa: PYI034
         if self._uow is not None:
             return self
 
@@ -700,7 +725,12 @@ class _SQLiteCoreUnitOfWork(UnitOfWork):
         )
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         if self._uow is not None:
             self._uow.__exit__(exc_type, exc, tb)
         self._reset_state()
@@ -721,11 +751,19 @@ class _SQLiteCoreUnitOfWork(UnitOfWork):
             raise RuntimeError("unit of work is not active")
         return self._atoms
 
+    @atoms.setter
+    def atoms(self, value: _CoreAtomRepository) -> None:
+        self._atoms = value
+
     @property
     def knowledge(self) -> _CoreKnowledgeRepository:
         if self._knowledge is None:
             raise RuntimeError("unit of work is not active")
         return self._knowledge
+
+    @knowledge.setter
+    def knowledge(self, value: _CoreKnowledgeRepository) -> None:
+        self._knowledge = value
 
     @property
     def evidence(self) -> _CoreEvidenceRepository:
@@ -733,11 +771,19 @@ class _SQLiteCoreUnitOfWork(UnitOfWork):
             raise RuntimeError("unit of work is not active")
         return self._evidence
 
+    @evidence.setter
+    def evidence(self, value: _CoreEvidenceRepository) -> None:
+        self._evidence = value
+
     @property
     def revisions(self) -> _CoreRevisionRepository:
         if self._revisions is None:
             raise RuntimeError("unit of work is not active")
         return self._revisions
+
+    @revisions.setter
+    def revisions(self, value: _CoreRevisionRepository) -> None:
+        self._revisions = value
 
     @property
     def idempotency(self) -> _CoreIdempotencyRepository:
@@ -745,11 +791,19 @@ class _SQLiteCoreUnitOfWork(UnitOfWork):
             raise RuntimeError("unit of work is not active")
         return self._idempotency
 
+    @idempotency.setter
+    def idempotency(self, value: _CoreIdempotencyRepository) -> None:
+        self._idempotency = value
+
     @property
     def events(self) -> _CoreOutboxEventRepository:
         if self._events is None:
             raise RuntimeError("unit of work is not active")
         return self._events
+
+    @events.setter
+    def events(self, value: _CoreOutboxEventRepository) -> None:
+        self._events = value
 
     @property
     def search(self) -> KnowledgeSearch:
@@ -757,13 +811,25 @@ class _SQLiteCoreUnitOfWork(UnitOfWork):
             raise RuntimeError("unit of work is not active")
         return self._search
 
+    @search.setter
+    def search(self, value: KnowledgeSearch) -> None:
+        self._search = value
+
     @property
     def clock(self) -> Clock:
         return self._clock
 
+    @clock.setter
+    def clock(self, value: Clock) -> None:
+        self._clock = value
+
     @property
     def identifiers(self) -> IdentifierFactory:
         return self._identifiers
+
+    @identifiers.setter
+    def identifiers(self, value: IdentifierFactory) -> None:
+        self._identifiers = value
 
     def commit(self) -> None:
         if self._uow is None:

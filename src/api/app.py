@@ -5,25 +5,26 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
+
 from bootstrap import (
     build_get_atom_handler,
-    build_get_knowledge_handler,
-    build_ingest_atom_handler,
-    build_get_knowledge_history_handler,
     build_get_knowledge_evidence_handler,
+    build_get_knowledge_handler,
+    build_get_knowledge_history_handler,
+    build_ingest_atom_handler,
     build_retrieve_context_handler,
 )
 
+from .atoms import create_atoms_router
 from .auth import (
     build_bearer_token_dependency,
     build_optional_bearer_token_dependency,
 )
-from .atoms import create_atoms_router
-from .health import create_health_router
 from .context import create_context_router
-from .knowledge import create_knowledge_router
 from .dependencies import Application, Settings
 from .errors import AuthenticationError, authentication_error_handler
+from .health import create_health_router
+from .knowledge import create_knowledge_router
 
 
 def _normalize_database_path(database_path: str | Path) -> Path:
@@ -89,7 +90,7 @@ def create_app(
 
     require_token = build_bearer_token_dependency(settings=settings)
     maybe_token = build_optional_bearer_token_dependency(settings=settings)
-    app.add_exception_handler(AuthenticationError, authentication_error_handler)
+    app.add_exception_handler(AuthenticationError, authentication_error_handler)  # type: ignore[arg-type]
 
     @app.get("/v1/ping")
     def ping(_token: str = Depends(require_token)) -> dict[str, str]:

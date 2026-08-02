@@ -8,6 +8,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+
 def _write_lock_runner_script(root: Path) -> Path:
     script = root / "lock_runner.py"
     script.write_text(

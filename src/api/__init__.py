@@ -3,4 +3,4 @@
 from .app import create_app
 from .dependencies import Settings
 
-__all__ = ["create_app", "Settings"]
+__all__ = ["Settings", "create_app"]

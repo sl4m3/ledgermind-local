@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import timezone
 from pathlib import Path
-from typing import Any
 
 from v3_migration.models import LegacyRecord, MigrationManifest
-from v3_migration.reader import read_legacy_storage
-from v3_migration.validator import validate_temp_database
 
 
 def _open_temp_database(path: Path) -> sqlite3.Connection:
@@ -101,7 +98,9 @@ def write_temp_migration(
         for record in records:
             mapped = {}
             try:
-                from v3_migration.mapper import map_record  # local import to avoid cycles
+                from v3_migration.mapper import (
+                    map_record,  # local import to avoid cycles
+                )
                 mapped = map_record(record)
             except Exception as exc:  # pragma: no cover - defensive guard
                 warnings.append(f"map_failed:{record.fid}:{exc}")

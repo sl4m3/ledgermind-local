@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 
 from domain.events import KnowledgeCreated
+
 from persistence import migrations, open_sqlite_connection
 from projections import KnowledgeFTSProjection
 from search import SQLiteKnowledgeSearchAdapter

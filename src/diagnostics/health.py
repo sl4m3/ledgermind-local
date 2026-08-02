@@ -10,8 +10,8 @@ from typing import Any
 
 from persistence import open_sqlite_connection
 from persistence.migrations import (
-    apply_migrations,
     MigrationError,
+    apply_migrations,
 )
 
 _DATABASE_ERROR = "database unavailable"
@@ -62,7 +62,7 @@ def _read_lock_payload(lock_path: Path) -> dict[str, Any]:
     raw = lock_path.read_text(encoding="utf-8")
     payload = json.loads(raw)
     if not isinstance(payload, dict):
-        raise ValueError("service lock payload must be an object")
+        raise TypeError("service lock payload must be an object")
     return payload
 
 
@@ -76,7 +76,7 @@ def _check_service_lock(service_lock_path: Path | None) -> tuple[bool, str]:
     try:
         payload = _read_lock_payload(service_lock_path)
         owner_pid = int(payload.get("pid", 0))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return False, f"service lock payload invalid: {exc}"
 
     if not _is_process_running(owner_pid):

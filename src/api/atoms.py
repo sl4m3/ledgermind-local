@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import ValidationError
-
-from application import IdempotencyConflict, UnsupportedEvolutionDecision
+from application import (
+    IdempotencyConflict,
+    UnsupportedEvolutionDecision,
+    calculate_request_hash,
+)
 from application.mappers import IngestAtomCommand
-from application import calculate_request_hash
 from contracts import IngestAtomRequest, IngestAtomResult
 from domain import AtomContent, ExtractionInfo, SourceReference
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import ValidationError
 
 from .dependencies import Settings
 from .http import build_request_id, error_payload, validate_json_request
@@ -70,7 +73,7 @@ def _build_command(payload: IngestAtomRequest) -> IngestAtomCommand:
 
 
 def create_atoms_router(
-    require_token,
+    require_token: Callable[..., str],
     ingest_handler: Any,
     *,
     settings: Settings | None = None,

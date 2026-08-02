@@ -8,8 +8,8 @@ import sqlite3
 import zipfile
 from pathlib import Path
 
-from persistence import migrations, open_sqlite_connection
 from cli import main
+from persistence import migrations, open_sqlite_connection
 
 
 def test_rotate_token_updates_existing_token(tmp_path: Path) -> None:
@@ -129,7 +129,6 @@ def test_backup_restore_fails_when_service_is_running(tmp_path: Path) -> None:
     home = tmp_path / "service"
     assert main(["--home", str(home), "init"]) == 0
 
-    database = home / "ledgermind.db"
     backup = home / "snapshot.zip"
     assert main(["--home", str(home), "backup", "create", "--destination", str(backup)]) == 0
 

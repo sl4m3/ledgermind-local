@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from copy import deepcopy
 from typing import Any
 
-from v3_migration.models import ConsistencyCategory, LegacyRecord
-
+from v3_migration.models import LegacyRecord
 
 _PHASE_MAP = {
     "pattern": "PATTERN",
@@ -141,7 +139,7 @@ def map_record(record: LegacyRecord) -> dict[str, Any]:
 
     old_fid = record.fid
     legacy_source_hash = hashlib.sha256(
-        f"{record.raw_markdown or ''}\n{record.metadata_row or {}}".encode("utf-8")
+        f"{record.raw_markdown or ''}\n{record.metadata_row or {}}".encode()
     ).hexdigest()
 
     memory_space_id = "legacy:{}:{}".format(
@@ -149,7 +147,7 @@ def map_record(record: LegacyRecord) -> dict[str, Any]:
         _normalize_space(metadata.get("namespace") or metadata.get("profile") or "default"),
     )
 
-    artifacts = []
+    artifacts: list[str] = []
     for key in ("artifacts", "attachments", "files"):
         value = frontmatter.get(key) or metadata.get(key)
         if not value:
@@ -159,7 +157,7 @@ def map_record(record: LegacyRecord) -> dict[str, Any]:
         else:
             artifacts.extend(str(value).splitlines())
 
-    supersedes = []
+    supersedes: list[str] = []
     for key in ("supersedes", "superseded"):
         value = frontmatter.get(key) or metadata.get(key)
         if not value:

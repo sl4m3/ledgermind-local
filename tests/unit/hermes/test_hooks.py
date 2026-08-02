@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from pathlib import Path
-import json
 
-from plugins.hermes.config import PluginConfig
+from plugins.hermes import hooks as hook_runtime
 from plugins.hermes.client import LedgerMindClientError
+from plugins.hermes.config import PluginConfig
 from plugins.hermes.delivery_worker import DeliveryWorker
 from plugins.hermes.hooks import _EXTRACTION_GUARD, PluginRuntime
-from plugins.hermes import hooks as hook_runtime
 from plugins.hermes.spool import FileSpool
 
 

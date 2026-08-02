@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -70,7 +71,7 @@ class LocalConfig(BaseModel):
 
     @field_validator("allow_remote_bind", mode="after")
     @classmethod
-    def _validate_remote_bind(cls, value: bool, info):
+    def _validate_remote_bind(cls, value: bool, info: Any) -> bool:
         # pylint: disable=unused-argument
         if not value and info.data.get("bind_host") not in {
             "127.0.0.1",
@@ -81,7 +82,7 @@ class LocalConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _sync_markdown_audit_flag(self) -> "LocalConfig":
+    def _sync_markdown_audit_flag(self) -> LocalConfig:
         if (
             self.markdown_projection.enabled
             or self.markdown_audit_enabled
@@ -98,15 +99,15 @@ class LocalConfig(BaseModel):
         return self
 
     @classmethod
-    def from_json(cls, payload: str) -> "LocalConfig":
+    def from_json(cls, payload: str) -> LocalConfig:
         return cls.model_validate_json(payload)
 
     @classmethod
-    def from_file(cls, path: Path) -> "LocalConfig":
+    def from_file(cls, path: Path) -> LocalConfig:
         return cls.model_validate_json(path.read_text(encoding="utf-8"))
 
     @classmethod
-    def from_dict(cls, payload: object) -> "LocalConfig":
+    def from_dict(cls, payload: object) -> LocalConfig:
         return cls.model_validate(payload)
 
     def to_json(self) -> str:

@@ -7,7 +7,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-
 _ROUND_LIMIT_TEXT = 4_000
 
 

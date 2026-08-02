@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from v3_migration.mapper import map_record
 from v3_migration.models import LegacyRecord
 

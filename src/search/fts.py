@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Iterable
+from collections.abc import Iterable
 
 from ports import KnowledgeSearch, SearchHit
+
 from projections.fts import KnowledgeFTSProjection
 
 __all__ = [
@@ -129,7 +130,6 @@ class _BaseSearchAdapter(KnowledgeSearch):
 class RawSQLiteKnowledgeSearchAdapter(_BaseSearchAdapter):
     """Search adapter that exposes raw projection ranking."""
 
-    pass
 
 
 class SQLiteKnowledgeSearchAdapter(_BaseSearchAdapter):

@@ -69,11 +69,10 @@ def test_uow_commit_is_required_and_commit_twice_is_forbidden(tmp_path: Path) ->
 def test_uow_rollback_on_exception(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
 
-    with pytest.raises(RuntimeError):
-        with SQLiteUnitOfWork(db_path) as uow:
-            uow.connection.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, v TEXT)")
-            uow.connection.execute("INSERT INTO sample (v) VALUES ('a')")
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), SQLiteUnitOfWork(db_path) as uow:
+        uow.connection.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, v TEXT)")
+        uow.connection.execute("INSERT INTO sample (v) VALUES ('a')")
+        raise RuntimeError("boom")
 
     import sqlite3
 

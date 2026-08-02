@@ -7,8 +7,8 @@ import sqlite3
 import pytest
 
 from persistence import (
-    Knowledge,
     Atom,
+    Knowledge,
     KnowledgeEvidence,
     KnowledgeRevision,
     SQLiteUnitOfWork,

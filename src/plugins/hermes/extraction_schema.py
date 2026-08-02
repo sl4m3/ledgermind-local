@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 ATOM_EXTRACTION_SCHEMA_V1: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,

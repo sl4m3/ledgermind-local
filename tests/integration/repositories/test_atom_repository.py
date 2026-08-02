@@ -6,9 +6,13 @@ import sqlite3
 
 import pytest
 
-from persistence import migrations
-from persistence import Atom, SQLiteAtomRepository, SQLiteUnitOfWork
-from persistence import open_sqlite_connection
+from persistence import (
+    Atom,
+    SQLiteAtomRepository,
+    SQLiteUnitOfWork,
+    migrations,
+    open_sqlite_connection,
+)
 
 
 def _build_connection(path) -> sqlite3.Connection:

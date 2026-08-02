@@ -5,7 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from cli import main
-from persistence import Knowledge, KnowledgeEvidence, Atom, KnowledgeRevision, SQLiteUnitOfWork, migrations
+from persistence import (
+    Atom,
+    Knowledge,
+    KnowledgeEvidence,
+    KnowledgeRevision,
+    SQLiteUnitOfWork,
+    migrations,
+)
 
 
 def _make_atom(atom_id: str, memory_space_id: str) -> Atom:

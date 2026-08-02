@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from uuid import uuid4
-
 
 _STATE_FILE = "state.json"
 
@@ -75,7 +75,7 @@ class FileSpool:
         if not session_id:
             return None
         try:
-            return self._read_state()["last_completed_message_id_by_session"].get(session_id)
+            return self._read_state()["last_completed_message_id_by_session"].get(session_id)  # type: ignore[no-any-return]
         except (OSError, json.JSONDecodeError, SpoolStateError):
             return None
 
@@ -113,14 +113,14 @@ class FileSpool:
     def _normalize_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise TypeError("payload must be a mapping")
-        return json.loads(json.dumps(payload, ensure_ascii=False))
+        return json.loads(json.dumps(payload, ensure_ascii=False))  # type: ignore[no-any-return]
 
     def _is_same_payload(self, path: Path, payload: Mapping[str, Any]) -> bool:
         if not path.exists():
             return False
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
-            return existing == payload
+            return existing == payload  # type: ignore[no-any-return]
         except (json.JSONDecodeError, OSError):
             return False
 

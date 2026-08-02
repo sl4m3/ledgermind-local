@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from .client import (
     LedgerMindConflictError,
@@ -99,15 +100,15 @@ class DeliveryWorker:
         except LedgerMindConflictError as exc:
             self._spool.mark_failed(item_name, reason=f"idempotency_conflict:{exc}")
             return
-        except LedgerMindUnauthorizedError as exc:
+        except LedgerMindUnauthorizedError:
             self._spool.mark_retry(item_name, payload)
             return
-        except (LedgerMindNetworkError,):
+        except LedgerMindNetworkError:
             self._spool.mark_retry(item_name, payload)
             return
         except LedgerMindResponseError as exc:
             self._spool.mark_failed(item_name, reason=f"invalid_payload:{exc}")
             return
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # noqa: BLE001
             self._spool.mark_failed(item_name, reason=f"delivery_error:{exc}")
             return

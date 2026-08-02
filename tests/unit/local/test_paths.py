@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-import os
 import pytest
 
-from paths import ServicePaths
 from bootstrap import bootstrap_local_service
 from config import LocalConfig
+from paths import ServicePaths
 
 
 def test_default_home_uses_explicit_constant() -> None:

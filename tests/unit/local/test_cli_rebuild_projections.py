@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from persistence import Knowledge, SQLiteKnowledgeRepository, migrations, open_sqlite_connection
 import bootstrap
 import cli as cli_module
-from projections import VectorProjectionStore
 from config import LocalConfig
+from persistence import (
+    Knowledge,
+    SQLiteKnowledgeRepository,
+    migrations,
+    open_sqlite_connection,
+)
+from projections import VectorProjectionStore
 
 
 def _seed_kb_with_known_state(database_path: Path) -> None:
@@ -162,7 +167,6 @@ def test_command_rebuild_projections_runs_markdown_audit_when_enabled(tmp_path: 
 
         def close(self) -> None:
             calls["close"] = 1
-            return None
 
     monkeypatch.setattr(cli_module, "KnowledgeMarkdownGitAuditProjection", _FakeMarkdownAuditProjection)
 

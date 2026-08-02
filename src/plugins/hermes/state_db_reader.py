@@ -7,7 +7,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,7 +476,10 @@ def _to_string_list(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
     if isinstance(value, str):
-        return (_to_str(value),) if _to_str(value) else ()
+        converted = _to_str(value)
+        if converted is None:
+            return ()
+        return (converted,)
     if not isinstance(value, (list, tuple, set)):
         return ()
     return tuple(
@@ -523,6 +526,7 @@ def resolve_round_reference(
         )
 
     if state_db_path is not None and _to_str(session_id):
+        resolved_session_id = cast(str, session_id)
         try:
             db_path = Path(state_db_path).expanduser()
             columns = _read_state_db_message_columns(db_path)
@@ -531,7 +535,7 @@ def resolve_round_reference(
                 candidate = _resolve_with_checkpoint(
                     connection=connection,
                     columns=columns,
-                    session_id=session_id,
+                    session_id=resolved_session_id,
                     user_message=user_message,
                     assistant_response=assistant_response,
                     checkpoint_message_id=last_completed_message_id,
@@ -545,7 +549,7 @@ def resolve_round_reference(
                 candidate = _resolve_recent_search(
                     connection=connection,
                     columns=columns,
-                    session_id=session_id,
+                    session_id=resolved_session_id,
                     user_message=user_message,
                     assistant_response=assistant_response,
                     explicit_round_id=preferred_round_id,

@@ -5,16 +5,13 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-
 from application.ingest_atom import IngestAtomResult
 from application.mappers import IngestAtomCommand
-from domain import AtomContent, ExtractionInfo, SourceReference
+from domain import AtomContent, ExtractionInfo, Phase, SourceReference
 from domain.events import AtomCreated, KnowledgeCreated
-from domain import Phase
-from bootstrap import build_ingest_atom_handler
-from persistence import SQLiteUnitOfWork
-from persistence import migrations
 
+from bootstrap import build_ingest_atom_handler
+from persistence import SQLiteUnitOfWork, migrations
 
 _MEMORY_SPACE_ID = "space-a"
 _IDEMPOTENCY_KEY = "sha256:" + "a" * 64
@@ -147,7 +144,7 @@ def test_ingest_with_sqlite_rolls_back_when_outbox_write_fails(tmp_path, monkeyp
     _bootstrap_database(db_path)
     command = _build_command()
 
-    def _broken_outbox_add(self, event):  # noqa: ARG001
+    def _broken_outbox_add(self, event):
         raise RuntimeError("outbox write failed")
 
     monkeypatch.setattr("bootstrap._CoreOutboxEventRepository.add", _broken_outbox_add)

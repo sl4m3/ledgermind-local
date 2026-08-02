@@ -12,8 +12,8 @@ from diagnostics.health import run_readiness_checks
 
 
 def create_health_router(
-    require_token,
-    maybe_token,
+    require_token: object,
+    maybe_token: object,
     *,
     database_path: Path,
     service_lock_path: Path | None,
@@ -23,7 +23,7 @@ def create_health_router(
 
     @router.get("/v1/health/live")
     @router.get("/health/live")
-    def health_live(details: bool = Depends(maybe_token)) -> dict[str, str | bool]:
+    def health_live(details: bool = Depends(maybe_token)) -> dict[str, str | bool]:  # type: ignore[arg-type]
         payload: dict[str, str | bool] = {"status": "ok"}
         if details:
             payload["healthy"] = True
@@ -31,7 +31,7 @@ def create_health_router(
         return payload
 
     @router.get("/v1/health/ready", response_model=None)
-    def health_ready(_token: str = Depends(require_token)) -> dict[str, object]:
+    def health_ready(_token: str = Depends(require_token)) -> object:  # type: ignore[arg-type]
         del _token
         report = run_readiness_checks(
             database_path=database_path,
@@ -48,7 +48,7 @@ def create_health_router(
 
     @router.get("/v1/health/details")
     @router.get("/health/details")
-    def health_details(_token: str = Depends(require_token)) -> dict[str, object]:
+    def health_details(_token: str = Depends(require_token)) -> object:  # type: ignore[arg-type]
         del _token
         report = run_readiness_checks(
             database_path=database_path,

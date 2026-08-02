@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-
 from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
+
 from persistence import (
     Knowledge,
     SQLiteKnowledgeRepository,

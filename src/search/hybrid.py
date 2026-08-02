@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from ports import KnowledgeSearch, SearchHit
+
 from projections import GGUFVectorizer, VectorProjectionStore
 from projections.vectorizer import Vectorizer
-
 from search.fts import SQLiteKnowledgeSearchAdapter
 
 __all__ = [

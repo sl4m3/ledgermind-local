@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import threading
+from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any
 
 from persistence import SQLiteUnitOfWork
+from projections import _ProjectionHandler
 from projections.dispatcher import ProjectionDispatcher
-
 
 _RETRY_DELAYS_SECONDS = (1, 5, 30, 300, 1800)
 
@@ -36,13 +37,13 @@ class OutboxWorker:
         *,
         database_path: str | Path,
         dispatcher: ProjectionDispatcher,
-        projection_handlers_factory: Callable[[object], Mapping[str, object]] | None = None,
+        projection_handlers_factory: Callable[..., Mapping[str, _ProjectionHandler]] | None = None,
         worker_id: str,
         poll_interval_seconds: float = 1.0,
         stale_claim_ttl_seconds: int = 30,
         now_factory: Callable[[], datetime] | None = None,
-        sleep: Callable[[float], None] = None,
-        unit_of_work_factory: Callable[[], object] | None = None,
+        sleep: Callable[..., Any] | None = None,
+        unit_of_work_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._database_path = str(database_path)
         self._dispatcher = dispatcher

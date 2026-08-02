@@ -6,11 +6,11 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+from domain.events import KnowledgeCreated
 from fastapi.testclient import TestClient
 
 from api.app import create_app
 from api.dependencies import Settings
-from domain.events import KnowledgeCreated
 from persistence import (
     Atom,
     Knowledge,

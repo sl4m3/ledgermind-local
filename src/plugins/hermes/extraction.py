@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from .extraction_schema import (
     ATOM_EXTRACTION_SCHEMA_V1,
@@ -20,7 +21,7 @@ try:
         calculate_idempotency_key,
         calculate_source_round_key,
     )
-except Exception:  # pragma: no cover - defensive fallback for isolated environments
+except Exception:  # noqa: BLE001  # pragma: no cover - defensive fallback for isolated environments
 
     def calculate_source_round_key(payload: Mapping[str, Any]) -> str:
         source = dict(payload)
@@ -195,7 +196,7 @@ def _read_extraction_response(payload: Any) -> tuple[dict[str, Any], ExtractionC
     if parsed is None and isinstance(payload, Mapping):
         parsed = dict(payload)
     if not isinstance(parsed, Mapping):
-        raise ValueError("extraction response has no parsed payload")
+        raise TypeError("extraction response has no parsed payload")
 
     if set(parsed.keys()) - set(ATOM_EXTRACTION_SCHEMA_V1["properties"].keys()):
         raise ValueError("extraction payload violates schema")
@@ -213,14 +214,14 @@ def _read_extraction_response(payload: Any) -> tuple[dict[str, Any], ExtractionC
         if isinstance(normalized["artifacts"], list):
             normalized["artifacts"] = tuple(str(item) for item in normalized["artifacts"])
         else:
-            normalized["artifacts"] = tuple()
+            normalized["artifacts"] = ()
     if not normalized["has_knowledge"]:
         normalized["title"] = ""
         normalized["target"] = ""
         normalized["statement"] = ""
         normalized["rationale"] = ""
         normalized["result"] = ""
-        normalized["artifacts"] = tuple()
+        normalized["artifacts"] = ()
 
     if not validate_extraction_payload(normalized):
         raise ValueError("extraction payload violates schema")

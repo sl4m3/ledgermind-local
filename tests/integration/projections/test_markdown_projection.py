@@ -7,14 +7,14 @@ import json
 from pathlib import Path
 
 import pytest
-
-from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
 from domain import EvidenceRelation
+from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
+
 from persistence import (
     Knowledge,
     KnowledgeEvidence,
-    SQLiteKnowledgeRepository,
     SQLiteEvidenceRepository,
+    SQLiteKnowledgeRepository,
     migrations,
     open_sqlite_connection,
 )

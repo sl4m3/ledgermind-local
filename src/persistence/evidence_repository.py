@@ -45,7 +45,7 @@ class SQLiteEvidenceRepository:
         memory_space_id: str,
         knowledge_id: str,
     ) -> int:
-        return self._connection.execute(
+        row = self._connection.execute(
             """
             SELECT COUNT(*) AS total
             FROM knowledge_evidence e
@@ -53,7 +53,10 @@ class SQLiteEvidenceRepository:
             WHERE e.knowledge_id = ? AND k.memory_space_id = ?
             """,
             (knowledge_id, memory_space_id),
-        ).fetchone()["total"]
+        ).fetchone()
+        if row is None:
+            return 0
+        return int(row["total"])
 
     def list_atom_ids(
         self,

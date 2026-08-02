@@ -21,7 +21,7 @@ class Vectorizer(Protocol):
     def dimension(self) -> int:
         ...
 
-    def encode(self, texts: Sequence[str]) -> "npt.NDArray[np.float32]":
+    def encode(self, texts: Sequence[str]) -> npt.NDArray[np.float32]:
         ...
 
     def close(self) -> None:

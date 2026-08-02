@@ -7,9 +7,9 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from persistence import OutboxEvent, SQLiteUnitOfWork, migrations
 from projections.dispatcher import ProjectionDispatcher
 from scheduler import OutboxWorker
-from persistence import OutboxEvent, SQLiteUnitOfWork, migrations
 
 
 def _build_time(value: int) -> str:

@@ -19,7 +19,6 @@ for extra_root in (CORE_SRC_ROOT, PROJECT_SRC_ROOT):
 from persistence import open_sqlite_connection
 from projections import VectorProjectionStore as ProjectionVectorStore
 
-
 PYTHON_PATHS = [str(path) for path in (CORE_SRC_ROOT, PROJECT_SRC_ROOT) if path.exists()]
 
 

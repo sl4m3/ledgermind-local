@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import os
 import signal
-from pathlib import Path
-
 from argparse import Namespace
+from pathlib import Path
+from typing import Self
 
-from config import LocalConfig
+import cli as cli_module
 from bootstrap import initialize_local_layout
 from cli import (
-    _command_serve,
     _coalesce_optional,
+    _command_serve,
     _install_signal_handlers,
     _restore_signal_handlers,
 )
+from config import LocalConfig
 from service_lock import ServiceLockError
-import cli as cli_module
 
 
 def test_coalesce_optional_returns_fallback() -> None:
@@ -59,7 +59,7 @@ def test_command_serve_rejects_remote_host_without_allow_remote_bind(
         def __init__(self, *args: object, **kwargs: object) -> None:
             raise AssertionError("lock should never be created for rejected bind host")
 
-        def __enter__(self) -> "DummyLock":
+        def __enter__(self) -> Self:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:
@@ -80,7 +80,7 @@ def test_command_serve_reports_lock_error(tmp_path: Path, monkeypatch) -> None:
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        def __enter__(self) -> "FailingLock":
+        def __enter__(self) -> Self:
             raise ServiceLockError("service is already running")
 
         def __exit__(self, exc_type, exc, tb) -> None:
@@ -118,7 +118,7 @@ def test_command_serve_allows_remote_host_when_explicitly_enabled(
         def __init__(self, *args: object, **kwargs: object) -> None:
             events.append(f"lock_enter:{args[0]}")
 
-        def __enter__(self) -> "DummyLock":
+        def __enter__(self) -> Self:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:
@@ -161,7 +161,7 @@ def test_command_serve_writes_pid_and_starts_server(tmp_path: Path, monkeypatch)
         def __init__(self, *args: object, **kwargs: object) -> None:
             self.path = args[0] if args else None
 
-        def __enter__(self) -> "DummyLock":
+        def __enter__(self) -> Self:
             events.append(f"lock_enter:{self.path}")
             return self
 
@@ -218,7 +218,7 @@ def test_command_serve_applies_migrations_before_starting_server(tmp_path: Path,
         def __init__(self, *args: object, **kwargs: object) -> None:
             self.path = args[0] if args else None
 
-        def __enter__(self) -> "DummyLock":
+        def __enter__(self) -> Self:
             events.append(f"lock_enter:{self.path}")
             return self
 
@@ -226,7 +226,7 @@ def test_command_serve_applies_migrations_before_starting_server(tmp_path: Path,
             events.append(f"lock_exit:{self.path}")
 
     class DummyConnection:
-        def __enter__(self) -> "DummyConnection":
+        def __enter__(self) -> Self:
             events.append("db_connection_enter")
             return self
 
@@ -291,7 +291,7 @@ def test_command_serve_fails_when_migrations_fail(tmp_path: Path, monkeypatch) -
         def __init__(self, *args: object, **kwargs: object) -> None:
             self.path = args[0] if args else None
 
-        def __enter__(self) -> "DummyLock":
+        def __enter__(self) -> Self:
             events.append(f"lock_enter:{self.path}")
             return self
 
@@ -299,7 +299,7 @@ def test_command_serve_fails_when_migrations_fail(tmp_path: Path, monkeypatch) -
             events.append(f"lock_exit:{self.path}")
 
     class DummyConnection:
-        def __enter__(self) -> "DummyConnection":
+        def __enter__(self) -> Self:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:

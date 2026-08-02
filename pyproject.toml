@@ -43,3 +43,10 @@ persistence = ["migrations/*.sql"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+mypy_path = ["/home/stanislav/Проекты/ledgermind/ledgermind-core/src"]

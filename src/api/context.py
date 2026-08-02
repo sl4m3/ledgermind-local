@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import sqlite3
 
+from application import map_context_query
+from contracts import RetrieveContextRequest, RetrieveContextResult
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import ValidationError
 
-from application import map_context_query
-from contracts import RetrieveContextRequest, RetrieveContextResult
 from .http import build_request_id, error_payload, validate_json_request
 
 
 def create_context_router(
-    require_token,
-    retrieve_context_handler,
+    require_token: object,
+    retrieve_context_handler: object,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -25,7 +25,7 @@ def create_context_router(
     async def search_context(
         request: Request,
         response: Response,
-        _token: str = Depends(require_token),
+        _token: str = Depends(require_token),  # type: ignore[arg-type]
     ) -> RetrieveContextResult:
         raw = await request.body()
         validate_json_request(request.headers, raw=raw)
@@ -40,7 +40,7 @@ def create_context_router(
         try:
             query = map_context_query(payload.model_dump())
             response.headers["X-Request-ID"] = build_request_id(request.headers)
-            return retrieve_context_handler.handle(query)
+            return retrieve_context_handler.handle(query)  # type: ignore[attr-defined,no-any-return]
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

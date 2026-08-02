@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Callable, Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 from projections.vectorizer import Vectorizer
 
@@ -14,7 +14,7 @@ try:
     import numpy.typing as npt
 except ModuleNotFoundError:
     np = None
-    npt = None  # type: ignore[assignment]
+    npt = None
 
 
 _EmbeddingModelBuilder: TypeAlias = Callable[[str, int, int], Any]
@@ -151,10 +151,10 @@ class GGUFVectorizer(Vectorizer):
                 raise RuntimeError("vector dimension is unknown before first encoding")
         return self._dimension
 
-    def encode(self, texts: Sequence[str]) -> "npt.NDArray[np.float32]":
+    def encode(self, texts: Sequence[str]) -> npt.NDArray[np.float32]:
         if not texts:
             if np is None:
-                return []  # type: ignore[return-value]
+                return []
             return np.empty((0, self.dimension), dtype=np.float32)
 
         model = self._ensure_model()
@@ -180,7 +180,7 @@ class GGUFVectorizer(Vectorizer):
             raise ValueError("partial embedding result returned by model")
 
         if np is None:
-            return vectors  # type: ignore[return-value]
+            return vectors
         return np.array(vectors, dtype=np.float32)
 
     def close(self) -> None:

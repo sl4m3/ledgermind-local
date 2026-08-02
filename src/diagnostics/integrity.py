@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Iterable
-
+from collections.abc import Iterable
 
 _MAX_ISSUE_ITEMS = 10
 _MAX_CYCLE_LENGTH = 32
@@ -68,9 +67,11 @@ def _check_orphaned_atoms(
 
     atom_ids = [str(row[0]) for row in rows]
     return [
-        "orphan atoms detected: atoms without knowledge links are allowed only with "
-        "--allow-orphan-atoms={migration|inactive}. "
-        f"Found: {_preview(atom_ids)}"
+        (
+            "orphan atoms detected: atoms without knowledge links are allowed only with "
+            "--allow-orphan-atoms={migration|inactive}. "
+            f"Found: {_preview(atom_ids)}"
+        ),
     ]
 
 

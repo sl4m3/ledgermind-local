@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import base64
-import os
-from collections.abc import Sequence
-from pathlib import Path
 import json
-from typing import Any
+import os
 import shutil
 import tempfile
-
-from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
-from persistence import SQLiteEvidenceRepository, SQLiteKnowledgeRepository
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
 import yaml
+from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
 
+from persistence import SQLiteEvidenceRepository, SQLiteKnowledgeRepository
 
 _PROJECTION_NAME = "projections.markdown"
 _PROJECTION_VERSION = 1
@@ -27,10 +26,10 @@ class KnowledgeMarkdownProjection:
     projection_name = _PROJECTION_NAME
     projection_version = _PROJECTION_VERSION
 
-    def __init__(self, *, connection, markdown_root: str | Path) -> None:
+    def __init__(self, *, connection: object, markdown_root: str | Path) -> None:
         self._connection = connection
-        self._repository = SQLiteKnowledgeRepository(connection=connection)
-        self._evidence_repository = SQLiteEvidenceRepository(connection=connection)
+        self._repository = SQLiteKnowledgeRepository(connection=connection)  # type: ignore[arg-type]
+        self._evidence_repository = SQLiteEvidenceRepository(connection=connection)  # type: ignore[arg-type]
         self._markdown_root = Path(markdown_root)
 
     def _current_records(self, *, memory_space_id: str | None = None) -> list[dict[str, Any]]:
@@ -53,10 +52,10 @@ class KnowledgeMarkdownProjection:
         """
         if memory_space_id is None:
             query = f"{query} ORDER BY memory_space_id ASC, knowledge_id ASC"
-            rows = self._connection.execute(query).fetchall()
+            rows = self._connection.execute(query).fetchall()  # type: ignore[attr-defined]
         else:
             query = f"{query} AND memory_space_id = ? ORDER BY knowledge_id ASC"
-            rows = self._connection.execute(query, (memory_space_id,)).fetchall()
+            rows = self._connection.execute(query, (memory_space_id,)).fetchall()  # type: ignore[attr-defined]
 
         return [dict(row) for row in rows]
 
@@ -276,11 +275,12 @@ class KnowledgeMarkdownProjection:
         ):
             knowledge_ids = self._coerce_ids(payload.get("knowledge_ids"))
             if not knowledge_ids:
-                knowledge_ids = [
+                candidate = (
                     self._coerce_string(payload.get("knowledge_id"))
                     or self._coerce_string(payload.get("aggregate_id"))
                     or self._coerce_string(aggregate_id)
-                ]
+                )
+                knowledge_ids = [candidate] if candidate is not None else []
             return self._apply_changes(
                 remove_ids=(),
                 upsert_ids=knowledge_ids,

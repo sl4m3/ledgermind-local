@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 import sqlite3
-from typing import Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 
 def _normalize_message_ids(values: Iterable[str]) -> tuple[str, ...]:

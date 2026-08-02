@@ -5,7 +5,10 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import ClassVar
+
+from typing_extensions import Self
 
 from .atom_repository import SQLiteAtomRepository
 from .database import open_sqlite_connection
@@ -13,8 +16,8 @@ from .evidence_repository import SQLiteEvidenceRepository
 from .idempotency_repository import SQLiteIdempotencyRepository
 from .knowledge_repository import SQLiteKnowledgeRepository
 from .memory_space_repository import SQLiteMemorySpaceRepository
-from .revision_repository import SQLiteRevisionRepository
 from .outbox_repository import SQLiteOutboxRepository
+from .revision_repository import SQLiteRevisionRepository
 
 
 class SQLiteUnitOfWorkError(RuntimeError):
@@ -44,7 +47,7 @@ class SQLiteUnitOfWork:
 
     _closed_error_message: ClassVar[str] = "sqlite unit of work is not active"
 
-    def __enter__(self) -> "SQLiteUnitOfWork":
+    def __enter__(self) -> Self:
         if self._connection is not None:
             return self
 
@@ -67,7 +70,12 @@ class SQLiteUnitOfWork:
             self._disconnect()
             raise
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         try:
             if exc_type is None:
                 if not self._committed:

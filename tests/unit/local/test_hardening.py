@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import os
 import stat
-import tempfile
 from pathlib import Path
 
-from cli import _command_migrate_v3, _build_parser
-from v3_migration.writer import write_temp_migration
+from cli import _build_parser, _command_migrate_v3
 from v3_migration.models import LegacyRecord
+from v3_migration.writer import write_temp_migration
 
 
 def test_token_file_has_private_permissions_on_posix(tmp_path: Path) -> None:

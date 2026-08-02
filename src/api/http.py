@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 from fastapi import HTTPException
 from starlette import status
 from starlette.requests import Headers
-
 
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 _JSON_CONTENT_TYPE = "application/json"

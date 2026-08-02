@@ -6,8 +6,12 @@ import sqlite3
 
 import pytest
 
-from persistence import MemorySpaceSourceClientChangedError
-from persistence import SQLiteMemorySpaceRepository, migrations, open_sqlite_connection
+from persistence import (
+    MemorySpaceSourceClientChangedError,
+    SQLiteMemorySpaceRepository,
+    migrations,
+    open_sqlite_connection,
+)
 
 
 def _create_database(path) -> sqlite3.Connection:

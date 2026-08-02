@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import bootstrap as bootstrap
+import bootstrap
 from cli import main
 
 

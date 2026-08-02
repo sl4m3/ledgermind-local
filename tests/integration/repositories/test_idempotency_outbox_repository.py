@@ -105,11 +105,10 @@ def test_outbox_rollback_removes_event_and_deliveries(tmp_path) -> None:
         migrations.apply_migrations(setup.connection)
         setup.commit()
 
-    with pytest.raises(sqlite3.IntegrityError):
-        with SQLiteUnitOfWork(db_path) as uow:
-            event = _outbox_event(event_id="evt-1")
-            uow.outbox.add(event, projection_names=("projection",))
-            uow.outbox.add(event, projection_names=("projection",))
+    with pytest.raises(sqlite3.IntegrityError), SQLiteUnitOfWork(db_path) as uow:
+        event = _outbox_event(event_id="evt-1")
+        uow.outbox.add(event, projection_names=("projection",))
+        uow.outbox.add(event, projection_names=("projection",))
 
     conn = sqlite3.connect(db_path)
     try:

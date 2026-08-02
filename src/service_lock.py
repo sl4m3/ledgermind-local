@@ -6,6 +6,10 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
+from typing import cast
+
+from typing_extensions import Self
 
 
 class ServiceLockError(RuntimeError):
@@ -30,7 +34,7 @@ class ServiceLock:
                 self._try_create_lock()
                 self._locked = True
                 return
-            except ServiceLockError as exc:
+            except ServiceLockError:
                 if not self.force_stale_cleanup:
                     raise
                 if not self._maybe_cleanup_stale_lock():
@@ -66,7 +70,7 @@ class ServiceLock:
         raw = self.lock_path.read_text(encoding="utf-8")
         payload = json.loads(raw)
         if not isinstance(payload, dict):
-            raise ValueError("invalid lock payload")
+            raise TypeError("invalid lock payload")
         return payload
 
     def _is_running_pid(self, pid: int) -> bool:
@@ -86,8 +90,8 @@ class ServiceLock:
 
         try:
             payload = self._read_lock_payload()
-            candidate_pid = int(payload.get("pid", 0))
-        except Exception:
+            candidate_pid = int(cast(str, payload.get("pid", 0)))
+        except Exception:  # noqa: BLE001
             candidate_pid = 0
 
         if candidate_pid == 0 or not self._is_running_pid(candidate_pid):
@@ -102,9 +106,14 @@ class ServiceLock:
         self.lock_path.unlink(missing_ok=True)
         self._locked = False
 
-    def __enter__(self) -> "ServiceLock":
+    def __enter__(self) -> Self:
         self.acquire()
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.release()

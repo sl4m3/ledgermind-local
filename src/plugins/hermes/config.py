@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 _REQUIRED_STRINGS = (
     "source_instance_id",
     "memory_space_id",
@@ -68,7 +67,7 @@ def load_config(path: str | Path) -> PluginConfig:
     config_path = Path(path).expanduser()
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError("plugin configuration must be a JSON object")
+        raise TypeError("plugin configuration must be a JSON object")
 
     for key in _REQUIRED_STRINGS:
         _coerce_str_required(payload, key)

@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any, cast
 
 from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
 
@@ -91,7 +92,7 @@ class KnowledgeMarkdownGitAuditProjection:
         if self._pending < self._batch_size:
             return False
 
-        return self._flush_batch(need_changes=True)
+        return cast(bool, self._flush_batch(need_changes=True))
 
     def rebuild(self, *, memory_space_id: str | None = None) -> int:
         del memory_space_id
@@ -123,7 +124,9 @@ class KnowledgeMarkdownGitAuditProjection:
             self._commit(staged)
             self._pending = 0
             self._last_error = None
-            return True if need_changes else len(audit_staged)
+            if need_changes:
+                return True
+            return len(audit_staged)
         except Exception as exc:  # noqa: BLE001
             self._last_error = f"{type(exc).__name__}: {exc}"
             self._pending = 0

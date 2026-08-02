@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .client import LedgerMindClient
 from .config import PluginConfig, load_config
@@ -16,9 +17,8 @@ from .extraction import extract_request_payload
 from .logging import new_error_id
 from .round_assembler import assemble_round, compute_round_checksum
 from .round_reference import SourceReference
-from .state_db_reader import ResolvedRoundReference, resolve_round_reference
 from .spool import FileSpool
-
+from .state_db_reader import ResolvedRoundReference, resolve_round_reference
 
 _EXTRACTION_GUARD = ContextVar("ledgermind_extraction_guard", default=False)
 
@@ -207,7 +207,7 @@ class PluginRuntime:
     _delivery_worker: DeliveryWorker | None
 
     @classmethod
-    def build(cls, ctx) -> "PluginRuntime":
+    def build(cls, ctx) -> PluginRuntime:
         plugin_dir = Path(getattr(ctx, "plugin_directory", Path.cwd()))
         config_path = Path(
             getattr(ctx, "plugin_config_file", plugin_dir / "config.json"),
@@ -299,15 +299,15 @@ class PluginRuntime:
     ) -> None:
         round_model = _coerce_cache_value(kwargs.get("model")) or _coerce_cache_value(model)
         if not assistant_response:
-            return None
+            return
         if _EXTRACTION_GUARD.get():
-            return None
+            return
         if _coerce_cache_value(kwargs.get("purpose")) == "ledgermind.atom.extract":
-            return None
+            return
 
         llm = kwargs.get("llm")
         if llm is None:
-            return None
+            return
 
         token = _EXTRACTION_GUARD.set(True)
         try:
@@ -372,7 +372,7 @@ class PluginRuntime:
                 session_id=session_id,
                 source_reference=source_reference,
             )
-            return None
+            return
         except Exception as exc:
             fallback = _fallback_source_reference(
                 config=self.config,
@@ -388,13 +388,13 @@ class PluginRuntime:
                     source_reference=fallback.to_payload(),
                     session_id=session_id,
                     round_checksum=sha256(
-                        f"{session_id}:{user_message}:{assistant_response}".encode("utf-8")
+                        f"{session_id}:{user_message}:{assistant_response}".encode()
                     ).hexdigest(),
                     error=exc,
                     attempts=0,
                 ),
             )
-            return None
+            return
         finally:
             _EXTRACTION_GUARD.reset(token)
 

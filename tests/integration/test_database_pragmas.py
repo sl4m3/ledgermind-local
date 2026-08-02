@@ -1,7 +1,7 @@
 """Integration tests for SQLite connection configuration."""
 
-from datetime import datetime
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from persistence.database import managed_connection, open_sqlite_connection

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from datetime import datetime, timezone
-from pathlib import Path
 import json
 import os
 import shutil
 import tempfile
+from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 try:
@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     np = None
 
 
-_DEFAULT_TIME = lambda: datetime.now(timezone.utc).isoformat()
+_DEFAULT_TIME: Callable[[], str] = lambda: datetime.now(timezone.utc).isoformat()
 
 
 class VectorProjectionStore:
@@ -334,21 +334,21 @@ class VectorProjectionStore:
         if not path.exists():
             raise ValueError("vectors file is missing")
         if np is None:
-            raw = path.read_text(encoding="utf-8")
+            raw_text = path.read_text(encoding="utf-8")
             try:
-                payload = json.loads(raw)
+                payload = json.loads(raw_text)
             except json.JSONDecodeError as exc:
                 raise ValueError("vectors file is corrupted") from exc
             if not isinstance(payload, list):
                 raise ValueError("vectors file is malformed")
             return [self._coerce_vector(row) for row in payload]
 
-        raw = path.read_bytes()
+        raw_bytes = path.read_bytes()
         try:
             array = np.load(path, allow_pickle=False)
         except Exception:
             try:
-                payload = json.loads(raw.decode("utf-8"))
+                payload = json.loads(raw_bytes.decode("utf-8"))
             except Exception as exc:
                 raise ValueError("vectors file is corrupted") from exc
             if not isinstance(payload, list):
@@ -368,7 +368,7 @@ class VectorProjectionStore:
         if value is None:
             return None
         try:
-            coerced = int(value)
+            coerced = int(str(value))
         except (TypeError, ValueError):
             return None
         return coerced

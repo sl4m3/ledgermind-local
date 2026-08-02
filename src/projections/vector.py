@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
 from collections.abc import Callable, Sequence
 from pathlib import Path
-import os
-import shutil
+from types import TracebackType
 from typing import Any
 
 from domain.events import KnowledgeCreated, KnowledgeDeleted, KnowledgeSuperseded
-from persistence import SQLiteKnowledgeRepository
 
+from persistence import SQLiteKnowledgeRepository
 from projections.vector_store import VectorProjectionStore
 from projections.vectorizer import Vectorizer
 
@@ -47,10 +48,15 @@ class KnowledgeVectorProjection:
             self._vectorizer_instance = vectorizer
         return self._vectorizer_instance
 
-    def __enter__(self) -> "KnowledgeVectorProjection":
+    def __enter__(self) -> KnowledgeVectorProjection:
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def close(self) -> None:
@@ -179,11 +185,14 @@ class KnowledgeVectorProjection:
         ):
             knowledge_ids = self._coerce_ids(
                 payload.get("knowledge_ids"),
-            ) or [
-                self._coerce_string(payload.get("knowledge_id"))
-                or self._coerce_string(payload.get("aggregate_id"))
-                or self._coerce_string(aggregate_id),
-            ]
+            )
+            if not knowledge_ids:
+                candidate = (
+                    self._coerce_string(payload.get("knowledge_id"))
+                    or self._coerce_string(payload.get("aggregate_id"))
+                    or self._coerce_string(aggregate_id)
+                )
+                knowledge_ids = [candidate] if candidate is not None else []
             return self._apply_changes(remove_ids=(), upsert_ids=knowledge_ids, memory_space_id=memory_space_id)
 
         if normalized_event == KnowledgeSuperseded.EVENT_NAME:
@@ -263,7 +272,7 @@ class KnowledgeVectorProjection:
         return [float(item) for item in value]
 
     @staticmethod
-    def _build_text(knowledge) -> str:
+    def _build_text(knowledge: object) -> str:
         title = _value(knowledge, "title")
         target = _value(knowledge, "target")
         statement = _value(knowledge, "statement")
@@ -311,7 +320,7 @@ def _value(obj: object, key: str) -> object:
         return obj.get(key)
     if hasattr(obj, "__getitem__"):
         try:
-            return obj[key]  # type: ignore[index]
+            return obj[key]
         except (TypeError, KeyError):
             pass
     return getattr(obj, key, None)

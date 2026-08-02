@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from application.get_atom import GetAtomQuery
 from application.get_knowledge import GetKnowledgeQuery
+from contracts.atom import AtomContent, ExtractionInfo
+from contracts.common import ContractModel
+from domain import Atom as DomainAtom
+from domain import KnowledgeItem as DomainKnowledgeItem
+from domain import Phase, SourceReference
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+
 from bootstrap import (
     GetKnowledgeEvidenceQuery,
     GetKnowledgeHistoryQuery,
 )
-from contracts.atom import AtomContent, ExtractionInfo, SourceReference
-from contracts.common import ContractModel
-from domain import Phase
-from domain import Atom as DomainAtom
-from domain import KnowledgeItem as DomainKnowledgeItem
+
 from .http import build_request_id, error_payload
 
 
@@ -109,7 +112,7 @@ def _map_atom(atom: DomainAtom) -> AtomReadResponse:
             source_round_id=atom.source.source_round_id,
             first_message_id=atom.source.first_message_id,
             final_message_id=atom.source.final_message_id,
-            message_ids=list(atom.source.message_ids),
+            message_ids=tuple(atom.source.message_ids),
             source_digest=atom.source.source_digest,
             source_schema_version=atom.source.source_schema_version,
             resolver_version=atom.source.resolver_version,
@@ -196,11 +199,14 @@ def _resolve_memory_space_id(
             ),
         )
 
-    return path_space_id or header_space_id
+    if path_space_id is not None:
+        return path_space_id
+    assert header_space_id is not None
+    return header_space_id
 
 
 def create_knowledge_router(
-    require_token,
+    require_token: Callable[..., str],
     *,
     get_atom_handler: Any,
     get_knowledge_handler: Any,
