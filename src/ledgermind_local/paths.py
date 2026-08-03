@@ -47,6 +47,10 @@ class ServicePaths:
     def database_file(self) -> Path:
         return self.home / "ledgermind.db"
 
+    def resolve_database_path(self, configured_path: str | Path) -> Path:
+        path = Path(configured_path).expanduser()
+        return path if path.is_absolute() else self.home / path
+
     @property
     def logs_dir(self) -> Path:
         return self.home / "logs"

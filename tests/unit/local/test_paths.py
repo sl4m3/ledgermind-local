@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ledgermind_local.bootstrap import bootstrap_local_service
+from ledgermind_local.bootstrap import bootstrap_local_service, initialize_local_layout
 from ledgermind_local.config import LocalConfig
 from ledgermind_local.paths import ServicePaths
 
@@ -50,3 +50,27 @@ def test_bootstrap_creates_private_directories(tmp_path: Path) -> None:
     logs_mode = paths.logs_dir.stat().st_mode & 0o777
     assert home_mode <= 0o700
     assert logs_mode <= 0o700
+
+
+def test_configured_database_path_is_resolved_under_service_home(tmp_path: Path) -> None:
+    paths, _ = bootstrap_local_service(
+        home=tmp_path / "secure",
+        config=LocalConfig(config_version=1, database_path="state/custom.db"),
+    )
+
+    database = paths.resolve_database_path("state/custom.db")
+    assert database == paths.home / "state" / "custom.db"
+    assert database.is_file()
+
+
+def test_existing_config_controls_database_path_without_creating_default(tmp_path: Path) -> None:
+    home = tmp_path / "configured"
+    home.mkdir()
+    config = LocalConfig(config_version=1, database_path="state.db")
+    (home / "config.json").write_text(config.to_json(), encoding="utf-8")
+
+    paths, resolved, _token = initialize_local_layout(home=home)
+
+    assert resolved.database_path == "state.db"
+    assert paths.resolve_database_path("state.db").is_file()
+    assert not paths.database_file.exists()

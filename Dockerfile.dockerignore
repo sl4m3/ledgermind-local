@@ -3,6 +3,7 @@
 **/.pytest_cache
 **/.venv
 **/.git
+**/*.egg-info
 legacy.tar.gz
 ledgermind-local/build
 ledgermind-local/dist

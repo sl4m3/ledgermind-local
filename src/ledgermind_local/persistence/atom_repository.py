@@ -237,6 +237,29 @@ class SQLiteAtomRepository:
         ).fetchone()
         return self._row_to_atom(row) if row is not None else None
 
+    def mark_supersedes(
+        self,
+        atom_id: str,
+        memory_space_id: str,
+        *,
+        superseded_atom_id: str,
+    ) -> bool:
+        """Link two atoms only when both belong to the requested memory space."""
+
+        if self.get(atom_id, memory_space_id) is None:
+            return False
+        if self.get(superseded_atom_id, memory_space_id) is None:
+            return False
+        cursor = self._connection.execute(
+            """
+            UPDATE atoms
+            SET supersedes_atom_id = ?
+            WHERE atom_id = ? AND memory_space_id = ?
+            """,
+            (superseded_atom_id, atom_id, memory_space_id),
+        )
+        return cursor.rowcount == 1
+
     @staticmethod
     def _row_to_atom(row: sqlite3.Row) -> Atom:
         return Atom(

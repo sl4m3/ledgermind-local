@@ -16,10 +16,9 @@ from ledgermind_core.application import (
 from ledgermind_core.application.mappers import IngestAtomCommand
 from ledgermind_core.contracts import IngestAtomRequest, IngestAtomResult
 from ledgermind_core.domain import AtomContent, ExtractionInfo, SourceReference
-from pydantic import ValidationError
 
 from .dependencies import Settings
-from .http import build_request_id, error_payload, validate_json_request
+from .http import build_request_id, error_payload, validate_json_request_headers
 
 
 def _normalize_text(value: str) -> str:
@@ -83,21 +82,13 @@ def create_atoms_router(
     _ = settings
 
     @router.post("/v1/atoms", status_code=201)
-    async def ingest_atom(
+    def ingest_atom(
+        payload: IngestAtomRequest,
         request: Request,
         response: Response,
         _token: str = Depends(require_token),
     ) -> IngestAtomResult:
-        raw = await request.body()
-        validate_json_request(request.headers, raw=raw)
-
-        try:
-            payload = IngestAtomRequest.model_validate_json(raw)
-        except ValidationError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=error_payload("invalid_request_payload", "invalid request payload"),
-            ) from exc
+        validate_json_request_headers(request.headers)
 
         try:
             command = _build_command(payload)

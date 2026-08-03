@@ -221,7 +221,7 @@ def create_knowledge_router(
     )
     @router.get("/v1/atoms/{memory_space_id}/{atom_id}", response_model=AtomReadResponse)
     @router.get("/v1/atoms/{atom_id}", response_model=AtomReadResponse)
-    async def get_atom(
+    def get_atom(
         atom_id: str,
         request: Request,
         response: Response,
@@ -271,7 +271,7 @@ def create_knowledge_router(
         response_model=KnowledgeReadResponse,
     )
     @router.get("/v1/knowledge/{knowledge_id}", response_model=KnowledgeReadResponse)
-    async def get_knowledge(
+    def get_knowledge(
         knowledge_id: str,
         request: Request,
         response: Response,
@@ -319,7 +319,7 @@ def create_knowledge_router(
         "/v1/memory-spaces/{memory_space_id}/knowledge/{knowledge_id}/history",
         response_model=KnowledgeHistoryResponse,
     )
-    async def get_knowledge_history(
+    def get_knowledge_history(
         memory_space_id: str,
         knowledge_id: str,
         request: Request,
@@ -361,7 +361,7 @@ def create_knowledge_router(
         "/v1/memory-spaces/{memory_space_id}/knowledge/{knowledge_id}/evidence",
         response_model=KnowledgeEvidenceResponse,
     )
-    async def get_knowledge_evidence(
+    def get_knowledge_evidence(
         memory_space_id: str,
         knowledge_id: str,
         request: Request,

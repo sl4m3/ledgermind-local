@@ -15,6 +15,11 @@ from .memory_space_repository import (
     SQLiteMemorySpaceRepository,
 )
 from .outbox_repository import OutboxEvent, SQLiteOutboxRepository
+from .raw_round_repository import (
+    RawRoundRecord,
+    RoundProcessingJob,
+    SQLiteRawRoundRepository,
+)
 from .revision_repository import KnowledgeRevision, SQLiteRevisionRepository
 from .sqlite_uow import (
     SQLiteUnitOfWork,
@@ -30,6 +35,8 @@ __all__ = [
     "MemorySpace",
     "MemorySpaceSourceClientChangedError",
     "OutboxEvent",
+    "RawRoundRecord",
+    "RoundProcessingJob",
     "SQLiteAtomRepository",
     "SQLiteEvidenceRepository",
     "SQLiteIdempotencyRepository",
@@ -37,6 +44,7 @@ __all__ = [
     "SQLiteKnowledgeRepository",
     "SQLiteMemorySpaceRepository",
     "SQLiteOutboxRepository",
+    "SQLiteRawRoundRepository",
     "SQLiteRevisionRepository",
     "SQLiteUnitOfWork",
     "SQLiteUnitOfWorkError",

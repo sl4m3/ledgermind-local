@@ -141,17 +141,3 @@ def test_backup_restore_fails_when_service_is_running(tmp_path: Path) -> None:
     assert (
         main(["--home", str(home), "backup", "restore", "--source", str(backup)]) == 1
     )
-
-
-def test_migrate_v3_command_supports_dry_run_and_reports_unimplemented(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "v3"
-    source.mkdir()
-
-    assert (
-        main(["--home", str(tmp_path / "service"), "migrate-v3", "--source", str(source), "--dry-run"]) == 0
-    ) is True
-    assert (
-        main(["--home", str(tmp_path / "service"), "migrate-v3", "--source", str(source)]) == 0
-    ) is True

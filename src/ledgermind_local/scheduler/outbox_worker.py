@@ -44,6 +44,7 @@ class OutboxWorker:
         now_factory: Callable[[], datetime] | None = None,
         sleep: Callable[..., Any] | None = None,
         unit_of_work_factory: Callable[..., Any] | None = None,
+        close_callback: Callable[[], None] | None = None,
     ) -> None:
         self._database_path = str(database_path)
         self._dispatcher = dispatcher
@@ -57,7 +58,14 @@ class OutboxWorker:
         self._unit_of_work_factory = (
             unit_of_work_factory or (lambda: SQLiteUnitOfWork(self._database_path))
         )
-        self._projection_handlers_factory = projection_handlers_factory
+        self._close_callback = close_callback
+        self._closed = False
+        if projection_handlers_factory is not None:
+            handlers = projection_handlers_factory()
+            self._dispatcher = ProjectionDispatcher(handlers)
+            self._owned_handlers: Mapping[str, _ProjectionHandler] | None = handlers
+        else:
+            self._owned_handlers = None
         self._stop_requested = False
 
     @property
@@ -66,6 +74,17 @@ class OutboxWorker:
 
     def request_stop(self) -> None:
         self._stop_requested = True
+
+    def close(self) -> None:
+        """Release long-lived projection handlers and their backing resources."""
+
+        if self._closed:
+            return
+        self._closed = True
+        if self._owned_handlers is not None:
+            self._close_handlers(self._owned_handlers)
+        if self._close_callback is not None:
+            self._close_callback()
 
     def run(self) -> None:
         while not self._stop_requested:
@@ -98,31 +117,12 @@ class OutboxWorker:
             return False
 
         try:
-            if self._projection_handlers_factory is None:
-                self._dispatcher.dispatch(projection_name, event)
-                self._mark_processed(
-                    projection_name=projection_name,
-                    event=event,
-                    processed_at=now,
-                )
-            else:
-                with self._unit_of_work_factory() as uow:
-                    handlers = self._projection_handlers_factory(uow)
-                    dispatcher = ProjectionDispatcher(handlers)
-                    try:
-                        dispatcher.dispatch(projection_name, event)
-                        marked = uow.outbox.mark_processed(
-                            projection_name,
-                            event.event_id,
-                            processed_at=_to_iso(now),
-                            claimed_by=self._worker_id,
-                        )
-                        if not marked:
-                            uow.rollback()
-                            return True
-                        uow.commit()
-                    finally:
-                        self._close_handlers(handlers)
+            self._dispatcher.dispatch(projection_name, event)
+            self._mark_processed(
+                projection_name=projection_name,
+                event=event,
+                processed_at=now,
+            )
         except Exception as exc:  # noqa: BLE001
             self._mark_failed(
                 projection_name=projection_name,

@@ -37,7 +37,6 @@ include = ["ledgermind_local*"]
 
 [tool.setuptools.package-data]
 "ledgermind_local.persistence" = ["migrations/*.sql"]
-"ledgermind_local.plugins.hermes" = ["plugin.yaml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

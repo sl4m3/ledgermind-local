@@ -7,9 +7,8 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from ledgermind_core.application import map_context_query
 from ledgermind_core.contracts import RetrieveContextRequest, RetrieveContextResult
-from pydantic import ValidationError
 
-from .http import build_request_id, error_payload, validate_json_request
+from .http import build_request_id, error_payload, validate_json_request_headers
 
 
 def create_context_router(
@@ -18,24 +17,15 @@ def create_context_router(
 ) -> APIRouter:
     router = APIRouter()
 
-    @router.post(
-        "/v1/context/search",
-        response_model=RetrieveContextResult,
-    )
-    async def search_context(
+    @router.post("/v1/context/retrieve", response_model=RetrieveContextResult)
+    @router.post("/v1/context/search", response_model=RetrieveContextResult)
+    def search_context(
+        payload: RetrieveContextRequest,
         request: Request,
         response: Response,
         _token: str = Depends(require_token),  # type: ignore[arg-type]
     ) -> RetrieveContextResult:
-        raw = await request.body()
-        validate_json_request(request.headers, raw=raw)
-        try:
-            payload = RetrieveContextRequest.model_validate_json(raw)
-        except ValidationError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=error_payload("invalid_request_payload", "invalid request payload"),
-            ) from exc
+        validate_json_request_headers(request.headers)
 
         try:
             query = map_context_query(payload.model_dump())

@@ -84,6 +84,13 @@ from ledgermind_local.persistence import (
 from ledgermind_local.persistence import (
     StoredIdempotencyResult as SqliteStoredIdempotencyResult,
 )
+from ledgermind_local.processing import (
+    CoreHypothesisBridge,
+    HypothesisGenerator,
+    NullHypothesisGenerator,
+    RoundProcessingWorker,
+)
+from ledgermind_local.raw_rounds import RawRoundIngestHandler
 from ledgermind_local.search import (
     HybridKnowledgeSearchAdapter,
     SQLiteKnowledgeSearchAdapter,
@@ -476,7 +483,8 @@ class _CoreAtomRepository(AtomRepository):
         return _from_sqlite_atom(row) if row is not None else None
 
     def add(self, atom: Atom) -> None:
-        self._memory_spaces.ensure(atom.memory_space_id, atom.source.source_system)
+        if self._memory_spaces.get(atom.memory_space_id) is None:
+            self._memory_spaces.ensure(atom.memory_space_id, atom.source.source_system)
         self._delegate.add(_to_sqlite_atom(atom, source_round_key=calculate_source_round_key(atom.source)))
 
 
@@ -880,6 +888,55 @@ def build_ingest_atom_handler(
     )
 
 
+def build_ingest_raw_round_handler(
+    *,
+    database_path: str | Path,
+    max_payload_bytes: int = 5_000_000,
+    retention_days: int = 30,
+    pipeline_version: int = 1,
+    normalizer_version: int = 1,
+    prompt_version: int = 1,
+) -> RawRoundIngestHandler:
+    """Build the storage-only RawRound capture handler."""
+
+    return RawRoundIngestHandler(
+        database_path=database_path,
+        max_payload_bytes=max_payload_bytes,
+        retention_days=retention_days,
+        pipeline_version=pipeline_version,
+        normalizer_version=normalizer_version,
+        prompt_version=prompt_version,
+    )
+
+
+def build_round_processing_worker(
+    *,
+    database_path: str | Path,
+    generator: HypothesisGenerator | None = None,
+    worker_id: str | None = None,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 30,
+) -> RoundProcessingWorker:
+    """Build the model-injected processing worker and temporary core bridge."""
+
+    selected_generator = generator or NullHypothesisGenerator()
+    bridge = CoreHypothesisBridge(
+        build_ingest_atom_handler(database_path=database_path),
+        provider=getattr(selected_generator, "provider", "local"),
+        model=getattr(selected_generator, "model", "unknown"),
+        prompt_version=getattr(selected_generator, "prompt_version", 1),
+        schema_version=getattr(selected_generator, "schema_version", 1),
+    )
+    return RoundProcessingWorker(
+        database_path=database_path,
+        generator=selected_generator,
+        bridge=bridge.publish,
+        worker_id=worker_id,
+        max_attempts=max_attempts,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+
+
 def build_get_atom_handler(
     *,
     database_path: str | Path,
@@ -972,7 +1029,9 @@ def bootstrap_local_service(
     resolved_home = paths.home
     resolved_home.mkdir(mode=0o700, parents=True, exist_ok=True)
     paths.logs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    connection = open_sqlite_connection(paths.database_file)
+    database_path = paths.resolve_database_path(cfg.database_path)
+    database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    connection = open_sqlite_connection(database_path)
     connection.close()
     return paths, cfg
 
@@ -1019,7 +1078,12 @@ def initialize_local_layout(
     - creates or rotates api token
     """
 
-    paths, cfg = bootstrap_local_service(home=home, config=config)
+    preloaded_config = config
+    if preloaded_config is None and not force:
+        candidate = ServicePaths(home=home).config_file
+        if candidate.exists():
+            preloaded_config = LocalConfig.from_file(candidate)
+    paths, cfg = bootstrap_local_service(home=home, config=preloaded_config)
 
     config_path = paths.config_file
     if force or not config_path.exists():
@@ -1029,6 +1093,11 @@ def initialize_local_layout(
         cfg = LocalConfig.from_file(config_path)
     else:
         cfg = config
+
+    database_path = paths.resolve_database_path(cfg.database_path)
+    database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    connection = open_sqlite_connection(database_path)
+    connection.close()
 
     if not paths.token_file.exists() or (force and rotate_token):
         token = _generate_token()

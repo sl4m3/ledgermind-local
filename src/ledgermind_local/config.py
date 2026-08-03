@@ -47,6 +47,12 @@ class LocalConfig(BaseModel):
     database_path: str = "ledgermind.db"
     log_level: str = "INFO"
     projection_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
+    processing_enabled: bool = False
+    processing_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
+    processing_max_attempts: int = Field(default=3, ge=1)
+    processing_retry_delay_seconds: float = Field(default=30.0, ge=0.0)
+    raw_round_max_bytes: int = Field(default=5_000_000, ge=1)
+    raw_round_retention_days: int = Field(default=30, ge=1)
     allow_remote_bind: bool = False
     vector: VectorProjectionConfig = Field(default_factory=VectorProjectionConfig)
     markdown_projection: MarkdownProjectionConfig = Field(default_factory=MarkdownProjectionConfig)

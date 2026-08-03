@@ -68,3 +68,10 @@ def validate_json_request(headers: Headers, *, raw: bytes) -> None:
 
     enforce_json_content_type(headers=headers)
     enforce_body_limit(headers=headers, raw=raw)
+
+
+def validate_json_request_headers(headers: Headers) -> None:
+    """Validate JSON media type and declared size before FastAPI parses a body."""
+
+    enforce_json_content_type(headers=headers)
+    enforce_body_limit(headers=headers, raw=b"")

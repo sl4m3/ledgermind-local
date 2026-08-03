@@ -179,6 +179,34 @@ def test_outbox_worker_does_not_hold_claim_write_lock_during_projection(tmp_path
     ) is not None
 
 
+def test_production_projection_factory_runs_outside_claim_transaction(tmp_path) -> None:
+    db = tmp_path / "state.db"
+    projection = _WriteLockProbe(db)
+    factory_calls: list[tuple[object, ...]] = []
+
+    def projection_handlers_factory(*args: object) -> dict[str, _WriteLockProbe]:
+        factory_calls.append(args)
+        return {"projections.search": projection}
+
+    worker = OutboxWorker(
+        database_path=db,
+        dispatcher=ProjectionDispatcher({"projections.search": projection}),
+        projection_handlers_factory=projection_handlers_factory,
+        worker_id="worker-production-factory",
+    )
+
+    _seed_event(db, event_id="evt-production-factory", projection_names=("projections.search",))
+
+    assert worker.run_once() is True
+    assert factory_calls == [()]
+    assert projection.call_count == 1
+    assert _read_scalar(
+        db,
+        "SELECT processed_at FROM projection_deliveries WHERE projection_name = ? AND event_id = ?",
+        args=("projections.search", "evt-production-factory"),
+    ) is not None
+
+
 def test_outbox_worker_delivers_event_to_multiple_projections(tmp_path) -> None:
     db = tmp_path / "state.db"
     first = _RecordingProjection()

@@ -17,6 +17,7 @@ from .idempotency_repository import SQLiteIdempotencyRepository
 from .knowledge_repository import SQLiteKnowledgeRepository
 from .memory_space_repository import SQLiteMemorySpaceRepository
 from .outbox_repository import SQLiteOutboxRepository
+from .raw_round_repository import SQLiteRawRoundRepository
 from .revision_repository import SQLiteRevisionRepository
 
 
@@ -45,6 +46,7 @@ class SQLiteUnitOfWork:
     _idempotency: SQLiteIdempotencyRepository | None = None
     _outbox: SQLiteOutboxRepository | None = None
     _memory_spaces: SQLiteMemorySpaceRepository | None = None
+    _raw_rounds: SQLiteRawRoundRepository | None = None
 
     _closed_error_message: ClassVar[str] = "sqlite unit of work is not active"
 
@@ -68,6 +70,7 @@ class SQLiteUnitOfWork:
             self._idempotency = SQLiteIdempotencyRepository(self._connection)
             self._outbox = SQLiteOutboxRepository(self._connection)
             self._memory_spaces = SQLiteMemorySpaceRepository(self._connection)
+            self._raw_rounds = SQLiteRawRoundRepository(self._connection)
             return self
         except Exception:
             self._disconnect()
@@ -136,6 +139,12 @@ class SQLiteUnitOfWork:
             raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
         return self._memory_spaces
 
+    @property
+    def raw_rounds(self) -> SQLiteRawRoundRepository:
+        if self._raw_rounds is None:
+            raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
+        return self._raw_rounds
+
     def commit(self) -> None:
         if self._connection is None:
             raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
@@ -167,3 +176,4 @@ class SQLiteUnitOfWork:
             self._idempotency = None
             self._outbox = None
             self._memory_spaces = None
+            self._raw_rounds = None

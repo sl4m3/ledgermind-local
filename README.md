@@ -1,6 +1,6 @@
 # ledgermind-local
 
-Локальная служба LedgerMind 4.0: SQLite как источник истины, HTTP API, Hermes plugin, проекции.
+Локальная служба LedgerMind 4.0: SQLite как источник истины, RawRound v2 HTTP API, processing worker и проекции.
 
 ## Локальная разработка
 ```bash
@@ -15,7 +15,5 @@ pytest -q
 docker build -f ledgermind-local/Dockerfile -t ledgermind-local .
 ```
 
-## Переход с v3
-- Временная команда: `ledgermind-v4`
-- Миграция: `ledgermind-v4 migrate-v3 --source <старый storage_path> --dry-run`
-- Документация: `docs/migration-v3.md`
+## Совместимость
+Версии v3 и v4 несовместимы. Автоматического импорта или миграции v3 нет; новая служба принимает RawRound v2 через интеграции.
