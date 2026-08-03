@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.7,<3",
     "fastapi>=0.111,<1",
     "PyYAML>=6.0,<7",
+    "ledgermind-protocol>=2.0.0a1,<2.1",
     "ledgermind-core>=4.0.0a1,<4.1",
     "uvicorn>=0.30,<1"
 ]

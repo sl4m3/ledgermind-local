@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ledgermind_core.application.digests import (
+from ledgermind_protocol import (
+    RawRoundRequest,
+    calculate_payload_digest,
     calculate_source_round_key,
-    verify_raw_round_digest,
 )
-from ledgermind_core.contracts import RawRoundRequest
 
 from .persistence import SQLiteUnitOfWork
 
@@ -86,7 +86,7 @@ class RawRoundIngestHandler:
         self.prompt_version = max(int(prompt_version), 1)
 
     def handle(self, request: RawRoundRequest) -> RawRoundIngestResult:
-        if not verify_raw_round_digest(request):
+        if calculate_payload_digest(request) != request.payload_digest:
             raise RawRoundDigestMismatch("payload_digest does not match source + round")
         event_ids = [event.event_id for event in request.round.events]
         if event_ids != request.source.event_ids:

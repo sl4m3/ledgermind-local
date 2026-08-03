@@ -15,7 +15,6 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, cast
 
-from ledgermind_core.application.digests import calculate_source_round_key
 from ledgermind_core.application.get_atom import GetAtomHandler
 from ledgermind_core.application.get_knowledge import GetKnowledgeHandler
 from ledgermind_core.application.ingest_atom import (
@@ -52,6 +51,7 @@ from ledgermind_core.ports.repository_ports import (
     RevisionRepository,
     StoredIdempotencyResult,
 )
+from ledgermind_protocol import calculate_source_round_key
 
 from ledgermind_local.config import LocalConfig
 from ledgermind_local.paths import ServicePaths

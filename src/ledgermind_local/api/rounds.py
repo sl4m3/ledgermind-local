@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from ledgermind_core.contracts import RawRoundRequest
+from ledgermind_protocol import RawRoundRequest
 
 from ledgermind_local.raw_rounds import (
     RawRoundConflict,

@@ -3,8 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from ledgermind_core.application.digests import calculate_raw_round_digest
-from ledgermind_core.contracts import RawRoundRequest
+from ledgermind_protocol import RawRoundRequest, calculate_raw_round_digest
 
 from ledgermind_local.persistence import (
     SQLiteUnitOfWork,
@@ -40,6 +39,7 @@ _FIXTURE = {
     "payload_digest": "sha256:" + "0" * 64,
 }
 _FIXTURE["payload_digest"] = calculate_raw_round_digest(_FIXTURE)
+_FIXTURE["idempotency_key"] = _FIXTURE["payload_digest"]
 
 
 def _bootstrap(path: Path) -> None:

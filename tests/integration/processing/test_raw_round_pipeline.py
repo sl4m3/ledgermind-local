@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import cast
 
 from fastapi.testclient import TestClient
-from ledgermind_core.application.digests import calculate_raw_round_digest
+from ledgermind_protocol import calculate_raw_round_digest
 
 from ledgermind_local.api.app import create_app
 from ledgermind_local.api.dependencies import Application, Settings

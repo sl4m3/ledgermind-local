@@ -41,3 +41,14 @@ def test_local_boundary_scan_is_not_empty() -> None:
 
 def test_hermes_client_plugin_is_not_packaged_in_local() -> None:
     assert not (PACKAGE_ROOT / "plugins" / "hermes").exists()
+
+
+def test_rounds_api_does_not_import_core() -> None:
+    rounds_api = PACKAGE_ROOT / "api" / "rounds.py"
+    modules = _imports(rounds_api)
+    violations = [
+        module
+        for module in modules
+        if module == "ledgermind_core" or module.startswith("ledgermind_core.")
+    ]
+    assert not violations, "RawRound API must consume ledgermind-protocol, not Core"

@@ -5,7 +5,7 @@ import sqlite3
 from copy import deepcopy
 
 from fastapi.testclient import TestClient
-from ledgermind_core.application.digests import calculate_raw_round_digest
+from ledgermind_protocol import calculate_raw_round_digest
 
 from ledgermind_local.api.app import create_app
 from ledgermind_local.api.dependencies import Settings
@@ -13,7 +13,7 @@ from ledgermind_local.persistence import migrations, open_sqlite_connection
 
 _FIXTURE = {
     "api_version": "2",
-    "idempotency_key": "sha256:" + "a" * 64,
+    "idempotency_key": "sha256:19dd0368d25bd5888fffe1f5d0a1e7ace48337459dcbd27d325c1030243e7b08",
     "memory_space_id": "workspace_01",
     "source": {
         "system": "hermes",

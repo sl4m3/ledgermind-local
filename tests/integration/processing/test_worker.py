@@ -3,8 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from ledgermind_core.application.digests import calculate_raw_round_digest
-from ledgermind_core.contracts import RawRoundRequest
+from ledgermind_protocol import RawRoundRequest, calculate_raw_round_digest
 
 from ledgermind_local.persistence import migrations, open_sqlite_connection
 from ledgermind_local.processing.generator import HypothesisDraft
@@ -49,6 +48,7 @@ def _request() -> RawRoundRequest:
         "payload_digest": "sha256:" + "0" * 64,
     }
     payload["payload_digest"] = calculate_raw_round_digest(payload)
+    payload["idempotency_key"] = payload["payload_digest"]
     return RawRoundRequest.model_validate(payload)
 
 
