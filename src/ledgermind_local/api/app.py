@@ -76,8 +76,15 @@ def create_app(
             retention_days=settings.raw_round_retention_days,
         )
     core_gateway = getattr(application, "core_gateway", None)
+    runtime = getattr(application, "runtime", None)
+    if runtime is None and callable(getattr(application, "health_report", None)):
+        runtime = application
+    context_search = getattr(application, "context_search", None)
+    if context_search is None:
+        context_search = core_gateway
     app.state.raw_round_handler = raw_round_handler
     app.state.core_gateway = core_gateway
+    app.state.runtime = runtime
 
     require_token = build_bearer_token_dependency(settings=settings)
     maybe_token = build_optional_bearer_token_dependency(settings=settings)
@@ -97,12 +104,13 @@ def create_app(
             database_path=app.state.database_path,
             service_lock_path=settings.service_lock_path,
             write_handler=raw_round_handler,
+            runtime=runtime,
         )
     )
     app.include_router(
         create_context_router(
             require_token,
-            core_gateway,
+            context_search,
             max_body_bytes=settings.max_raw_round_bytes,
         )
     )

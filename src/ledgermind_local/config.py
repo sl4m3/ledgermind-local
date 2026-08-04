@@ -43,6 +43,116 @@ class GitAuditConfig(BaseModel):
     enabled: bool = False
 
 
+class WorkerConfig(BaseModel):
+    """Lifecycle settings shared by one guarded background worker."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    interval_seconds: float = Field(default=1.0, ge=0.0)
+    max_backoff_seconds: float = Field(default=30.0, ge=0.0)
+    shutdown_timeout_seconds: float = Field(default=5.0, gt=0.0)
+
+
+class WorkerSetConfig(BaseModel):
+    """The complete set of Local-owned B2 worker switches."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    retention: WorkerConfig = Field(
+        default_factory=lambda: WorkerConfig(enabled=True, interval_seconds=300.0)
+    )
+    processing: WorkerConfig = Field(default_factory=WorkerConfig)
+    core_commands: WorkerConfig = Field(default_factory=WorkerConfig)
+    core_projections: WorkerConfig = Field(
+        default_factory=lambda: WorkerConfig(enabled=True)
+    )
+    core_model_tasks: WorkerConfig = Field(
+        default_factory=lambda: WorkerConfig(enabled=True)
+    )
+
+
+class CoreSecurityConfig(BaseModel):
+    """Explicit Core launch security profile and required guarantees."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    profile: Literal["secure", "permissive"] = "secure"
+    require_network_isolation: bool = False
+    require_rounds_database_hidden: bool = False
+    require_filesystem_allowlist: bool = False
+    require_environment_sanitized: bool = False
+    require_signature: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _materialize_profile_defaults(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        profile = data.get("profile", "secure")
+        secure_defaults = {
+            "require_network_isolation": True,
+            "require_rounds_database_hidden": True,
+            "require_filesystem_allowlist": True,
+            "require_environment_sanitized": True,
+            "require_signature": True,
+        }
+        if profile == "secure":
+            for key, default in secure_defaults.items():
+                if key in data and data[key] is False:
+                    raise ValueError(f"secure profile requires {key}=true")
+                data.setdefault(key, default)
+        return data
+
+    @model_validator(mode="after")
+    def _validate_secure_guarantees(self) -> CoreSecurityConfig:
+        if self.profile == "secure":
+            for field_name in (
+                "require_network_isolation",
+                "require_rounds_database_hidden",
+                "require_filesystem_allowlist",
+                "require_environment_sanitized",
+                "require_signature",
+            ):
+                if not getattr(self, field_name):
+                    raise ValueError(f"secure profile requires {field_name}=true")
+        return self
+
+
+def _default_core_security() -> CoreSecurityConfig:
+    return CoreSecurityConfig(
+        profile="secure",
+        require_network_isolation=True,
+        require_rounds_database_hidden=True,
+        require_filesystem_allowlist=True,
+        require_environment_sanitized=True,
+        require_signature=True,
+    )
+
+
+class SearchConfig(BaseModel):
+    """Local candidate search policy before Core's authoritative ranking."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    use_local_candidates: bool = True
+    candidate_multiplier: int = Field(default=4, ge=1, le=100)
+    fallback_to_core_fts: bool = True
+
+    @property
+    def enabled(self) -> bool:
+        """Compatibility alias for the B2 ``use_local_candidates`` switch."""
+
+        return self.use_local_candidates
+
+    @property
+    def fallback_to_core(self) -> bool:
+        """Compatibility alias for the B2 Core FTS fallback switch."""
+
+        return self.fallback_to_core_fts
+
+
 class LocalConfig(BaseModel):
     """Strict service configuration for the local LedgerMind process."""
 
@@ -64,6 +174,9 @@ class LocalConfig(BaseModel):
     core_request_timeout_seconds: float = Field(default=30.0, gt=0.0)
     core_startup_timeout_seconds: float = Field(default=10.0, gt=0.0)
     require_core_network_isolation: bool = False
+    core_security: CoreSecurityConfig = Field(default_factory=_default_core_security)
+    workers: WorkerSetConfig = Field(default_factory=WorkerSetConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
     log_level: str = "INFO"
     projection_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
     processing_enabled: bool = False
@@ -137,6 +250,38 @@ class LocalConfig(BaseModel):
                 "bind_host outside localhost requires allow_remote_bind=true"
             )
         return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _materialize_legacy_worker_settings(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        workers_value = data.get("workers")
+        workers = dict(workers_value) if isinstance(workers_value, dict) else {}
+        if "processing" not in workers:
+            workers["processing"] = {
+                "enabled": bool(data.get("processing_enabled", False)),
+                "interval_seconds": data.get("processing_poll_interval_seconds", 1.0),
+            }
+        if (
+            bool(data.get("processing_enabled", False))
+            and "core_commands" not in workers
+        ):
+            workers["core_commands"] = {"enabled": True}
+        data["workers"] = workers
+        return data
+
+    @model_validator(mode="after")
+    def _sync_legacy_worker_fields(self) -> LocalConfig:
+        processing = self.workers.processing
+        object.__setattr__(self, "processing_enabled", processing.enabled)
+        object.__setattr__(
+            self,
+            "processing_poll_interval_seconds",
+            processing.interval_seconds,
+        )
+        return self
 
     @model_validator(mode="after")
     def _sync_markdown_audit_flag(self) -> LocalConfig:

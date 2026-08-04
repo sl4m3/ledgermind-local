@@ -98,6 +98,99 @@ def _check_write_handler(write_handler: object | None) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _runtime_report(runtime: object | None) -> dict[str, object] | None:
+    if runtime is None:
+        return None
+    report = getattr(runtime, "health_report", None)
+    if not callable(report):
+        return None
+    try:
+        payload = report()
+    except Exception:  # noqa: BLE001 - diagnostics must never take the API down
+        return {
+            "status": "unavailable",
+            "capture_ready": False,
+            "full_ready": False,
+            "ready": False,
+            "errors": ["runtime_health_failed"],
+        }
+    if not isinstance(payload, dict):
+        return None
+    return dict(payload)
+
+
+def _runtime_checks(payload: dict[str, object]) -> dict[str, object]:
+    components = payload.get("components")
+    if not isinstance(components, dict):
+        return {}
+    checks: dict[str, object] = {}
+    for name, component in components.items():
+        if isinstance(component, dict):
+            checks[name] = {
+                "ok": bool(component.get("ready", False)),
+                "detail": "ok" if component.get("ready") else "not ready",
+            }
+    return checks
+
+
+def run_capture_readiness_checks(
+    *,
+    database_path: str | Path,
+    service_lock_path: Path | None,
+    write_handler: object | None,
+    runtime: object | None = None,
+) -> dict[str, object]:
+    """Return readiness for accepting RawRound capture only."""
+
+    payload = _runtime_report(runtime)
+    if payload is None:
+        legacy = run_readiness_checks(
+            database_path=database_path,
+            service_lock_path=service_lock_path,
+            write_handler=write_handler,
+        )
+        ready = bool(legacy["ready"])
+        return {
+            **legacy,
+            "ready": ready,
+            "capture_ready": ready,
+            "full_ready": ready,
+        }
+    ready = bool(payload.get("capture_ready", False))
+    payload["ready"] = ready
+    payload.setdefault("checks", _runtime_checks(payload))
+    return payload
+
+
+def run_full_readiness_checks(
+    *,
+    database_path: str | Path,
+    service_lock_path: Path | None,
+    write_handler: object | None,
+    runtime: object | None = None,
+) -> dict[str, object]:
+    """Return readiness for Core-backed, fully operational service behavior."""
+
+    payload = _runtime_report(runtime)
+    if payload is None:
+        legacy = run_readiness_checks(
+            database_path=database_path,
+            service_lock_path=service_lock_path,
+            write_handler=write_handler,
+        )
+        ready = bool(legacy["ready"])
+        return {
+            **legacy,
+            "ready": ready,
+            "capture_ready": ready,
+            "full_ready": ready,
+        }
+    ready = bool(payload.get("full_ready", False))
+    payload["ready"] = ready
+    payload.setdefault("checks", _runtime_checks(payload))
+    return payload
+
+
 def run_readiness_checks(
     *,
     database_path: str | Path,
