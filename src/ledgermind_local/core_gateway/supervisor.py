@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,8 @@ from ledgermind_protocol.core_ipc import (
 )
 
 from .framing import FrameError, read_frame, write_frame
-from .sandbox import SandboxLevel, SandboxUnavailableError, build_sandbox_plan
+from .isolation import IsolationCapabilities, IsolationRequirements
+from .sandbox import SandboxUnavailableError, build_sandbox_plan
 
 
 class CoreSupervisorError(RuntimeError):
@@ -60,6 +62,11 @@ class CoreSupervisor:
         core_data_dir: str | Path | None = None,
         blocked_data_dirs: Sequence[str | Path] = (),
         require_network_isolation: bool = False,
+        rounds_database_path: str | Path | None = None,
+        runtime_paths: Sequence[str | Path] = (),
+        isolation_requirements: IsolationRequirements | None = None,
+        strict_isolation: bool | None = None,
+        binary_signature_verified: bool = False,
     ) -> None:
         if not command or any(not str(part) for part in command):
             raise ValueError("Core command must not be empty")
@@ -72,9 +79,43 @@ class CoreSupervisor:
         self._blocked_data_dirs = tuple(
             Path(item).expanduser() for item in blocked_data_dirs
         )
-        self._require_network_isolation = require_network_isolation
-        self._sandbox_level = SandboxLevel.UNAVAILABLE
-        self._sandbox_detail = "Core has not been launched"
+        if isolation_requirements is None:
+            isolation_requirements = IsolationRequirements(
+                require_network_isolation=require_network_isolation,
+            )
+        elif require_network_isolation and not isolation_requirements.require_network_isolation:
+            isolation_requirements = replace(
+                isolation_requirements,
+                require_network_isolation=True,
+            )
+        self._isolation_requirements = isolation_requirements
+        self._strict_isolation = (
+            any(
+                (
+                    isolation_requirements.require_network_isolation,
+                    isolation_requirements.require_rounds_database_hidden,
+                    isolation_requirements.require_filesystem_allowlist,
+                    isolation_requirements.require_environment_sanitized,
+                    isolation_requirements.require_signature,
+                )
+            )
+            if strict_isolation is None
+            else strict_isolation
+        )
+        self._rounds_database_path = (
+            Path(rounds_database_path).expanduser()
+            if rounds_database_path is not None
+            else None
+        )
+        self._runtime_paths = tuple(Path(item).expanduser() for item in runtime_paths)
+        self._binary_signature_verified = binary_signature_verified
+        self._isolation_capabilities = IsolationCapabilities(
+            sandbox_backend="unavailable",
+            detail="Core has not been launched",
+        )
+        self._isolation_missing_requirements = isolation_requirements.missing(
+            self._isolation_capabilities
+        )
         self._handshake_result: dict[str, Any] | None = None
         self._lock = threading.RLock()
         self._process: subprocess.Popen[bytes] | None = None
@@ -165,12 +206,35 @@ class CoreSupervisor:
     @property
     def sandbox_level(self) -> str:
         with self._lock:
-            return self._sandbox_level.value
+            capabilities = self._isolation_capabilities
+            if capabilities.sandbox_backend == "unavailable":
+                return "unavailable"
+            if all(
+                (
+                    capabilities.network_isolated,
+                    capabilities.rounds_database_hidden,
+                    capabilities.filesystem_allowlisted,
+                    capabilities.environment_sanitized,
+                    capabilities.file_descriptors_closed,
+                )
+            ):
+                return "full"
+            return "partial"
 
     @property
     def sandbox_detail(self) -> str:
         with self._lock:
-            return self._sandbox_detail
+            return self._isolation_capabilities.detail
+
+    @property
+    def isolation_capabilities(self) -> IsolationCapabilities:
+        with self._lock:
+            return self._isolation_capabilities
+
+    @property
+    def isolation_missing_requirements(self) -> tuple[str, ...]:
+        with self._lock:
+            return self._isolation_missing_requirements
 
     @property
     def handshake_result(self) -> dict[str, Any] | None:
@@ -183,15 +247,27 @@ class CoreSupervisor:
                 self._command,
                 core_data_dir=self._core_data_dir,
                 blocked_data_dirs=self._blocked_data_dirs,
-                required=self._require_network_isolation,
+                rounds_database_path=self._rounds_database_path,
+                runtime_paths=self._runtime_paths,
+                binary_signature_verified=self._binary_signature_verified,
+                required=self._strict_isolation,
+                requirements=self._isolation_requirements,
+                strict=self._strict_isolation,
             )
         except SandboxUnavailableError as exc:
-            self._sandbox_level = SandboxLevel.UNAVAILABLE
-            self._sandbox_detail = str(exc)
+            self._isolation_capabilities = IsolationCapabilities(
+                sandbox_backend="unavailable",
+                detail=str(exc),
+            )
+            self._isolation_missing_requirements = self._isolation_requirements.missing(
+                self._isolation_capabilities
+            )
             raise CoreSupervisorError(str(exc)) from exc
 
-        self._sandbox_level = sandbox_plan.level
-        self._sandbox_detail = sandbox_plan.detail
+        self._isolation_capabilities = sandbox_plan.capabilities
+        self._isolation_missing_requirements = self._isolation_requirements.missing(
+            self._isolation_capabilities
+        )
         try:
             self._process = subprocess.Popen(
                 sandbox_plan.command,
@@ -218,6 +294,7 @@ class CoreSupervisor:
         environment = {
             "RUST_BACKTRACE": "0",
             "LEDGERMIND_CORE_DATA_DIR": str(self._core_data_dir),
+            "PWD": str(self._core_data_dir),
         }
         for name in ("LANG", "LC_ALL"):
             value = os.environ.get(name)

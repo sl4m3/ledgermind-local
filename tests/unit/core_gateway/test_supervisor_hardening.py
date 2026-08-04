@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from ledgermind_local.core_gateway.supervisor import CoreSupervisor
+from ledgermind_local.core_gateway.isolation import IsolationRequirements
+from ledgermind_local.core_gateway.supervisor import CoreSupervisor, CoreSupervisorError
 
 
 def test_core_child_receives_restricted_environment_cwd_and_fds(
@@ -52,6 +53,7 @@ def test_core_child_receives_restricted_environment_cwd_and_fds(
         ],
         core_data_dir=core_data_dir,
         blocked_data_dirs=(local_data_dir,),
+        rounds_database_path=rounds_database,
     )
     try:
         supervisor._spawn_locked()
@@ -66,13 +68,17 @@ def test_core_child_receives_restricted_environment_cwd_and_fds(
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["cwd"] == str(core_data_dir)
     assert report["inherited_fd"] is False
-    assert report["rounds_visible"] is False
+    if supervisor.isolation_capabilities.rounds_database_hidden:
+        assert report["rounds_visible"] is False
+    else:
+        assert report["rounds_visible"] is True
     assert report["env"].pop("PWD") == str(core_data_dir)
     assert report["env"] == {
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "RUST_BACKTRACE": "0",
         "LEDGERMIND_CORE_DATA_DIR": str(core_data_dir),
+        "PYTHONHOME": sys.base_prefix,
     }
 
 
@@ -101,7 +107,7 @@ def test_full_network_sandbox_cannot_reach_host_loopback(tmp_path: Path) -> None
     )
     try:
         supervisor._spawn_locked()
-        if supervisor.sandbox_level != "full":
+        if not supervisor.isolation_capabilities.network_isolated:
             pytest.skip("network namespace is unavailable on this host")
         deadline = time.monotonic() + 2.0
         while not report_path.exists() and time.monotonic() < deadline:
@@ -112,3 +118,37 @@ def test_full_network_sandbox_cannot_reach_host_loopback(tmp_path: Path) -> None
 
     assert report_path.exists()
     assert json.loads(report_path.read_text(encoding="utf-8"))["connected"] is False
+
+
+def test_strict_profile_refuses_when_rounds_database_cannot_be_hidden(
+    tmp_path: Path, monkeypatch
+) -> None:
+    core_data_dir = tmp_path / "core"
+    core_data_dir.mkdir(mode=0o700)
+    local_data_dir = tmp_path / "local"
+    local_data_dir.mkdir(mode=0o700)
+    rounds_database = local_data_dir / "rounds.db"
+    rounds_database.write_bytes(b"local-owned fixture")
+    monkeypatch.setattr(
+        "ledgermind_local.core_gateway.sandbox.shutil.which",
+        lambda _: None,
+    )
+
+    supervisor = CoreSupervisor(
+        [sys.executable, "-c", "pass"],
+        core_data_dir=core_data_dir,
+        blocked_data_dirs=(local_data_dir,),
+        rounds_database_path=rounds_database,
+        isolation_requirements=IsolationRequirements(
+            require_network_isolation=True,
+            require_rounds_database_hidden=True,
+            require_filesystem_allowlist=True,
+            require_environment_sanitized=True,
+        ),
+        strict_isolation=True,
+    )
+
+    with pytest.raises(CoreSupervisorError, match="rounds_database_hidden"):
+        supervisor.start()
+
+    assert "rounds_database_hidden" in supervisor.isolation_missing_requirements

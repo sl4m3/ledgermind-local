@@ -4,12 +4,10 @@ import sys
 from pathlib import Path
 
 _LOCAL_ROOT = Path(__file__).resolve().parents[2]
-_PROJECTS_ROOT = _LOCAL_ROOT.parent
 sys.path.insert(0, str(_LOCAL_ROOT / "src"))
-sys.path.insert(
-    0,
-    str(_PROJECTS_ROOT / "ledgermind-integrations" / "protocol" / "python" / "src"),
-)
+for _index, _argument in enumerate(sys.argv[:-1]):
+    if _argument == "--python-path":
+        sys.path.insert(0, str(Path(sys.argv[_index + 1]).expanduser()))
 
 from ledgermind_local.core_gateway.fake_process import main
 

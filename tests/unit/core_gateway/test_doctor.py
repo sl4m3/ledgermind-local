@@ -109,6 +109,7 @@ def test_core_doctor_reports_missing_signature_without_launching(tmp_path: Path)
     assert report["signature"]["status"] == "failed"
     assert report["health"]["detail"] == "Core was not launched"
     assert report["environment"]["values_exposed"] is False
+    assert report["sandbox"]["capabilities"]["binary_signature_verified"] is False
 
 
 def test_core_doctor_cli_verifies_binary_and_reports_runtime_without_secrets(
@@ -135,6 +136,8 @@ def test_core_doctor_cli_verifies_binary_and_reports_runtime_without_secrets(
     assert report["health"]["protocol_version"] == 1
     assert report["health"]["schema_version"] == 2
     assert report["sandbox"]["level"] in {"full", "partial"}
+    assert report["sandbox"]["capabilities"]["binary_signature_verified"] is True
+    assert "missing_requirements" in report["sandbox"]
     assert report["environment"]["secret_like_keys"] == []
     assert report["environment"]["unexpected_keys"] == []
     assert report["environment"]["values_exposed"] is False

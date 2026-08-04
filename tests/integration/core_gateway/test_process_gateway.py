@@ -3,9 +3,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import sysconfig
 import time
 from pathlib import Path
+from typing import Any
 
+import ledgermind_protocol
+import pydantic_core
 import pytest
 
 from ledgermind_local.core_gateway.contracts import (
@@ -18,15 +22,43 @@ from ledgermind_local.core_gateway.contracts import (
     RetrieveContextCommand,
 )
 from ledgermind_local.core_gateway.process import ProcessCoreGateway
-from ledgermind_local.core_gateway.supervisor import CoreSupervisor
+from ledgermind_local.core_gateway.supervisor import CoreSupervisor as _CoreSupervisor
 
 _FAKE_PROCESS = (
     Path(__file__).resolve().parents[2] / "fixtures" / "fake_core_process.py"
 )
+_LOCAL_ROOT = Path(__file__).resolve().parents[3]
+_LOCAL_SOURCE = _LOCAL_ROOT / "src"
+_PROTOCOL_SOURCE = Path(ledgermind_protocol.__file__).resolve().parent.parent
+_SITE_PACKAGES = Path(sysconfig.get_path("purelib"))
+_PYDANTIC_CORE = next(
+    Path(pydantic_core.__file__).resolve().parent.glob("*.so")
+)
+_RUNTIME_PATHS = (_LOCAL_SOURCE, _PROTOCOL_SOURCE, _SITE_PACKAGES, _PYDANTIC_CORE)
 
 
 def _command(*args: str) -> tuple[str, ...]:
-    return (sys.executable, str(_FAKE_PROCESS), *args)
+    return (
+        sys.executable,
+        str(_FAKE_PROCESS),
+        "--python-path",
+        str(_LOCAL_SOURCE),
+        "--python-path",
+        str(_PROTOCOL_SOURCE),
+        "--python-path",
+        str(_SITE_PACKAGES),
+        *args,
+    )
+
+
+def _test_supervisor(command: tuple[str, ...], **kwargs: Any) -> _CoreSupervisor:
+    """Declare the sibling protocol source needed by the isolated fixture."""
+
+    return _CoreSupervisor(
+        command,
+        runtime_paths=_RUNTIME_PATHS,
+        **kwargs,
+    )
 
 
 def _accept_command(statement: str = "same statement") -> AcceptHypothesisCommand:
@@ -67,7 +99,7 @@ def _accept_command(statement: str = "same statement") -> AcceptHypothesisComman
 
 
 def test_process_gateway_performs_handshake_and_health() -> None:
-    supervisor = CoreSupervisor(_command(), startup_timeout_seconds=2.0)
+    supervisor = _test_supervisor(_command(), startup_timeout_seconds=2.0)
     gateway = ProcessCoreGateway(supervisor)
 
     try:
@@ -81,7 +113,7 @@ def test_process_gateway_performs_handshake_and_health() -> None:
 
 def test_process_gateway_restarts_after_child_crash(tmp_path: Path) -> None:
     crash_marker = tmp_path / "crash-once.marker"
-    supervisor = CoreSupervisor(
+    supervisor = _test_supervisor(
         _command("--crash-once-file", str(crash_marker)),
         startup_timeout_seconds=2.0,
         core_data_dir=tmp_path,
@@ -99,7 +131,7 @@ def test_process_gateway_restarts_after_child_crash(tmp_path: Path) -> None:
 
 
 def test_process_gateway_marks_timeout_unhealthy_and_terminates_child() -> None:
-    supervisor = CoreSupervisor(
+    supervisor = _test_supervisor(
         _command("--delay-seconds", "0.2"),
         startup_timeout_seconds=2.0,
         operation_timeout_seconds=0.05,
@@ -117,7 +149,7 @@ def test_process_gateway_marks_timeout_unhealthy_and_terminates_child() -> None:
 
 
 def test_accept_hypothesis_replay_is_idempotent() -> None:
-    supervisor = CoreSupervisor(_command(), startup_timeout_seconds=2.0)
+    supervisor = _test_supervisor(_command(), startup_timeout_seconds=2.0)
     gateway = ProcessCoreGateway(supervisor)
     command = _accept_command()
 
@@ -134,7 +166,7 @@ def test_accept_hypothesis_replay_is_idempotent() -> None:
 
 
 def test_accept_hypothesis_idempotency_conflict_is_domain_rejection() -> None:
-    supervisor = CoreSupervisor(_command(), startup_timeout_seconds=2.0)
+    supervisor = _test_supervisor(_command(), startup_timeout_seconds=2.0)
     gateway = ProcessCoreGateway(supervisor)
 
     try:
@@ -148,7 +180,7 @@ def test_accept_hypothesis_idempotency_conflict_is_domain_rejection() -> None:
 
 
 def test_process_gateway_retrieves_context_and_records_usage() -> None:
-    supervisor = CoreSupervisor(_command(), startup_timeout_seconds=2.0)
+    supervisor = _test_supervisor(_command(), startup_timeout_seconds=2.0)
     gateway = ProcessCoreGateway(supervisor)
 
     try:
@@ -176,7 +208,7 @@ def test_process_gateway_retrieves_context_and_records_usage() -> None:
 
 
 def test_process_stderr_is_captured_without_corrupting_stdout_protocol() -> None:
-    supervisor = CoreSupervisor(
+    supervisor = _test_supervisor(
         _command("--stderr-line", "fake diagnostic"),
         startup_timeout_seconds=2.0,
     )
@@ -256,7 +288,7 @@ def test_local_runtime_graph_imports_without_python_core() -> None:
 
 
 def test_process_gateway_rejects_mismatched_response_id() -> None:
-    supervisor = CoreSupervisor(
+    supervisor = _test_supervisor(
         _command("--mismatched-health-id"),
         startup_timeout_seconds=2.0,
     )
@@ -273,7 +305,7 @@ def test_process_gateway_rejects_mismatched_response_id() -> None:
 
 
 def test_process_gateway_rejects_malformed_response() -> None:
-    supervisor = CoreSupervisor(
+    supervisor = _test_supervisor(
         _command("--malformed-health-response"),
         startup_timeout_seconds=2.0,
     )
