@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from ledgermind_local.core_gateway.projection_contracts import (
@@ -135,4 +136,56 @@ def test_core_projection_worker_keeps_projection_consumers_independent(
         "local-projections:fts",
         "local-projections:vector",
     ]
+    worker.close()
+
+
+def test_core_projection_worker_loop_survives_unexpected_gateway_error(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "rounds.db"
+    with open_sqlite_connection(database_path) as connection:
+        rounds_migrations.apply_migrations(connection)
+        connection.execute(
+            """
+            INSERT INTO memory_spaces (
+                memory_space_id, display_name, source_client, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("space-1", "Space", "test", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        connection.commit()
+
+    recovered = threading.Event()
+
+    class FlakyGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__(_event())
+            self.failed = False
+
+        def poll_projection_events(self, command):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("event payload must not be logged")
+            recovered.set()
+            return super().poll_projection_events(command)
+
+    gateway = FlakyGateway()
+    worker = CoreProjectionWorker(
+        database_path=database_path,
+        gateway=gateway,
+        consumer_id="local-projections",
+        handlers_factory=lambda _connection: {"fts": Handler([])},
+    )
+    loop = worker.create_loop(
+        poll_interval_seconds=0,
+        initial_backoff_seconds=0,
+        max_backoff_seconds=0,
+    )
+
+    loop.start()
+    assert recovered.wait(timeout=1)
+    loop.request_stop()
+    assert loop.join(timeout=1) is True
+    assert worker.state.failed_count == 1
+    assert worker.state.healthy is True
     worker.close()

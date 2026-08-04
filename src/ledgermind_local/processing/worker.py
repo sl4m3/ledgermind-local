@@ -16,6 +16,8 @@ from typing import Any
 from typing_extensions import Self
 
 from ..persistence import RawRoundRecord, SQLiteUnitOfWork
+from ..scheduler.guarded_loop import GuardedWorkerLoop
+from ..scheduler.worker_state import WorkerState
 from .generator import HypothesisCandidate, HypothesisGenerator
 from .models import NormalizedRound
 from .normalizer import normalize_raw_round, redact_text, redact_value
@@ -190,6 +192,7 @@ class RoundProcessingWorker:
         retry_delay_seconds: float = 30,
         lease_seconds: float = 300,
         heartbeat_interval_seconds: float = 30,
+        state: WorkerState | None = None,
     ) -> None:
         self.database_path = database_path
         self.generator = generator
@@ -198,8 +201,44 @@ class RoundProcessingWorker:
         self.retry_delay_seconds = max(float(retry_delay_seconds), 0)
         self.lease_seconds = max(float(lease_seconds), 1)
         self.heartbeat_interval_seconds = max(float(heartbeat_interval_seconds), 0.1)
+        self.state = state or WorkerState("round-processing")
+        self._stop = threading.Event()
+
+    def request_stop(self) -> None:
+        self._stop.set()
+
+    def create_loop(
+        self,
+        *,
+        poll_interval_seconds: float = 1.0,
+        initial_backoff_seconds: float = 0.25,
+        max_backoff_seconds: float = 30.0,
+    ) -> GuardedWorkerLoop:
+        return GuardedWorkerLoop(
+            self,
+            state=self.state,
+            name="round-processing",
+            poll_interval_seconds=poll_interval_seconds,
+            initial_backoff_seconds=initial_backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+        )
+
+    def run_loop(
+        self,
+        *,
+        poll_interval_seconds: float = 1.0,
+        initial_backoff_seconds: float = 0.25,
+        max_backoff_seconds: float = 30.0,
+    ) -> None:
+        self.create_loop(
+            poll_interval_seconds=poll_interval_seconds,
+            initial_backoff_seconds=initial_backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+        ).run()
 
     def _claim(self) -> tuple[Any, RawRoundRecord] | None:
+        if self._stop.is_set():
+            return None
         with SQLiteUnitOfWork(self.database_path, write_transaction=True) as uow:
             job = uow.raw_rounds.claim_ready_job(
                 worker_id=self.worker_id,

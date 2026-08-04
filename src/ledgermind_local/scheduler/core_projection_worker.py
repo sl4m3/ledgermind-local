@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,9 @@ from ledgermind_local.core_gateway.projection_consumer import (
 )
 from ledgermind_local.core_gateway.projection_inbox import CoreProjectionInbox
 from ledgermind_local.persistence import open_sqlite_connection
+
+from .guarded_loop import GuardedWorkerLoop
+from .worker_state import WorkerState
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +44,7 @@ class CoreProjectionWorker:
         consumer_id: str,
         handlers_factory: HandlerFactory,
         poll_limit: int = 100,
+        state: WorkerState | None = None,
     ) -> None:
         if not consumer_id.strip():
             raise ValueError("consumer_id must not be empty")
@@ -50,6 +55,8 @@ class CoreProjectionWorker:
         self._consumer_id = consumer_id
         self._handlers_factory = handlers_factory
         self._poll_limit = poll_limit
+        self.state = state or WorkerState("core-projection")
+        self._stop = threading.Event()
         self._connection: sqlite3.Connection | None = None
         self._consumers: dict[str, CoreProjectionConsumer] | None = None
         self._handlers: Mapping[str, Any] | None = None
@@ -58,6 +65,8 @@ class CoreProjectionWorker:
     def process_once(self) -> CoreProjectionWorkerStats:
         if self._closed:
             raise RuntimeError("Core projection worker is closed")
+        if self._stop.is_set():
+            return CoreProjectionWorkerStats()
         consumers = self._ensure_consumers()
         assert self._connection is not None
 
@@ -70,7 +79,11 @@ class CoreProjectionWorker:
             """
         ).fetchall()
         for projection_name, consumer in consumers.items():
+            if self._stop.is_set():
+                break
             for row in rows:
+                if self._stop.is_set():
+                    break
                 result = consumer.poll_once(
                     str(row[0]),
                     consumer_id=f"{self._consumer_id}:{projection_name}",
@@ -78,6 +91,39 @@ class CoreProjectionWorker:
                 )
                 totals = _add_stats(totals, result)
         return totals
+
+    def request_stop(self) -> None:
+        self._stop.set()
+
+    def create_loop(
+        self,
+        *,
+        poll_interval_seconds: float = 1.0,
+        initial_backoff_seconds: float = 0.25,
+        max_backoff_seconds: float = 30.0,
+    ) -> GuardedWorkerLoop:
+        return GuardedWorkerLoop(
+            self,
+            state=self.state,
+            name="core-projection",
+            poll_interval_seconds=poll_interval_seconds,
+            initial_backoff_seconds=initial_backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+            close_on_stop=True,
+        )
+
+    def run_loop(
+        self,
+        *,
+        poll_interval_seconds: float = 1.0,
+        initial_backoff_seconds: float = 0.25,
+        max_backoff_seconds: float = 30.0,
+    ) -> None:
+        self.create_loop(
+            poll_interval_seconds=poll_interval_seconds,
+            initial_backoff_seconds=initial_backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+        ).run()
 
     def close(self) -> None:
         if self._closed:

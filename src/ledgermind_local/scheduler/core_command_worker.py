@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,9 @@ from ledgermind_local.core_gateway.contracts import (
 )
 from ledgermind_local.persistence import CoreCommandRecord, SQLiteUnitOfWork
 from ledgermind_local.processing.normalizer import redact_text
+
+from .guarded_loop import GuardedWorkerLoop
+from .worker_state import WorkerState
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +40,7 @@ class CoreCommandWorker:
         max_attempts: int = 5,
         retry_delay_seconds: float = 30,
         lease_seconds: float = 300,
+        state: WorkerState | None = None,
     ) -> None:
         self.database_path = database_path
         self.gateway = gateway
@@ -43,8 +48,12 @@ class CoreCommandWorker:
         self.max_attempts = max(int(max_attempts), 1)
         self.retry_delay_seconds = max(float(retry_delay_seconds), 0)
         self.lease_seconds = max(float(lease_seconds), 1)
+        self.state = state or WorkerState("core-command")
+        self._stop = threading.Event()
 
     def process_once(self) -> CoreCommandProcessResult | None:
+        if self._stop.is_set():
+            return None
         command = self._claim()
         if command is None:
             return None
@@ -107,7 +116,41 @@ class CoreCommandWorker:
                 error=exc,
             )
 
+    def request_stop(self) -> None:
+        self._stop.set()
+
+    def create_loop(
+        self,
+        *,
+        poll_interval_seconds: float = 1.0,
+        initial_backoff_seconds: float = 0.25,
+        max_backoff_seconds: float = 30.0,
+    ) -> GuardedWorkerLoop:
+        return GuardedWorkerLoop(
+            self,
+            state=self.state,
+            name="core-command",
+            poll_interval_seconds=poll_interval_seconds,
+            initial_backoff_seconds=initial_backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+        )
+
+    def run_loop(
+        self,
+        *,
+        poll_interval_seconds: float = 1.0,
+        initial_backoff_seconds: float = 0.25,
+        max_backoff_seconds: float = 30.0,
+    ) -> None:
+        self.create_loop(
+            poll_interval_seconds=poll_interval_seconds,
+            initial_backoff_seconds=initial_backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+        ).run()
+
     def _claim(self) -> CoreCommandRecord | None:
+        if self._stop.is_set():
+            return None
         with SQLiteUnitOfWork(self.database_path, write_transaction=True) as uow:
             command = uow.raw_rounds.claim_core_command(
                 worker_id=self.worker_id,
