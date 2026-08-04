@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections.abc import Iterable, Mapping
+from typing import Any, NoReturn
 
 from .base import CoreGateway
 from .contracts import (
     AcceptHypothesisCommand,
     AcceptHypothesisResult,
     ContextViewResult,
+    CoreCapabilityError,
     CoreGatewayError,
     CoreHealth,
     DomainRejectedError,
@@ -17,8 +19,17 @@ from .contracts import (
     RetrieveContextCommand,
     TransientCoreError,
 )
+from .maintenance import (
+    BackupManifest,
+    CreateBackupCommand,
+    PrepareRestoreCommand,
+    PrepareRestoreResult,
+    ValidateBackupCommand,
+)
 from .model_task_contracts import (
     CoreModelTask,
+    FailModelTaskCommand,
+    FailModelTaskResult,
     PollModelTasksCommand,
     PollModelTasksResult,
     SubmitModelResult,
@@ -37,12 +48,165 @@ from .supervisor import (
     CoreSupervisorRemoteError,
 )
 
+_CAPABILITY_REQUIREMENTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "base": (
+        frozenset(
+            {
+                "health",
+                "accept_hypothesis",
+                "retrieve_context",
+                "record_context_usage",
+            }
+        ),
+        frozenset(),
+    ),
+    "projections": (
+        frozenset({"poll_projection_events", "ack_projection_events"}),
+        frozenset({"projection_events"}),
+    ),
+    "model_tasks": (
+        frozenset({"poll_model_tasks", "submit_model_result", "fail_model_task"}),
+        frozenset({"model_task_failure_reporting"}),
+    ),
+    "maintenance": (
+        frozenset({"create_backup", "validate_backup", "prepare_restore"}),
+        frozenset({"core_owned_backup"}),
+    ),
+}
+
 
 class ProcessCoreGateway(CoreGateway):
     """Use a supervised Core process without importing the Python Core package."""
 
-    def __init__(self, supervisor: CoreSupervisor) -> None:
+    def __init__(
+        self,
+        supervisor: CoreSupervisor,
+        *,
+        required_capabilities: Iterable[str] = (),
+        required_operations: Iterable[str] = (),
+    ) -> None:
         self._supervisor = supervisor
+        self._required_capabilities = self._normalize_names(
+            required_capabilities, "capability"
+        )
+        self._required_operations = self._normalize_names(
+            required_operations, "operation"
+        )
+        if self._required_capabilities or self._required_operations:
+            self._validate_capabilities()
+
+    @staticmethod
+    def _normalize_names(values: Iterable[str], label: str) -> tuple[str, ...]:
+        names = tuple(values)
+        if any(not isinstance(value, str) or not value.strip() for value in names):
+            raise ValueError(f"{label} names must be non-empty strings")
+        return tuple(dict.fromkeys(names))
+
+    def require_capabilities(self, *capabilities: str) -> None:
+        """Validate a feature at its consumer initialization boundary."""
+
+        if len(capabilities) == 1 and not isinstance(capabilities[0], str):
+            values = tuple(capabilities[0])
+        else:
+            values = capabilities
+        names = self._normalize_names(values, "capability")
+        current = getattr(self, "_required_capabilities", ())
+        self._required_capabilities = tuple(dict.fromkeys((*current, *names)))
+        self._validate_capabilities()
+
+    def _fail_closed(self, error: CoreGatewayError) -> NoReturn:
+        try:
+            self._supervisor.close()
+        finally:
+            raise error
+
+    def _validate_capabilities(self) -> None:
+        requested = tuple(
+            dict.fromkeys(
+                (
+                    *getattr(self, "_required_capabilities", ()),
+                    *getattr(self, "_required_operations", ()),
+                )
+            )
+        )
+        required_operations = set(getattr(self, "_required_operations", ()))
+        required_capability_flags: set[str] = set()
+        for capability in getattr(self, "_required_capabilities", ()):
+            try:
+                operations, flags = _CAPABILITY_REQUIREMENTS[capability]
+            except KeyError as exc:
+                raise ValueError(f"unknown Core capability: {capability}") from exc
+            required_operations.update(operations)
+            required_capability_flags.update(flags)
+
+        try:
+            self._supervisor.start()
+            handshake = self._supervisor.handshake_result
+        except CoreGatewayError:
+            raise
+        except Exception as exc:
+            raise TransientCoreError("Core capability handshake failed") from exc
+        if not isinstance(handshake, Mapping):
+            self._fail_closed(
+                TransientCoreError("Core capability handshake is unavailable")
+            )
+
+        raw_operations = handshake.get("supported_operations", ())
+        raw_flags = handshake.get("capabilities", {})
+        if not isinstance(raw_operations, (list, tuple, set, frozenset)):
+            self._fail_closed(
+                TransientCoreError("Core capability operations are malformed")
+            )
+        if not isinstance(raw_flags, Mapping):
+            self._fail_closed(TransientCoreError("Core capability flags are malformed"))
+        advertised_operations = {
+            operation
+            for operation in raw_operations
+            if isinstance(operation, str)
+        }
+        advertised_flags = {
+            capability
+            for capability, supported in raw_flags.items()
+            if isinstance(capability, str) and supported is True
+        }
+        missing_operations = tuple(sorted(required_operations - advertised_operations))
+        missing_flags = tuple(sorted(required_capability_flags - advertised_flags))
+        if missing_operations or missing_flags:
+            self._fail_closed(
+                CoreCapabilityError(
+                    requested=requested,
+                    missing_operations=missing_operations,
+                    missing_capabilities=missing_flags,
+                )
+            )
+
+    @property
+    def advertised_operations(self) -> frozenset[str]:
+        """Return operations from the validated Core handshake."""
+
+        handshake = self._supervisor.handshake_result
+        if not isinstance(handshake, Mapping):
+            return frozenset()
+        raw = handshake.get("supported_operations", ())
+        if not isinstance(raw, (list, tuple, set, frozenset)):
+            return frozenset()
+        return frozenset(item for item in raw if isinstance(item, str))
+
+    @property
+    def advertised_capabilities(self) -> frozenset[str]:
+        """Return enabled feature flags from the Core handshake."""
+
+        handshake = self._supervisor.handshake_result
+        if not isinstance(handshake, Mapping):
+            return frozenset()
+        raw = handshake.get("capabilities", {})
+        if not isinstance(raw, Mapping):
+            return frozenset()
+        return frozenset(
+            capability
+            for capability, supported in raw.items()
+            if isinstance(capability, str) and supported is True
+        )
 
     def health(self) -> CoreHealth:
         try:
@@ -157,7 +321,7 @@ class ProcessCoreGateway(CoreGateway):
             raise TransientCoreError("Core model task result is malformed")
         try:
             tasks = tuple(CoreModelTask.from_wire(dict(item)) for item in raw_tasks)
-        except (TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise DomainRejectedError("invalid_model_task", str(exc)) from exc
         return PollModelTasksResult(
             tasks=tasks,
@@ -187,6 +351,54 @@ class ProcessCoreGateway(CoreGateway):
             duplicate=duplicate,
             status=status,
         )
+
+    def fail_model_task(
+        self, command: FailModelTaskCommand
+    ) -> FailModelTaskResult:
+        result = self._request(
+            "fail_model_task",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        try:
+            return FailModelTaskResult.from_payload(result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransientCoreError("Core model task failure result is malformed") from exc
+
+    def create_backup(self, command: CreateBackupCommand) -> BackupManifest:
+        result = self._request(
+            "create_backup",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        try:
+            return BackupManifest.from_payload(result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransientCoreError("Core backup result is malformed") from exc
+
+    def validate_backup(self, command: ValidateBackupCommand) -> BackupManifest:
+        result = self._request(
+            "validate_backup",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        try:
+            return BackupManifest.from_payload(result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransientCoreError("Core backup validation result is malformed") from exc
+
+    def prepare_restore(
+        self, command: PrepareRestoreCommand
+    ) -> PrepareRestoreResult:
+        result = self._request(
+            "prepare_restore",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        try:
+            return PrepareRestoreResult.from_payload(result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransientCoreError("Core restore preparation result is malformed") from exc
 
     def close(self) -> None:
         self._supervisor.close()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
@@ -14,6 +15,7 @@ import pytest
 
 from ledgermind_local.core_gateway.contracts import (
     AcceptHypothesisCommand,
+    CoreCapabilityError,
     DomainRejectedError,
     HypothesisEvidence,
     HypothesisExtraction,
@@ -21,6 +23,12 @@ from ledgermind_local.core_gateway.contracts import (
     RecordContextUsageCommand,
     RetrieveContextCommand,
 )
+from ledgermind_local.core_gateway.maintenance import (
+    CreateBackupCommand,
+    PrepareRestoreCommand,
+    ValidateBackupCommand,
+)
+from ledgermind_local.core_gateway.model_task_contracts import FailModelTaskCommand
 from ledgermind_local.core_gateway.process import ProcessCoreGateway
 from ledgermind_local.core_gateway.supervisor import CoreSupervisor as _CoreSupervisor
 
@@ -205,6 +213,61 @@ def test_process_gateway_retrieves_context_and_records_usage() -> None:
     assert context.api_version == "1"
     assert len(context.items) == 1
     assert context.items[0].knowledge_id == "knowledge-1"
+
+
+def test_process_gateway_consumes_model_failure_and_core_backup_operations(
+    tmp_path: Path,
+) -> None:
+    supervisor = _test_supervisor(
+        _command(), startup_timeout_seconds=2.0, core_data_dir=tmp_path
+    )
+    gateway = ProcessCoreGateway(supervisor, required_capabilities=("maintenance",))
+
+    try:
+        failure = gateway.fail_model_task(
+            FailModelTaskCommand(
+                request_id="failure-1",
+                task_id="task-1",
+                memory_space_id="space-1",
+                worker_id="worker-1",
+                error_code="provider_timeout",
+                retryable=True,
+                retry_after_seconds=30,
+                failed_at="2026-08-04T12:00:00Z",
+            )
+        )
+        created = gateway.create_backup(CreateBackupCommand("backup-1"))
+        outgoing = tmp_path / created.relative_path
+        incoming = tmp_path / "exchange" / "incoming" / outgoing.name
+        incoming.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(outgoing, incoming)
+        validated = gateway.validate_backup(
+            ValidateBackupCommand("validate-1", f"exchange/incoming/{outgoing.name}", created.sha256)
+        )
+        prepared = gateway.prepare_restore(
+            PrepareRestoreCommand("prepare-1", validated.relative_path, validated.sha256)
+        )
+    finally:
+        gateway.close()
+
+    assert failure.status == "pending"
+    assert validated.sha256 == created.sha256
+    assert prepared.restore_token == "fake-restore-token-1"
+    assert prepared.requires_restart is True
+
+
+def test_process_gateway_rejects_missing_core_backup_capability(tmp_path: Path) -> None:
+    supervisor = _test_supervisor(
+        _command("--missing-capability", "core_owned_backup"),
+        startup_timeout_seconds=2.0,
+        core_data_dir=tmp_path,
+    )
+
+    with pytest.raises(CoreCapabilityError) as error:
+        ProcessCoreGateway(supervisor, required_capabilities=("maintenance",))
+
+    assert error.value.missing_capabilities == ("core_owned_backup",)
+    assert supervisor.pid is None
 
 
 def test_process_stderr_is_captured_without_corrupting_stdout_protocol() -> None:

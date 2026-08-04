@@ -18,6 +18,28 @@ class TransientCoreError(CoreGatewayError):
     """Core is temporarily unavailable and the command may be retried."""
 
 
+class CoreCapabilityError(CoreGatewayError):
+    """The connected Core did not advertise a required IPC capability."""
+
+    def __init__(
+        self,
+        *,
+        requested: tuple[str, ...],
+        missing_operations: tuple[str, ...] = (),
+        missing_capabilities: tuple[str, ...] = (),
+    ) -> None:
+        self.requested = requested
+        self.missing_operations = missing_operations
+        self.missing_capabilities = missing_capabilities
+        details: list[str] = []
+        if missing_operations:
+            details.append("operations=" + ",".join(missing_operations))
+        if missing_capabilities:
+            details.append("capabilities=" + ",".join(missing_capabilities))
+        suffix = "; ".join(details) if details else "no advertised support"
+        super().__init__(f"Core capability validation failed: {suffix}")
+
+
 class DomainRejectedError(CoreGatewayError):
     """Core rejected a validly delivered command for a domain reason."""
 
@@ -327,6 +349,7 @@ __all__ = [
     "AcceptHypothesisResult",
     "ContextViewItem",
     "ContextViewResult",
+    "CoreCapabilityError",
     "CoreGatewayError",
     "CoreHealth",
     "DomainRejectedError",

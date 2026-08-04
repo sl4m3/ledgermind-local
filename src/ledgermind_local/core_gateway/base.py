@@ -12,7 +12,16 @@ from .contracts import (
     RecordContextUsageCommand,
     RetrieveContextCommand,
 )
+from .maintenance import (
+    BackupManifest,
+    CreateBackupCommand,
+    PrepareRestoreCommand,
+    PrepareRestoreResult,
+    ValidateBackupCommand,
+)
 from .model_task_contracts import (
+    FailModelTaskCommand,
+    FailModelTaskResult,
     PollModelTasksCommand,
     PollModelTasksResult,
     SubmitModelResult,
@@ -56,6 +65,18 @@ class CoreGateway(Protocol):
     def submit_model_result(
         self, command: SubmitModelResultCommand
     ) -> SubmitModelResult: ...
+
+    def fail_model_task(
+        self, command: FailModelTaskCommand
+    ) -> FailModelTaskResult: ...
+
+    def create_backup(self, command: CreateBackupCommand) -> BackupManifest: ...
+
+    def validate_backup(self, command: ValidateBackupCommand) -> BackupManifest: ...
+
+    def prepare_restore(
+        self, command: PrepareRestoreCommand
+    ) -> PrepareRestoreResult: ...
 
     def health(self) -> CoreHealth: ...
 

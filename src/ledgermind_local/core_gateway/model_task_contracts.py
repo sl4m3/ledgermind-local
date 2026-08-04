@@ -181,8 +181,103 @@ class SubmitModelResult:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class FailModelTaskCommand:
+    """Classified failure reported for a leased Core model task."""
+
+    request_id: str
+    task_id: str
+    memory_space_id: str
+    worker_id: str
+    error_code: str
+    retryable: bool
+    retry_after_seconds: int
+    failed_at: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.request_id, "request_id")
+        _required_text(self.task_id, "task_id")
+        _required_text(self.memory_space_id, "memory_space_id")
+        _required_text(self.worker_id, "worker_id")
+        _required_text(self.error_code, "error_code")
+        if not isinstance(self.retryable, bool):
+            raise TypeError("retryable must be a boolean")
+        if (
+            isinstance(self.retry_after_seconds, bool)
+            or not isinstance(self.retry_after_seconds, int)
+            or not 0 <= self.retry_after_seconds <= 86_400
+        ):
+            raise ValueError("retry_after_seconds must be between 0 and 86400")
+        _timestamp(self.failed_at, "failed_at")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "memory_space_id": self.memory_space_id,
+            "worker_id": self.worker_id,
+            "error_code": self.error_code,
+            "retryable": self.retryable,
+            "retry_after_seconds": self.retry_after_seconds,
+            "failed_at": self.failed_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FailModelTaskResult:
+    """Result of atomically transitioning a failed model task."""
+
+    status: str
+    attempts: int
+    available_at: str | None
+    last_error_code: str | None
+    failed_at: str | None
+    completed_at: str | None
+
+    def __post_init__(self) -> None:
+        if self.status not in {"pending", "failed"}:
+            raise ValueError("model task failure status is invalid")
+        if isinstance(self.attempts, bool) or not isinstance(self.attempts, int):
+            raise TypeError("attempts must be an integer")
+        if self.attempts < 0:
+            raise ValueError("attempts must be non-negative")
+        for value, name in (
+            (self.available_at, "available_at"),
+            (self.failed_at, "failed_at"),
+            (self.completed_at, "completed_at"),
+        ):
+            if value is not None:
+                _timestamp(value, name)
+        if self.last_error_code is not None:
+            _required_text(self.last_error_code, "last_error_code")
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> FailModelTaskResult:
+        _strict_mapping(
+            payload,
+            {
+                "status",
+                "attempts",
+                "available_at",
+                "last_error_code",
+                "failed_at",
+                "completed_at",
+            },
+            "fail model task result",
+        )
+        return cls(
+            status=payload["status"],
+            attempts=payload["attempts"],
+            available_at=payload.get("available_at"),
+            last_error_code=payload.get("last_error_code"),
+            failed_at=payload.get("failed_at"),
+            completed_at=payload.get("completed_at"),
+        )
+
+
 __all__ = [
     "CoreModelTask",
+    "FailModelTaskCommand",
+    "FailModelTaskResult",
     "PollModelTasksCommand",
     "PollModelTasksResult",
     "SubmitModelResult",
