@@ -120,7 +120,7 @@ def _value(obj: object, key: str) -> object:
         return obj.get(key)
     if hasattr(obj, "__getitem__"):
         try:
-            return obj[key]  # type: ignore[index]
+            return obj[key]
         except (TypeError, KeyError):
             pass
     return getattr(obj, key, None)
