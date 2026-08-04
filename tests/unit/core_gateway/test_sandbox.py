@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,8 @@ from ledgermind_local.core_gateway.sandbox import (
     SandboxLevel,
     SandboxUnavailableError,
     _ProbeResult,
+    _sandbox_environment,
+    _sanitized_environment,
     build_sandbox_plan,
 )
 
@@ -212,3 +215,30 @@ def test_permissive_profile_reports_missing_capabilities(tmp_path: Path, monkeyp
     assert plan.capabilities.rounds_database_hidden is False
     assert plan.capabilities.filesystem_allowlisted is False
     assert plan.capabilities.sandbox_backend == "none"
+
+
+def test_sanitized_environment_allows_locale_context_but_not_secrets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("LC_CTYPE", "C.UTF-8")
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setenv("OPENAI_API_KEY", "[REDACTED]")
+    monkeypatch.setenv("PYTHONHOME", "/unexpected")
+
+    environment = _sanitized_environment(tmp_path)
+
+    assert environment["LC_CTYPE"] == "C.UTF-8"
+    assert environment["TZ"] == "UTC"
+    assert "OPENAI_API_KEY" not in environment
+    assert "PYTHONHOME" not in environment
+
+
+def test_pythonhome_is_only_injected_for_a_python_shim(tmp_path: Path) -> None:
+    rust_environment = _sandbox_environment(
+        tmp_path,
+        ("/opt/ledgermind-core/bin/ledgermind-core",),
+    )
+    shim_environment = _sandbox_environment(tmp_path, (sys.executable,))
+
+    assert "PYTHONHOME" not in rust_environment
+    assert shim_environment["PYTHONHOME"] == sys.base_prefix

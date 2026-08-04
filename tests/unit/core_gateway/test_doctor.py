@@ -9,13 +9,29 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ledgermind_local.cli import main
-from ledgermind_local.config import LocalConfig
+from ledgermind_local.config import CoreSecurityConfig, LocalConfig
 from ledgermind_local.core_gateway.doctor import build_core_doctor_report
+from ledgermind_local.core_gateway.isolation import IsolationRequirements
+from ledgermind_local.core_gateway.security_policy import (
+    build_core_isolation_requirements,
+)
 from ledgermind_local.core_gateway.signing import calculate_sha256
 from ledgermind_local.paths import ServicePaths
 
 
-def _write_signed_fake_core(paths: ServicePaths) -> None:
+def _write_signed_fake_core(
+    paths: ServicePaths,
+    *,
+    environment_keys: tuple[str, ...] = (
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "RUST_BACKTRACE",
+        "LEDGERMIND_CORE_DATA_DIR",
+        "PWD",
+    ),
+) -> None:
     binary = paths.core_data_dir / "bin" / "fake-core"
     signature = paths.core_data_dir / "bin" / "fake-core.sig"
     public_key = paths.core_data_dir / "bin" / "fake-core.pub"
@@ -63,10 +79,7 @@ while True:
             'backend': 'rust',
             'protocol_version': 1,
             'schema_version': 2,
-            'environment_keys': [
-                'LANG', 'LC_ALL', 'RUST_BACKTRACE',
-                'LEDGERMIND_CORE_DATA_DIR', 'PWD'
-            ],
+            'environment_keys': {json.dumps(list(environment_keys))},
         }})
     elif operation == 'shutdown':
         send(request_id, {{'stopped': True}})
@@ -93,7 +106,74 @@ def _doctor_config() -> LocalConfig:
         core_public_key_path="bin/fake-core.pub",
         verify_core_signature=True,
         require_core_network_isolation=False,
+        core_security=CoreSecurityConfig(profile="permissive"),
     )
+
+
+def test_shared_requirements_follow_explicit_secure_and_permissive_profiles() -> None:
+    permissive = build_core_isolation_requirements(
+        CoreSecurityConfig(profile="permissive"),
+        verify_core_signature=False,
+    )
+    assert permissive == IsolationRequirements()
+
+    secure = build_core_isolation_requirements(
+        CoreSecurityConfig(profile="secure"),
+        verify_core_signature=True,
+    )
+    assert secure == IsolationRequirements(
+        require_network_isolation=True,
+        require_rounds_database_hidden=True,
+        require_filesystem_allowlist=True,
+        require_environment_sanitized=True,
+        require_signature=True,
+    )
+
+    permissive_with_one_explicit_guarantee = build_core_isolation_requirements(
+        CoreSecurityConfig(
+            profile="permissive",
+            require_network_isolation=True,
+        ),
+        verify_core_signature=False,
+    )
+    assert permissive_with_one_explicit_guarantee == IsolationRequirements(
+        require_network_isolation=True,
+    )
+
+
+def test_core_doctor_uses_shared_policy_and_redacts_environment_violations(
+    tmp_path: Path,
+) -> None:
+    paths = ServicePaths(tmp_path / "local")
+    paths.home.mkdir(mode=0o700, parents=True)
+    _write_signed_fake_core(
+        paths,
+        environment_keys=(
+            "LANG",
+            "LC_CTYPE",
+            "TZ",
+            "OPENAI_API_KEY",
+            "HTTP_PROXY",
+            "TOKEN",
+            "UNEXPECTED_NAME",
+        ),
+    )
+
+    config = _doctor_config().model_copy(
+        update={"require_core_network_isolation": True}
+    )
+    report = build_core_doctor_report(paths=paths, config=config)
+    environment = report["environment"]
+
+    assert report["ok"] is False
+    assert report["sandbox"]["requirements"]["network_isolated"] is False
+    assert environment["secret_like_count"] == 3
+    assert environment["unexpected_count"] == 4
+    assert environment["secret_like_keys"] == ["<redacted>"]
+    assert environment["unexpected_keys"] == ["<redacted>"]
+    serialized = json.dumps(report)
+    for name in ("OPENAI_API_KEY", "HTTP_PROXY", "TOKEN", "UNEXPECTED_NAME"):
+        assert name not in serialized
 
 
 def test_core_doctor_reports_missing_signature_without_launching(tmp_path: Path) -> None:

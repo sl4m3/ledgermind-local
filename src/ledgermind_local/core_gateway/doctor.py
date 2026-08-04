@@ -6,6 +6,10 @@ from ledgermind_local.config import LocalConfig
 from ledgermind_local.paths import ServicePaths
 
 from .isolation import IsolationCapabilities, IsolationPlan, IsolationRequirements
+from .security_policy import (
+    build_core_isolation_requirements,
+    classify_core_environment,
+)
 from .signing import (
     CoreBinaryVerificationError,
     calculate_sha256,
@@ -13,41 +17,7 @@ from .signing import (
 )
 from .supervisor import CoreSupervisor, CoreSupervisorError
 
-_SAFE_CORE_ENVIRONMENT_KEYS = frozenset(
-    {
-        "LANG",
-        "LC_ALL",
-        "RUST_BACKTRACE",
-        "LEDGERMIND_CORE_DATA_DIR",
-        # bwrap uses this only for a Python-based Core test/runtime shim.
-        "PYTHONHOME",
-        # bwrap derives this from the requested working directory.
-        "PWD",
-    }
-)
-_SECRET_ENVIRONMENT_MARKERS = (
-    "API_KEY",
-    "AUTH",
-    "CREDENTIAL",
-    "PASSWORD",
-    "PROXY",
-    "SECRET",
-    "TOKEN",
-)
 _REDACTED_ENVIRONMENT_MARKER = "<redacted>"
-
-
-def _doctor_isolation_requirements(config: LocalConfig) -> IsolationRequirements:
-    """Map the existing config switch to the independent Core guarantees."""
-
-    protected = config.require_core_network_isolation
-    return IsolationRequirements(
-        require_network_isolation=protected,
-        require_rounds_database_hidden=protected,
-        require_filesystem_allowlist=protected,
-        require_environment_sanitized=True,
-        require_signature=config.verify_core_signature,
-    )
 
 
 def _sandbox_report(
@@ -58,7 +28,7 @@ def _sandbox_report(
 
     level = IsolationPlan(command=(), capabilities=capabilities).level
     return {
-        "required": requirements.require_network_isolation,
+        "required": any(requirements.as_dict().values()),
         "level": level,
         "detail": capabilities.detail,
         "capabilities": capabilities.as_dict(),
@@ -73,13 +43,7 @@ def _environment_report(
 ) -> dict[str, Any]:
     """Return environment diagnostics without returning any environment names."""
 
-    secret_like_count = sum(
-        any(marker in key.upper() for marker in _SECRET_ENVIRONMENT_MARKERS)
-        for key in environment_keys
-    )
-    unexpected_count = sum(
-        key not in _SAFE_CORE_ENVIRONMENT_KEYS for key in environment_keys
-    )
+    secret_like_count, unexpected_count = classify_core_environment(environment_keys)
     return {
         # These lists are retained for the CLI compatibility contract, but
         # intentionally contain no Core environment names.
@@ -108,7 +72,10 @@ def build_core_doctor_report(
     binary = paths.resolve_core_path(config.core_binary_path)
     signature = paths.resolve_core_path(config.core_signature_path)
     public_key = paths.resolve_core_path(config.core_public_key_path)
-    isolation_requirements = _doctor_isolation_requirements(config)
+    isolation_requirements = build_core_isolation_requirements(
+        config.core_security,
+        verify_core_signature=config.verify_core_signature,
+    )
     unavailable_capabilities = IsolationCapabilities(
         sandbox_backend="unavailable",
         detail="Core was not launched",
@@ -124,7 +91,7 @@ def build_core_doctor_report(
             "sha256": None,
         },
         "signature": {
-            "required": config.verify_core_signature,
+            "required": isolation_requirements.require_signature,
             "path": str(signature),
             "public_key_path": str(public_key),
             "status": "not_checked",
@@ -165,10 +132,10 @@ def build_core_doctor_report(
             signature_report["status"] = "failed"
             signature_report["detail"] = str(exc)
 
-    signature_allows_launch = signature_report["status"] in {
-        "verified",
-        "not_required",
-    }
+    signature_allows_launch = signature_report["status"] == "verified" or (
+        signature_report["status"] == "not_required"
+        and not isolation_requirements.require_signature
+    )
     signature_verified = signature_report["status"] == "verified"
     if binary.is_file() and signature_allows_launch:
         supervisor = CoreSupervisor(
@@ -185,7 +152,10 @@ def build_core_doctor_report(
                 config.rounds_database_path
             ),
             isolation_requirements=isolation_requirements,
-            strict_isolation=config.require_core_network_isolation,
+            strict_isolation=(
+                config.core_security.profile == "secure"
+                or any(isolation_requirements.as_dict().values())
+            ),
             binary_signature_verified=signature_verified,
         )
         try:
@@ -223,11 +193,7 @@ def build_core_doctor_report(
         and report["health"]["schema_version"] is not None
         and report["environment"]["unexpected_count"] == 0
         and report["environment"]["secret_like_count"] == 0
-        and report["environment"]["sanitized"]
-        and (
-            not config.require_core_network_isolation
-            or not report["sandbox"]["missing_requirements"]
-        )
+        and not report["sandbox"]["missing_requirements"]
     )
     return report
 

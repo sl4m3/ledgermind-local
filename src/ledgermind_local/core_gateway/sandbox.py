@@ -17,6 +17,10 @@ from types import TracebackType
 from typing_extensions import Self
 
 from .isolation import IsolationCapabilities, IsolationPlan, IsolationRequirements
+from .security_policy import (
+    CORE_ALLOWED_RUNTIME_INJECTED_ENVIRONMENT_KEYS,
+    CORE_ALLOWED_STATIC_ENVIRONMENT_KEYS,
+)
 
 
 class SandboxLevel(str, Enum):
@@ -668,13 +672,17 @@ def _ldd_dependencies(executable: Path) -> list[Path]:
 
 
 def _sanitized_environment(core_data_dir: Path) -> dict[str, str]:
-    environment = {
+    fixed_values = {
         "RUST_BACKTRACE": "0",
         "LEDGERMIND_CORE_DATA_DIR": str(core_data_dir),
         "PWD": str(core_data_dir),
     }
-    for name in ("LANG", "LC_ALL"):
-        value = os.environ.get(name)
+    environment: dict[str, str] = {}
+    for name in sorted(
+        CORE_ALLOWED_STATIC_ENVIRONMENT_KEYS
+        | CORE_ALLOWED_RUNTIME_INJECTED_ENVIRONMENT_KEYS
+    ):
+        value = fixed_values.get(name, os.environ.get(name))
         if value:
             environment[name] = value
     return environment
@@ -687,8 +695,10 @@ def _sandbox_environment(
     environment = _sanitized_environment(core_data_dir)
     python_home = _python_runtime_home(command)
     if python_home is not None:
-        # A bwrap namespace does not preserve the virtualenv's pyvenv.cfg
-        # lookup chain.  Point Python at the read-only base runtime instead.
+        # Only a Python test/runtime shim needs this.  The production Rust
+        # Core has no Python runtime invariant and never receives PYTHONHOME.
+        # A bwrap namespace does not preserve a shim virtualenv's pyvenv.cfg
+        # lookup chain, so point that shim at the read-only base runtime.
         environment["PYTHONHOME"] = str(python_home)
     return environment
 
