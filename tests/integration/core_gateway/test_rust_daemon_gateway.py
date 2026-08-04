@@ -196,8 +196,16 @@ def test_rust_projection_event_replays_then_flows_through_local_worker(
             ).fetchone()
             assert row is not None
             assert next(iter(row)) == accepted.core_reference_id
+            recorded_commands = []
+
+            class RecordingGateway:
+                def retrieve_context(self, command):
+                    recorded_commands.append(command)
+                    return gateway.retrieve_context(command)
+
             context = CoreBackedSearch(
-                CoreProjectionSearchAdapter(connection), gateway
+                CoreProjectionSearchAdapter(connection),  # type: ignore[arg-type]
+                RecordingGateway(),  # type: ignore[arg-type]
             ).retrieve_context(
                 request_id="local-search-1",
                 memory_space_id="local-rust-space",
@@ -206,6 +214,11 @@ def test_rust_projection_event_replays_then_flows_through_local_worker(
             )
             assert len(context.items) == 1
             assert context.items[0].knowledge_id == accepted.core_reference_id
+            assert len(recorded_commands) == 1
+            assert recorded_commands[0].candidate_ids == (accepted.core_reference_id,)
+            assert recorded_commands[0].candidate_scores == (
+                (accepted.core_reference_id, 1.0),
+            )
 
         after_ack = gateway.poll_projection_events(
             PollProjectionEventsCommand(

@@ -1,21 +1,27 @@
-"""Minimal public ContextView endpoint backed only by ``CoreGateway``."""
+"""Minimal public ContextView endpoint backed by a ContextSearch port."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from ledgermind_local.core_gateway import (
-    CoreGateway,
+    ContextViewResult,
     DomainRejectedError,
     RetrieveContextCommand,
     TransientCoreError,
 )
 
 from .http import build_request_id, error_payload, validate_json_request_headers
+
+
+class ContextSearch(Protocol):
+    """Boundary used by HTTP context routes for Core or Core-backed search."""
+
+    def retrieve_context(self, request: RetrieveContextCommand) -> ContextViewResult: ...
 
 
 class ContextRetrieveRequest(BaseModel):
@@ -46,7 +52,7 @@ class ContextViewResponse(BaseModel):
 
 def create_context_router(
     require_token: Callable[..., str],
-    core_gateway: CoreGateway | None,
+    context_search: ContextSearch | None,
     *,
     max_body_bytes: int,
 ) -> APIRouter:
@@ -61,7 +67,7 @@ def create_context_router(
         _token: str = Depends(require_token),
     ) -> ContextViewResponse:
         validate_json_request_headers(request.headers, max_bytes=max_body_bytes)
-        if core_gateway is None:
+        if context_search is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=error_payload("core_unavailable", "Core gateway is unavailable"),
@@ -69,7 +75,7 @@ def create_context_router(
         request_id = build_request_id(request.headers)
         response.headers["X-Request-ID"] = request_id
         try:
-            result = core_gateway.retrieve_context(
+            result = context_search.retrieve_context(
                 RetrieveContextCommand(
                     request_id=request_id,
                     memory_space_id=payload.memory_space_id,
@@ -107,6 +113,7 @@ def create_context_router(
 __all__ = [
     "ContextItemResponse",
     "ContextRetrieveRequest",
+    "ContextSearch",
     "ContextViewResponse",
     "create_context_router",
 ]
