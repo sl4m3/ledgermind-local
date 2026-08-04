@@ -258,7 +258,12 @@ class LocalConfig(BaseModel):
             return value
         data = dict(value)
         workers_value = data.get("workers")
-        workers = dict(workers_value) if isinstance(workers_value, dict) else {}
+        if isinstance(workers_value, WorkerSetConfig):
+            workers = workers_value.model_dump(mode="python")
+        elif isinstance(workers_value, dict):
+            workers = dict(workers_value)
+        else:
+            workers = {}
         if "processing" not in workers:
             workers["processing"] = {
                 "enabled": bool(data.get("processing_enabled", False)),

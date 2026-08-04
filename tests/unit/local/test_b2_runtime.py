@@ -10,7 +10,12 @@ import pytest
 
 from ledgermind_local import cli
 from ledgermind_local.bootstrap import LocalRuntime, _RuntimeCoreBackedSearch
-from ledgermind_local.config import CoreSecurityConfig, LocalConfig
+from ledgermind_local.config import (
+    CoreSecurityConfig,
+    LocalConfig,
+    WorkerConfig,
+    WorkerSetConfig,
+)
 from ledgermind_local.core_gateway.contracts import (
     ContextViewResult,
     CoreHealth,
@@ -321,3 +326,18 @@ def test_worker_config_exposes_all_b2_worker_names() -> None:
         "core_projections",
         "core_model_tasks",
     }
+
+
+def test_programmatic_worker_config_is_preserved() -> None:
+    workers = WorkerSetConfig(
+        retention=WorkerConfig(enabled=False, interval_seconds=7.0),
+        core_projections=WorkerConfig(enabled=False),
+        core_model_tasks=WorkerConfig(enabled=False),
+    )
+
+    config = LocalConfig(config_version=1, workers=workers)
+
+    assert config.workers.retention.enabled is False
+    assert config.workers.retention.interval_seconds == 7.0
+    assert config.workers.core_projections.enabled is False
+    assert config.workers.core_model_tasks.enabled is False
