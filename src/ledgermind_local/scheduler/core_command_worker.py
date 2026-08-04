@@ -50,6 +50,7 @@ class CoreCommandWorker:
         self.lease_seconds = max(float(lease_seconds), 1)
         self.state = state or WorkerState("core-command")
         self._stop = threading.Event()
+        self._loop: GuardedWorkerLoop | None = None
 
     def process_once(self) -> CoreCommandProcessResult | None:
         if self._stop.is_set():
@@ -118,6 +119,8 @@ class CoreCommandWorker:
 
     def request_stop(self) -> None:
         self._stop.set()
+        if self._loop is not None:
+            self._loop.stop_event.set()
 
     def create_loop(
         self,
@@ -126,7 +129,7 @@ class CoreCommandWorker:
         initial_backoff_seconds: float = 0.25,
         max_backoff_seconds: float = 30.0,
     ) -> GuardedWorkerLoop:
-        return GuardedWorkerLoop(
+        loop = GuardedWorkerLoop(
             self,
             state=self.state,
             name="core-command",
@@ -134,6 +137,10 @@ class CoreCommandWorker:
             initial_backoff_seconds=initial_backoff_seconds,
             max_backoff_seconds=max_backoff_seconds,
         )
+        self._loop = loop
+        if self._stop.is_set():
+            loop.stop_event.set()
+        return loop
 
     def run_loop(
         self,

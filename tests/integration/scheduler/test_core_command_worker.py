@@ -285,3 +285,19 @@ def test_core_command_worker_reclaims_expired_delivery_after_core_acceptance(
     assert result is not None
     assert result.status == "completed"
     assert gateway.calls == ["command-1"]
+
+
+def test_core_command_worker_request_stop_stops_created_loop(tmp_path: Path) -> None:
+    connection, _ = _bootstrap(tmp_path / "stop.db")
+    connection.close()
+    worker = CoreCommandWorker(
+        database_path=tmp_path / "stop.db",
+        gateway=_Gateway(),
+        worker_id="core-worker-1",
+    )
+    loop = worker.create_loop(poll_interval_seconds=0.01)
+    loop.start()
+
+    worker.request_stop()
+
+    assert loop.join(timeout=1) is True

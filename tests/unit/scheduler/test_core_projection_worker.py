@@ -189,3 +189,23 @@ def test_core_projection_worker_loop_survives_unexpected_gateway_error(
     assert worker.state.failed_count == 1
     assert worker.state.healthy is True
     worker.close()
+
+
+def test_core_projection_worker_request_stop_stops_created_loop(tmp_path: Path) -> None:
+    database_path = tmp_path / "stop.db"
+    with open_sqlite_connection(database_path) as connection:
+        rounds_migrations.apply_migrations(connection)
+        connection.commit()
+
+    worker = CoreProjectionWorker(
+        database_path=database_path,
+        gateway=FakeGateway(_event()),
+        consumer_id="local-projections",
+        handlers_factory=lambda _connection: {"fts": Handler([])},
+    )
+    loop = worker.create_loop(poll_interval_seconds=0.01)
+    loop.start()
+
+    worker.request_stop()
+
+    assert loop.join(timeout=1) is True

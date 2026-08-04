@@ -61,6 +61,7 @@ class CoreProjectionWorker:
         self._consumers: dict[str, CoreProjectionConsumer] | None = None
         self._handlers: Mapping[str, Any] | None = None
         self._closed = False
+        self._loop: GuardedWorkerLoop | None = None
 
     def process_once(self) -> CoreProjectionWorkerStats:
         if self._closed:
@@ -94,6 +95,8 @@ class CoreProjectionWorker:
 
     def request_stop(self) -> None:
         self._stop.set()
+        if self._loop is not None:
+            self._loop.stop_event.set()
 
     def create_loop(
         self,
@@ -102,7 +105,7 @@ class CoreProjectionWorker:
         initial_backoff_seconds: float = 0.25,
         max_backoff_seconds: float = 30.0,
     ) -> GuardedWorkerLoop:
-        return GuardedWorkerLoop(
+        loop = GuardedWorkerLoop(
             self,
             state=self.state,
             name="core-projection",
@@ -111,6 +114,10 @@ class CoreProjectionWorker:
             max_backoff_seconds=max_backoff_seconds,
             close_on_stop=True,
         )
+        self._loop = loop
+        if self._stop.is_set():
+            loop.stop_event.set()
+        return loop
 
     def run_loop(
         self,
