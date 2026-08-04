@@ -6,6 +6,7 @@ import pytest
 
 from ledgermind_local.core_gateway.model_task_contracts import (
     CoreModelTask,
+    FailModelTaskResult,
     PollModelTasksResult,
     SubmitModelResult,
 )
@@ -19,6 +20,7 @@ class _Gateway:
         self.task = task
         self.polls = 0
         self.submissions = []
+        self.failures = []
 
     def poll_model_tasks(self, command):
         self.polls += 1
@@ -29,6 +31,17 @@ class _Gateway:
     def submit_model_result(self, command):
         self.submissions.append(command)
         return SubmitModelResult(accepted=True, duplicate=True, status="completed")
+
+    def fail_model_task(self, command):
+        self.failures.append(command)
+        return FailModelTaskResult(
+            status="pending" if command.retryable else "failed",
+            attempts=1,
+            available_at=command.failed_at if command.retryable else None,
+            last_error_code=command.error_code,
+            failed_at=command.failed_at,
+            completed_at=None if command.retryable else command.failed_at,
+        )
 
 
 class _Broker:
@@ -121,6 +134,55 @@ def test_model_task_worker_does_not_submit_provider_failure(tmp_path) -> None:
     assert stats.completed == 0
     assert stats.failed == 1
     assert gateway.submissions == []
+    assert len(gateway.failures) == 1
+    assert gateway.failures[0].error_code == "provider_unavailable"
+    assert gateway.failures[0].retryable is True
+
+
+def test_model_task_worker_releases_invalid_provider_response_as_permanent(
+    tmp_path,
+) -> None:
+    database = _database(tmp_path)
+    gateway = _Gateway(_task())
+    broker = _Broker(error=ValueError("response schema is invalid"))
+    worker = CoreModelTaskWorker(
+        database_path=database,
+        gateway=gateway,
+        broker=broker,
+        worker_id="local-model-tasks",
+    )
+
+    stats = worker.process_once()
+
+    assert stats.failed == 1
+    assert len(gateway.failures) == 1
+    assert gateway.failures[0].error_code == "invalid_model_output"
+    assert gateway.failures[0].retryable is False
+
+
+def test_model_task_worker_releases_task_when_profile_is_missing(tmp_path) -> None:
+    database = _database(tmp_path)
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "DELETE FROM memory_space_inference_profiles WHERE memory_space_id = ?",
+        ("space-1",),
+    )
+    connection.commit()
+    connection.close()
+    gateway = _Gateway(_task())
+    worker = CoreModelTaskWorker(
+        database_path=database,
+        gateway=gateway,
+        broker=_Broker(),
+        worker_id="local-model-tasks",
+    )
+
+    stats = worker.process_once()
+
+    assert stats.failed == 1
+    assert len(gateway.failures) == 1
+    assert gateway.failures[0].error_code == "profile_missing"
+    assert gateway.failures[0].retryable is False
 
 
 def test_model_task_worker_rejects_use_after_close(tmp_path) -> None:
