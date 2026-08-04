@@ -485,6 +485,47 @@ class SQLiteRawRoundRepository:
             "rejected_by_core",
         }:
             raise ValueError(f"unsupported hypothesis status: {status}")
+        existing = self._connection.execute(
+            "SELECT * FROM hypotheses WHERE hypothesis_id = ?",
+            (hypothesis_id,),
+        ).fetchone()
+        if existing is not None:
+            comparable = {
+                "raw_round_id": raw_round_id,
+                "title": title,
+                "target": target,
+                "statement": statement,
+                "rationale": rationale,
+                "result": result,
+                "artifacts_json": artifacts_json,
+                "content_digest": content_digest,
+            }
+            if any(existing[name] != value for name, value in comparable.items()):
+                raise ValueError("hypothesis payload conflict")
+            existing_command_id = existing["core_command_id"]
+            if (
+                existing_command_id is not None
+                and core_command_id is not None
+                and existing_command_id != core_command_id
+            ):
+                raise ValueError("hypothesis core command conflict")
+            next_status = (
+                str(existing["status"])
+                if existing["status"] in {"accepted_by_core", "rejected_by_core"}
+                else status
+            )
+            if next_status != existing["status"] or (
+                existing_command_id is None and core_command_id is not None
+            ):
+                self._connection.execute(
+                    """
+                    UPDATE hypotheses
+                    SET status = ?, core_command_id = COALESCE(?, core_command_id)
+                    WHERE hypothesis_id = ?
+                    """,
+                    (next_status, core_command_id, hypothesis_id),
+                )
+            return
         self._connection.execute(
             """
             INSERT INTO hypotheses (
@@ -592,6 +633,20 @@ class SQLiteRawRoundRepository:
         if row is None:
             raise RuntimeError("core command insert did not produce a row")
         return self._core_command_from_row(row)
+
+    def get_core_command_by_idempotency(
+        self,
+        memory_space_id: str,
+        idempotency_key: str,
+    ) -> CoreCommandRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT * FROM core_commands
+            WHERE memory_space_id = ? AND idempotency_key = ?
+            """,
+            (memory_space_id, idempotency_key),
+        ).fetchone()
+        return self._core_command_from_row(row) if row is not None else None
 
     def get_core_command(self, command_id: str) -> CoreCommandRecord | None:
         row = self._connection.execute(

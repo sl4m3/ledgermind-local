@@ -53,6 +53,17 @@ def _digest_candidate(draft: HypothesisCandidate) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_drafts(
+    drafts: Sequence[HypothesisCandidate],
+) -> tuple[HypothesisCandidate, ...]:
+    """Remove duplicate candidates and make display order deterministic."""
+
+    unique: dict[str, HypothesisCandidate] = {}
+    for draft in drafts:
+        unique.setdefault(_digest_candidate(draft), draft)
+    return tuple(unique[digest] for digest in sorted(unique))
+
+
 def _response_digest(drafts: Sequence[HypothesisCandidate]) -> str:
     material = [
         {
@@ -64,12 +75,16 @@ def _response_digest(drafts: Sequence[HypothesisCandidate]) -> str:
             "artifacts": list(draft.artifacts),
             "source_event_ids": list(draft.source_event_ids),
         }
-        for draft in drafts
+        for draft in _canonical_drafts(drafts)
     ]
     encoded = json.dumps(
         material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _stable_id(prefix: str, value: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ledgermind:{prefix}:{value}"))
 
 
 def _normalized_round_payload(normalized_round: NormalizedRound) -> str:
@@ -206,9 +221,12 @@ class RoundProcessingWorker:
         self.heartbeat_interval_seconds = max(float(heartbeat_interval_seconds), 0.1)
         self.state = state or WorkerState("round-processing")
         self._stop = threading.Event()
+        self._loop: GuardedWorkerLoop | None = None
 
     def request_stop(self) -> None:
         self._stop.set()
+        if self._loop is not None:
+            self._loop.stop_event.set()
 
     def create_loop(
         self,
@@ -217,7 +235,7 @@ class RoundProcessingWorker:
         initial_backoff_seconds: float = 0.25,
         max_backoff_seconds: float = 30.0,
     ) -> GuardedWorkerLoop:
-        return GuardedWorkerLoop(
+        loop = GuardedWorkerLoop(
             self,
             state=self.state,
             name="round-processing",
@@ -225,6 +243,10 @@ class RoundProcessingWorker:
             initial_backoff_seconds=initial_backoff_seconds,
             max_backoff_seconds=max_backoff_seconds,
         )
+        self._loop = loop
+        if self._stop.is_set():
+            loop.stop_event.set()
+        return loop
 
     def run_loop(
         self,
@@ -323,9 +345,14 @@ class RoundProcessingWorker:
         normalized: NormalizedRound,
         started_at: str,
     ) -> ProcessingResult:
-        status = "completed" if drafts else "no_knowledge"
+        canonical_drafts = _canonical_drafts(drafts)
+        status = "completed" if canonical_drafts else "no_knowledge"
         hypothesis_ids: list[str] = []
         completed_at = _now()
+        generator_prompt_version = int(
+            getattr(self.generator, "prompt_version", job.prompt_version)
+        )
+        generator_schema_version = int(getattr(self.generator, "schema_version", 1))
         with SQLiteUnitOfWork(self.database_path, write_transaction=True) as uow:
             attempt_id = str(uuid.uuid4())
             uow.raw_rounds.create_attempt(
@@ -336,26 +363,22 @@ class RoundProcessingWorker:
                 normalizer_version=job.normalizer_version,
                 provider=getattr(self.generator, "provider", "unknown"),
                 model=getattr(self.generator, "model", "unknown"),
-                prompt_version=getattr(
-                    self.generator, "prompt_version", job.prompt_version
-                ),
-                schema_version=getattr(self.generator, "schema_version", 1),
+                prompt_version=generator_prompt_version,
+                schema_version=generator_schema_version,
                 started_at=started_at,
                 completed_at=completed_at,
-                response_digest=_response_digest(drafts),
+                response_digest=_response_digest(canonical_drafts),
             )
-            for index, draft in enumerate(drafts):
-                hypothesis_id = str(uuid.uuid4())
-                hypothesis_ids.append(hypothesis_id)
+            for index, draft in enumerate(canonical_drafts):
                 content_digest = _digest_candidate(draft)
                 idempotency_material = {
                     "memory_space_id": raw_round.memory_space_id,
                     "raw_round_id": raw_round.raw_round_id,
-                    "hypothesis_index": index,
                     "content_digest": content_digest,
                     "pipeline_version": job.pipeline_version,
                     "normalizer_version": job.normalizer_version,
-                    "prompt_version": job.prompt_version,
+                    "prompt_version": generator_prompt_version,
+                    "schema_version": generator_schema_version,
                 }
                 idempotency_key = (
                     "sha256:"
@@ -368,52 +391,79 @@ class RoundProcessingWorker:
                         ).encode("utf-8")
                     ).hexdigest()
                 )
-                command_payload = {
-                    "protocol_version": 1,
-                    "command_id": str(uuid.uuid4()),
-                    "idempotency_key": idempotency_key,
-                    "memory_space_id": raw_round.memory_space_id,
-                    "hypothesis": {
-                        "hypothesis_id": hypothesis_id,
-                        "content_digest": content_digest,
-                        "title": draft.title,
-                        "target": draft.target,
-                        "statement": draft.statement,
-                        "rationale": draft.rationale,
-                        "result": draft.result,
-                        "artifacts": list(draft.artifacts),
-                        "evidence": {
-                            "source_system": raw_round.source_system,
-                            "source_instance_id": raw_round.source_instance_id,
-                            "source_profile_id": raw_round.source_profile_id,
-                            "source_session_id": raw_round.source_session_id,
-                            "source_round_id": raw_round.source_round_id,
-                            "raw_round_digest": raw_round.payload_digest,
-                            "normalized_round_digest": normalized.normalized_digest,
-                            "source_event_ids": list(draft.source_event_ids),
+                existing_command = uow.raw_rounds.get_core_command_by_idempotency(
+                    raw_round.memory_space_id,
+                    idempotency_key,
+                )
+                if existing_command is None:
+                    hypothesis_id = _stable_id("hypothesis", idempotency_key)
+                    command_id = _stable_id("core-command", idempotency_key)
+                    command_payload = {
+                        "protocol_version": 1,
+                        "command_id": command_id,
+                        "idempotency_key": idempotency_key,
+                        "memory_space_id": raw_round.memory_space_id,
+                        "hypothesis": {
+                            "hypothesis_id": hypothesis_id,
+                            "content_digest": content_digest,
+                            "title": draft.title,
+                            "target": draft.target,
+                            "statement": draft.statement,
+                            "rationale": draft.rationale,
+                            "result": draft.result,
+                            "artifacts": list(draft.artifacts),
+                            "evidence": {
+                                "source_system": raw_round.source_system,
+                                "source_instance_id": raw_round.source_instance_id,
+                                "source_profile_id": raw_round.source_profile_id,
+                                "source_session_id": raw_round.source_session_id,
+                                "source_round_id": raw_round.source_round_id,
+                                "raw_round_digest": raw_round.payload_digest,
+                                "normalized_round_digest": normalized.normalized_digest,
+                                "source_event_ids": list(draft.source_event_ids),
+                            },
+                            "extraction": {
+                                "provider": getattr(
+                                    self.generator, "provider", "unknown"
+                                ),
+                                "model": getattr(self.generator, "model", "unknown"),
+                                "prompt_version": generator_prompt_version,
+                                "schema_version": generator_schema_version,
+                                "completed_at": completed_at,
+                            },
                         },
-                        "extraction": {
-                            "provider": getattr(self.generator, "provider", "unknown"),
-                            "model": getattr(self.generator, "model", "unknown"),
-                            "prompt_version": getattr(
-                                self.generator,
-                                "prompt_version",
-                                job.prompt_version,
-                            ),
-                            "schema_version": getattr(
-                                self.generator, "schema_version", 1
-                            ),
-                            "completed_at": completed_at,
-                        },
-                    },
-                }
-                payload_json = json.dumps(
-                    command_payload,
+                    }
+                    payload_json = json.dumps(
+                        command_payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    payload_digest = "sha256:" + hashlib.sha256(
+                        payload_json.encode("utf-8")
+                    ).hexdigest()
+                else:
+                    command_id = existing_command.command_id
+                    try:
+                        existing_payload = json.loads(existing_command.payload_json)
+                        hypothesis_id = str(
+                            existing_payload["hypothesis"]["hypothesis_id"]
+                        )
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        raise ValueError(
+                            "existing Core command payload is invalid"
+                        ) from exc
+                    if not hypothesis_id.strip():
+                        raise ValueError("existing Core command has empty hypothesis id")
+                    payload_json = existing_command.payload_json
+                    payload_digest = existing_command.payload_digest
+                hypothesis_ids.append(hypothesis_id)
+                artifacts_json = json.dumps(
+                    list(draft.artifacts),
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-                command_id = str(command_payload["command_id"])
                 uow.raw_rounds.insert_hypothesis(
                     hypothesis_id=hypothesis_id,
                     raw_round_id=raw_round.raw_round_id,
@@ -424,12 +474,7 @@ class RoundProcessingWorker:
                     statement=draft.statement,
                     rationale=draft.rationale,
                     result=draft.result,
-                    artifacts_json=json.dumps(
-                        list(draft.artifacts),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
+                    artifacts_json=artifacts_json,
                     content_digest=content_digest,
                     status="queued_for_core",
                     core_command_id=command_id,
@@ -440,8 +485,7 @@ class RoundProcessingWorker:
                     memory_space_id=raw_round.memory_space_id,
                     idempotency_key=idempotency_key,
                     payload_json=payload_json,
-                    payload_digest="sha256:"
-                    + hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                    payload_digest=payload_digest,
                 )
             finished = uow.raw_rounds.finish_job(
                 job.job_id,
