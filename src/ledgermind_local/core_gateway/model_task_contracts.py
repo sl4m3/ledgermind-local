@@ -233,6 +233,18 @@ class FailModelTaskResult:
     failed_at: str | None
     completed_at: str | None
 
+    @property
+    def retry_scheduled(self) -> bool:
+        """Core accepted the failure and scheduled another claim."""
+
+        return self.status == "pending"
+
+    @property
+    def terminal(self) -> bool:
+        """Core made the failure terminal for this task."""
+
+        return self.status == "failed"
+
     def __post_init__(self) -> None:
         if self.status not in {"pending", "failed"}:
             raise ValueError("model task failure status is invalid")

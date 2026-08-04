@@ -146,6 +146,21 @@ def test_failure_and_backup_commands_round_trip_strict_payloads() -> None:
     )
     assert result.status == "pending"
     assert result.attempts == 2
+    assert result.retry_scheduled is True
+    assert result.terminal is False
+
+    terminal = FailModelTaskResult.from_payload(
+        {
+            "status": "failed",
+            "attempts": 5,
+            "available_at": None,
+            "last_error_code": "retry_exhausted",
+            "failed_at": "2026-08-04T12:00:00Z",
+            "completed_at": "2026-08-04T12:00:00Z",
+        }
+    )
+    assert terminal.retry_scheduled is False
+    assert terminal.terminal is True
 
     manifest = BackupManifest.from_payload(
         {

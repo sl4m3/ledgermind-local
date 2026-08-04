@@ -20,6 +20,7 @@ from ledgermind_local.core_gateway.contracts import (
 from ledgermind_local.core_gateway.model_task_contracts import (
     CoreModelTask,
     FailModelTaskCommand,
+    FailModelTaskResult,
     PollModelTasksCommand,
     SubmitModelResultCommand,
 )
@@ -38,6 +39,42 @@ from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
 
 logger = logging.getLogger(__name__)
+
+_SAFE_ERROR_CODES = frozenset(
+    {
+        "model_task_error",
+        "provider_timeout",
+        "provider_transport_error",
+        "provider_unavailable",
+        "provider_configuration_error",
+        "provider_secret_missing",
+        "provider_error",
+        "invalid_model_output",
+        "profile_not_found",
+        "profile_disabled",
+        "input_too_large",
+        "profile_missing",
+        "core_unavailable",
+        "core_poll_error",
+        "core_delivery_error",
+        "core_rejected_command",
+        "core_rejected_stale_model_task",
+        "core_rejected_version_conflict",
+        "core_rejected_invalid_request",
+        "core_rejected_not_found",
+        "core_rejected_idempotency_conflict",
+        "core_rejected_integrity_violation",
+        "retry_exhausted",
+        "expired",
+        "permanent_failure",
+    }
+)
+
+
+def _safe_error_code(value: str | None, fallback: str = "model_task_error") -> str:
+    if value in _SAFE_ERROR_CODES:
+        return value
+    return fallback
 
 
 class MergeProposalBroker(Protocol):
@@ -76,6 +113,65 @@ class CoreModelTaskWorkerStats:
     released: int = 0
     retryable_failures: int = 0
     permanent_failures: int = 0
+    retry_scheduled: int = 0
+    terminal_failures: int = 0
+    provider_failures: int = 0
+    core_poll_failures: int = 0
+    core_delivery_failures: int = 0
+    last_error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "fetched",
+            "completed",
+            "duplicates",
+            "failed",
+            "released",
+            "retryable_failures",
+            "permanent_failures",
+            "retry_scheduled",
+            "terminal_failures",
+            "provider_failures",
+            "core_poll_failures",
+            "core_delivery_failures",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.last_error_code is not None and self.last_error_code not in _SAFE_ERROR_CODES:
+            raise ValueError("last_error_code must be a safe error code")
+
+    @property
+    def degraded(self) -> bool:
+        """Whether this iteration observed a failure that health should expose."""
+
+        return any(
+            value > 0
+            for value in (
+                self.failed,
+                self.retryable_failures,
+                self.permanent_failures,
+                self.retry_scheduled,
+                self.terminal_failures,
+                self.provider_failures,
+                self.core_poll_failures,
+                self.core_delivery_failures,
+            )
+        )
+
+    @property
+    def made_progress(self) -> bool:
+        """Whether Local completed work or changed a Core task state."""
+
+        return any(
+            value > 0
+            for value in (
+                self.completed,
+                self.released,
+                self.retry_scheduled,
+                self.terminal_failures,
+            )
+        )
 
 
 ConnectionFactory = Callable[[str | Path], sqlite3.Connection]
@@ -111,7 +207,14 @@ def classify_model_task_error(exc: BaseException) -> ModelTaskFailureClassificat
         return ModelTaskFailureClassification("core_unavailable", True)
     if isinstance(exc, DomainRejectedError):
         code = re.sub(r"[^a-z0-9]+", "_", exc.code.lower()).strip("_")
-        return ModelTaskFailureClassification(f"core_rejected_{code or 'command'}", False, 0)
+        return ModelTaskFailureClassification(
+            _safe_error_code(
+                f"core_rejected_{code or 'command'}",
+                "core_rejected_command",
+            ),
+            False,
+            0,
+        )
     if isinstance(exc, ProviderError):
         return ModelTaskFailureClassification("provider_error", False, 0)
 
@@ -199,8 +302,23 @@ class CoreModelTaskWorker:
                             lease_seconds=self._lease_seconds,
                         )
                     )
-                except Exception:  # noqa: BLE001 - worker boundary must keep leases retryable
-                    stats = _add_stats(stats, failed=1)
+                except Exception:  # noqa: BLE001 - poll failures are isolated per memory space
+                    # Polling never touches provider failure counters: no task was
+                    # handed to Local and there is no lease to report back.
+                    logger.warning(
+                        "Core model task poll failed",
+                        extra={
+                            "worker": self._worker_id,
+                            "memory_space_id": memory_space_id,
+                            "error_code": "core_poll_error",
+                        },
+                    )
+                    stats = _add_stats(
+                        stats,
+                        failed=1,
+                        core_poll_failures=1,
+                        last_error_code="core_poll_error",
+                    )
                     continue
                 stats = _add_stats(stats, fetched=len(polled.tasks))
                 for task in polled.tasks:
@@ -228,6 +346,7 @@ class CoreModelTaskWorker:
                             self._worker_id,
                             _worker_classification(exc, self._retry_after_seconds),
                             self._request_id,
+                            provider_failure=True,
                         )
                         continue
                     try:
@@ -246,8 +365,26 @@ class CoreModelTaskWorker:
                             task,
                             self._gateway,
                             self._worker_id,
-                            _worker_classification(exc, self._retry_after_seconds),
+                            _core_worker_classification(
+                                exc, self._retry_after_seconds
+                            ),
                             self._request_id,
+                            core_delivery_failure=True,
+                        )
+                        continue
+                    if not submitted.accepted:
+                        stats = _release_task(
+                            stats,
+                            task,
+                            self._gateway,
+                            self._worker_id,
+                            ModelTaskFailureClassification(
+                                "core_delivery_error",
+                                True,
+                                self._retry_after_seconds,
+                            ),
+                            self._request_id,
+                            core_delivery_failure=True,
                         )
                         continue
                     stats = _add_stats(
@@ -279,6 +416,22 @@ def _worker_classification(
     )
 
 
+def _core_worker_classification(
+    exc: BaseException, retry_after_seconds: int
+) -> ModelTaskFailureClassification:
+    """Classify a Core delivery error without treating it as a provider failure."""
+
+    if isinstance(exc, DomainRejectedError):
+        classification = classify_model_task_error(exc)
+        if not classification.retryable:
+            return classification
+    return ModelTaskFailureClassification(
+        "core_delivery_error",
+        True,
+        retry_after_seconds,
+    )
+
+
 def _release_task(
     stats: CoreModelTaskWorkerStats,
     task: CoreModelTask,
@@ -286,10 +439,12 @@ def _release_task(
     worker_id: str,
     classification: ModelTaskFailureClassification,
     request_id_factory: Callable[[str], str],
+    *,
+    provider_failure: bool = False,
+    core_delivery_failure: bool = False,
 ) -> CoreModelTaskWorkerStats:
-    released = 0
     try:
-        gateway.fail_model_task(
+        result = gateway.fail_model_task(
             FailModelTaskCommand(
                 request_id=request_id_factory("fail"),
                 task_id=task.task_id,
@@ -303,24 +458,42 @@ def _release_task(
                 .replace("+00:00", "Z"),
             )
         )
+        if not isinstance(result, FailModelTaskResult):
+            raise TypeError("Core returned an invalid model task failure result")
     except Exception as exc:  # noqa: BLE001 - leave stats honest if release also fails
         logger.warning(
             "Core model task release failed",
             extra={
                 "worker": worker_id,
                 "task_id": task.task_id,
-                "error_code": classification.error_code,
+                "error_code": "core_delivery_error",
                 "error_type": type(exc).__name__,
             },
         )
-    else:
-        released = 1
+        return _add_stats(
+            stats,
+            failed=1,
+            retryable_failures=1 if classification.retryable else 0,
+            permanent_failures=0 if classification.retryable else 1,
+            provider_failures=1 if provider_failure else 0,
+            core_delivery_failures=1 + (1 if core_delivery_failure else 0),
+            last_error_code="core_delivery_error",
+        )
+
     return _add_stats(
         stats,
         failed=1,
-        released=released,
+        released=1,
         retryable_failures=1 if classification.retryable else 0,
         permanent_failures=0 if classification.retryable else 1,
+        retry_scheduled=1 if result.retry_scheduled else 0,
+        terminal_failures=1 if result.terminal else 0,
+        provider_failures=1 if provider_failure else 0,
+        core_delivery_failures=1 if core_delivery_failure else 0,
+        last_error_code=_safe_error_code(
+            result.last_error_code,
+            classification.error_code,
+        ),
     )
 
 
@@ -334,6 +507,12 @@ def _add_stats(
     released: int = 0,
     retryable_failures: int = 0,
     permanent_failures: int = 0,
+    retry_scheduled: int = 0,
+    terminal_failures: int = 0,
+    provider_failures: int = 0,
+    core_poll_failures: int = 0,
+    core_delivery_failures: int = 0,
+    last_error_code: str | None = None,
 ) -> CoreModelTaskWorkerStats:
     return CoreModelTaskWorkerStats(
         fetched=stats.fetched + fetched,
@@ -343,6 +522,16 @@ def _add_stats(
         released=stats.released + released,
         retryable_failures=stats.retryable_failures + retryable_failures,
         permanent_failures=stats.permanent_failures + permanent_failures,
+        retry_scheduled=stats.retry_scheduled + retry_scheduled,
+        terminal_failures=stats.terminal_failures + terminal_failures,
+        provider_failures=stats.provider_failures + provider_failures,
+        core_poll_failures=stats.core_poll_failures + core_poll_failures,
+        core_delivery_failures=stats.core_delivery_failures + core_delivery_failures,
+        last_error_code=(
+            stats.last_error_code
+            if last_error_code is None
+            else _safe_error_code(last_error_code)
+        ),
     )
 
 
