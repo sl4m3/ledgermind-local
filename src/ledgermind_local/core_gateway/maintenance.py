@@ -19,7 +19,7 @@ from .isolation import IsolationRequirements
 from .sandbox import SandboxPlan, build_sandbox_plan
 from .signing import CoreBinaryVerification, verify_core_binary
 
-CORE_KNOWLEDGE_SCHEMA_VERSION = 5
+CORE_KNOWLEDGE_SCHEMA_VERSION = 6
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -65,6 +65,13 @@ def _validate_exchange_path(value: object, *, directory: str) -> str:
     expected_prefix = ("exchange", directory)
     if path.parts[:2] != expected_prefix or len(path.parts) < 3:
         raise ValueError(f"relative_path must be below exchange/{directory}")
+    return text
+
+
+def _validate_restore_identifier(value: object, name: str) -> str:
+    text = _required_text(value, name)
+    if len(text) > 256 or ".." in text or any(character in text for character in ("/", "\\", "\x00")):
+        raise ValueError(f"{name} contains an unsafe character")
     return text
 
 
@@ -181,7 +188,7 @@ class PrepareRestoreResult:
             raise ValueError("size_bytes must be a non-negative integer")
         if self.schema_version != CORE_KNOWLEDGE_SCHEMA_VERSION:
             raise ValueError("schema_version does not match the Core contract")
-        _required_text(self.restore_token, "restore_token")
+        _validate_restore_identifier(self.restore_token, "restore_token")
         if not isinstance(self.requires_restart, bool):
             raise TypeError("requires_restart must be a boolean")
 
@@ -216,6 +223,175 @@ class PrepareRestoreResult:
             "schema_version": self.schema_version,
             "restore_token": self.restore_token,
             "requires_restart": self.requires_restart,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BeginRestoreCommand:
+    request_id: str
+    relative_path: str
+    sha256: str
+    restore_token: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.request_id, "request_id")
+        _validate_exchange_path(self.relative_path, directory="incoming")
+        _validate_sha256(self.sha256)
+        _validate_restore_identifier(self.restore_token, "restore_token")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "relative_path": self.relative_path,
+            "sha256": self.sha256,
+            "restore_token": self.restore_token,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BeginRestoreResult:
+    restore_transaction_id: str
+    relative_path: str
+    sha256: str
+    size_bytes: int
+    schema_version: int
+    state: str
+
+    def __post_init__(self) -> None:
+        _validate_restore_identifier(self.restore_transaction_id, "restore_transaction_id")
+        _validate_exchange_path(self.relative_path, directory="incoming")
+        _validate_sha256(self.sha256)
+        if (
+            isinstance(self.size_bytes, bool)
+            or not isinstance(self.size_bytes, int)
+            or self.size_bytes < 0
+        ):
+            raise ValueError("size_bytes must be a non-negative integer")
+        if self.schema_version != CORE_KNOWLEDGE_SCHEMA_VERSION:
+            raise ValueError("schema_version does not match the Core contract")
+        if self.state not in {"applied_pending_commit", "committed", "rolled_back"}:
+            raise ValueError("restore transaction state is invalid")
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> BeginRestoreResult:
+        _strict_mapping(
+            payload,
+            {
+                "restore_transaction_id",
+                "relative_path",
+                "sha256",
+                "size_bytes",
+                "schema_version",
+                "state",
+            },
+            "begin restore result",
+        )
+        return cls(
+            restore_transaction_id=payload["restore_transaction_id"],
+            relative_path=payload["relative_path"],
+            sha256=payload["sha256"],
+            size_bytes=payload["size_bytes"],
+            schema_version=payload["schema_version"],
+            state=payload["state"],
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "restore_transaction_id": self.restore_transaction_id,
+            "relative_path": self.relative_path,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+            "schema_version": self.schema_version,
+            "state": self.state,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CommitRestoreCommand:
+    request_id: str
+    restore_transaction_id: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.request_id, "request_id")
+        _validate_restore_identifier(self.restore_transaction_id, "restore_transaction_id")
+
+    def to_payload(self) -> dict[str, object]:
+        return {"restore_transaction_id": self.restore_transaction_id}
+
+
+@dataclass(frozen=True, slots=True)
+class CommitRestoreResult:
+    restore_transaction_id: str
+    committed: bool
+    state: str
+
+    def __post_init__(self) -> None:
+        _validate_restore_identifier(self.restore_transaction_id, "restore_transaction_id")
+        if self.committed is not True or self.state != "committed":
+            raise ValueError("commit restore result is invalid")
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> CommitRestoreResult:
+        _strict_mapping(
+            payload,
+            {"restore_transaction_id", "committed", "state"},
+            "commit restore result",
+        )
+        return cls(
+            restore_transaction_id=payload["restore_transaction_id"],
+            committed=payload["committed"],
+            state=payload["state"],
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "restore_transaction_id": self.restore_transaction_id,
+            "committed": self.committed,
+            "state": self.state,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackRestoreCommand:
+    request_id: str
+    restore_transaction_id: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.request_id, "request_id")
+        _validate_restore_identifier(self.restore_transaction_id, "restore_transaction_id")
+
+    def to_payload(self) -> dict[str, object]:
+        return {"restore_transaction_id": self.restore_transaction_id}
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackRestoreResult:
+    restore_transaction_id: str
+    rolled_back: bool
+    state: str
+
+    def __post_init__(self) -> None:
+        _validate_restore_identifier(self.restore_transaction_id, "restore_transaction_id")
+        if self.rolled_back is not True or self.state != "rolled_back":
+            raise ValueError("rollback restore result is invalid")
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> RollbackRestoreResult:
+        _strict_mapping(
+            payload,
+            {"restore_transaction_id", "rolled_back", "state"},
+            "rollback restore result",
+        )
+        return cls(
+            restore_transaction_id=payload["restore_transaction_id"],
+            rolled_back=payload["rolled_back"],
+            state=payload["state"],
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "restore_transaction_id": self.restore_transaction_id,
+            "rolled_back": self.rolled_back,
+            "state": self.state,
         }
 
 
@@ -381,11 +557,20 @@ CoreBackupManifest = BackupManifest
 CreateBackup = CreateBackupCommand
 ValidateBackup = ValidateBackupCommand
 PrepareRestore = PrepareRestoreCommand
+BeginRestore = BeginRestoreCommand
+CommitRestore = CommitRestoreCommand
+RollbackRestore = RollbackRestoreCommand
 
 
 __all__ = [
     "CORE_KNOWLEDGE_SCHEMA_VERSION",
     "BackupManifest",
+    "BeginRestore",
+    "BeginRestoreCommand",
+    "BeginRestoreResult",
+    "CommitRestore",
+    "CommitRestoreCommand",
+    "CommitRestoreResult",
     "CoreBackupManifest",
     "CoreMaintenanceRunner",
     "CoreRestoreError",
@@ -394,6 +579,9 @@ __all__ = [
     "PrepareRestore",
     "PrepareRestoreCommand",
     "PrepareRestoreResult",
+    "RollbackRestore",
+    "RollbackRestoreCommand",
+    "RollbackRestoreResult",
     "ValidateBackup",
     "ValidateBackupCommand",
     "sha256_file",

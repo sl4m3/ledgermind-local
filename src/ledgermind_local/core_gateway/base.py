@@ -14,9 +14,15 @@ from .contracts import (
 )
 from .maintenance import (
     BackupManifest,
+    BeginRestoreCommand,
+    BeginRestoreResult,
+    CommitRestoreCommand,
+    CommitRestoreResult,
     CreateBackupCommand,
     PrepareRestoreCommand,
     PrepareRestoreResult,
+    RollbackRestoreCommand,
+    RollbackRestoreResult,
     ValidateBackupCommand,
 )
 from .model_task_contracts import (
@@ -77,6 +83,12 @@ class CoreGateway(Protocol):
     def prepare_restore(
         self, command: PrepareRestoreCommand
     ) -> PrepareRestoreResult: ...
+
+    def begin_restore(self, command: BeginRestoreCommand) -> BeginRestoreResult: ...
+
+    def commit_restore(self, command: CommitRestoreCommand) -> CommitRestoreResult: ...
+
+    def rollback_restore(self, command: RollbackRestoreCommand) -> RollbackRestoreResult: ...
 
     def health(self) -> CoreHealth: ...
 

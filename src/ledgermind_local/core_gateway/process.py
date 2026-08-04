@@ -21,9 +21,15 @@ from .contracts import (
 )
 from .maintenance import (
     BackupManifest,
+    BeginRestoreCommand,
+    BeginRestoreResult,
+    CommitRestoreCommand,
+    CommitRestoreResult,
     CreateBackupCommand,
     PrepareRestoreCommand,
     PrepareRestoreResult,
+    RollbackRestoreCommand,
+    RollbackRestoreResult,
     ValidateBackupCommand,
 )
 from .model_task_contracts import (
@@ -69,8 +75,17 @@ _CAPABILITY_REQUIREMENTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
         frozenset({"model_task_failure_reporting"}),
     ),
     "maintenance": (
-        frozenset({"create_backup", "validate_backup", "prepare_restore"}),
-        frozenset({"core_owned_backup"}),
+        frozenset(
+            {
+                "create_backup",
+                "validate_backup",
+                "prepare_restore",
+                "begin_restore",
+                "commit_restore",
+                "rollback_restore",
+            }
+        ),
+        frozenset({"core_owned_backup", "coordinated_restore"}),
     ),
 }
 
@@ -399,6 +414,39 @@ class ProcessCoreGateway(CoreGateway):
             return PrepareRestoreResult.from_payload(result)
         except (KeyError, TypeError, ValueError) as exc:
             raise TransientCoreError("Core restore preparation result is malformed") from exc
+
+    def begin_restore(self, command: BeginRestoreCommand) -> BeginRestoreResult:
+        result = self._request(
+            "begin_restore",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        try:
+            return BeginRestoreResult.from_payload(result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransientCoreError("Core restore begin result is malformed") from exc
+
+    def commit_restore(self, command: CommitRestoreCommand) -> CommitRestoreResult:
+        result = self._request(
+            "commit_restore",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        try:
+            return CommitRestoreResult.from_payload(result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransientCoreError("Core restore commit result is malformed") from exc
+
+    def rollback_restore(self, command: RollbackRestoreCommand) -> RollbackRestoreResult:
+        result = self._request(
+            "rollback_restore",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        try:
+            return RollbackRestoreResult.from_payload(result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransientCoreError("Core restore rollback result is malformed") from exc
 
     def close(self) -> None:
         self._supervisor.close()

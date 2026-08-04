@@ -152,10 +152,10 @@ def test_failure_and_backup_commands_round_trip_strict_payloads() -> None:
             "relative_path": "exchange/outgoing/backup-1.sqlite",
             "sha256": "sha256:" + "a" * 64,
             "size_bytes": 12,
-            "schema_version": 5,
+            "schema_version": 6,
         }
     )
-    assert manifest.to_payload()["schema_version"] == 5
+    assert manifest.to_payload()["schema_version"] == 6
     assert CreateBackupCommand("backup-1").to_payload() == {}
     assert ValidateBackupCommand(
         "validate-1", "exchange/incoming/backup-1.sqlite", manifest.sha256
@@ -185,14 +185,14 @@ def test_process_gateway_decodes_failure_and_backup_operations(monkeypatch) -> N
                 "relative_path": "exchange/outgoing/backup-1.sqlite",
                 "sha256": "sha256:" + "a" * 64,
                 "size_bytes": 12,
-                "schema_version": 5,
+                "schema_version": 6,
             }
         if operation == "prepare_restore":
             return {
                 "relative_path": "exchange/incoming/backup-1.sqlite",
                 "sha256": "sha256:" + "a" * 64,
                 "size_bytes": 12,
-                "schema_version": 5,
+                "schema_version": 6,
                 "restore_token": "restore-token-1",
                 "requires_restart": True,
             }
@@ -200,7 +200,7 @@ def test_process_gateway_decodes_failure_and_backup_operations(monkeypatch) -> N
             "relative_path": "exchange/incoming/backup-1.sqlite",
             "sha256": "sha256:" + "a" * 64,
             "size_bytes": 12,
-            "schema_version": 5,
+            "schema_version": 6,
         }
 
     monkeypatch.setattr(gateway, "_request", request)
@@ -252,7 +252,7 @@ def test_core_maintenance_runner_uses_sandbox_and_never_receives_working_db(
         relative_path="exchange/incoming/restore.bin",
         sha256="sha256:" + "a" * 64,
         size_bytes=1,
-        schema_version=5,
+        schema_version=6,
         restore_token="restore-token",
         requires_restart=True,
     )
@@ -305,7 +305,7 @@ def test_core_maintenance_runner_restarts_gateway_after_restore_failure(tmp_path
         relative_path="exchange/incoming/restore.bin",
         sha256="sha256:" + "a" * 64,
         size_bytes=1,
-        schema_version=5,
+        schema_version=6,
         restore_token="restore-token",
         requires_restart=True,
     )
@@ -343,7 +343,7 @@ def test_core_maintenance_runner_rejects_unverified_binary(tmp_path) -> None:
         relative_path="exchange/incoming/restore.bin",
         sha256="sha256:" + "a" * 64,
         size_bytes=1,
-        schema_version=5,
+        schema_version=6,
         restore_token="restore-token",
         requires_restart=True,
     )
@@ -384,7 +384,7 @@ def test_core_maintenance_runner_wraps_restart_failure(tmp_path) -> None:
         relative_path="exchange/incoming/restore.bin",
         sha256="sha256:" + "a" * 64,
         size_bytes=1,
-        schema_version=5,
+        schema_version=6,
         restore_token="restore-token",
         requires_restart=True,
     )

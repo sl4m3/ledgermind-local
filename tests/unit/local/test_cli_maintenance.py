@@ -39,7 +39,7 @@ class _CliCoreGateway:
             relative_path="exchange/outgoing/core-snapshot.bin",
             sha256=sha256_file(source),
             size_bytes=source.stat().st_size,
-            schema_version=5,
+            schema_version=6,
         )
 
     def validate_backup(self, command: object) -> BackupManifest:
@@ -48,7 +48,7 @@ class _CliCoreGateway:
             relative_path=command.relative_path,  # type: ignore[attr-defined]
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=5,
+            schema_version=6,
         )
 
     def prepare_restore(self, command: object) -> PrepareRestoreResult:
@@ -57,7 +57,7 @@ class _CliCoreGateway:
             relative_path=command.relative_path,  # type: ignore[attr-defined]
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=5,
+            schema_version=6,
             restore_token="test-restore-token",
             requires_restart=True,
         )

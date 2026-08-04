@@ -9,6 +9,19 @@ import sys
 import time
 from pathlib import Path
 
+
+def _configure_python_paths() -> None:
+    paths = [
+        sys.argv[index + 1]
+        for index, argument in enumerate(sys.argv[:-1])
+        if argument == "--python-path" and index + 1 < len(sys.argv)
+    ]
+    for path in reversed(paths):
+        sys.path.insert(0, path)
+
+
+_configure_python_paths()
+
 from ledgermind_protocol.core_ipc import (
     CORE_IPC_CAPABILITIES,
     CORE_IPC_OPERATIONS,
@@ -113,7 +126,7 @@ def main() -> int:
                     {
                         "protocol_version": 1,
                         "core_version": "fake-core-1",
-                        "knowledge_schema_version": 5,
+                        "knowledge_schema_version": 6,
                         "supported_operations": operations,
                         "capabilities": capabilities,
                     },
@@ -221,11 +234,11 @@ def main() -> int:
                         "relative_path": relative_path,
                         "sha256": _digest(snapshot),
                         "size_bytes": len(snapshot),
-                        "schema_version": 5,
+                        "schema_version": 6,
                     },
                 )
             )
-        elif request.operation in {"validate_backup", "prepare_restore"}:
+        elif request.operation in {"validate_backup", "prepare_restore", "begin_restore"}:
             raw_relative_path = request.payload.get("relative_path")
             expected_sha = request.payload.get("sha256")
             if (
@@ -251,9 +264,19 @@ def main() -> int:
                 "relative_path": relative_path,
                 "sha256": actual_sha,
                 "size_bytes": len(content),
-                "schema_version": 5,
+                "schema_version": 6,
             }
-            if request.operation == "prepare_restore":
+            if request.operation == "begin_restore":
+                if request.payload.get("restore_token") != "fake-restore-token-1":
+                    _error(request.request_id, "INVALID_REQUEST", "restore token is invalid")
+                    continue
+                result.update(
+                    {
+                        "restore_transaction_id": "fake-restore-transaction-1",
+                        "state": "applied_pending_commit",
+                    }
+                )
+            elif request.operation == "prepare_restore":
                 result.update(
                     {
                         "restore_token": "fake-restore-token-1",
@@ -261,6 +284,28 @@ def main() -> int:
                     }
                 )
             _write(CoreResponseEnvelope.ok(request.request_id, result))
+        elif request.operation == "commit_restore":
+            _write(
+                CoreResponseEnvelope.ok(
+                    request.request_id,
+                    {
+                        "restore_transaction_id": request.payload.get("restore_transaction_id"),
+                        "committed": True,
+                        "state": "committed",
+                    },
+                )
+            )
+        elif request.operation == "rollback_restore":
+            _write(
+                CoreResponseEnvelope.ok(
+                    request.request_id,
+                    {
+                        "restore_transaction_id": request.payload.get("restore_transaction_id"),
+                        "rolled_back": True,
+                        "state": "rolled_back",
+                    },
+                )
+            )
         else:
             _write(
                 CoreResponseEnvelope.ok(

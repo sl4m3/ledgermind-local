@@ -22,6 +22,9 @@ _OPERATIONS = [
     "create_backup",
     "validate_backup",
     "prepare_restore",
+    "begin_restore",
+    "commit_restore",
+    "rollback_restore",
     "shutdown",
 ]
 
@@ -35,6 +38,7 @@ class _Supervisor:
             "capabilities": capabilities
             or {
                 "core_owned_backup": True,
+                "coordinated_restore": True,
                 "model_task_failure_reporting": True,
                 "projection_events": True,
             },
@@ -63,6 +67,7 @@ def test_process_gateway_fails_closed_when_feature_flag_is_missing() -> None:
     supervisor = _Supervisor(
         capabilities={
             "core_owned_backup": False,
+            "coordinated_restore": True,
             "model_task_failure_reporting": True,
             "projection_events": True,
         }
