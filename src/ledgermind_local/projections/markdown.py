@@ -6,7 +6,7 @@ import base64
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import yaml
 
@@ -100,21 +100,18 @@ class KnowledgeMarkdownProjection:
         return True
 
     def _render_core_payload(self, payload: ProjectionUpsertPayload) -> str:
-        metadata = cast(
-            str,
-            yaml.safe_dump(
-                {
-                    "knowledge_id": payload.knowledge_id,
-                    "memory_space_id": payload.memory_space_id,
-                    "projection_version": payload.projection_version,
-                    "statement": payload.statement,
-                    "target": payload.target,
-                    "title": payload.title,
-                },
-                sort_keys=True,
-                allow_unicode=True,
-                default_flow_style=False,
-            ),
+        metadata = yaml.safe_dump(
+            {
+                "knowledge_id": payload.knowledge_id,
+                "memory_space_id": payload.memory_space_id,
+                "projection_version": payload.projection_version,
+                "statement": payload.statement,
+                "target": payload.target,
+                "title": payload.title,
+            },
+            sort_keys=True,
+            allow_unicode=True,
+            default_flow_style=False,
         )
         return (
             "---\n"
