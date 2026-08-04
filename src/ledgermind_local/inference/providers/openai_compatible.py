@@ -8,11 +8,13 @@ from urllib.parse import urlparse
 
 import httpx
 
+from ..cancellation import CancellationToken
 from .base import (
     InferenceProvider,
     ModelRequest,
     ModelResponse,
     ProviderAuthenticationError,
+    ProviderCancelledError,
     ProviderConfigurationError,
     ProviderResponseError,
     ProviderTimeoutError,
@@ -35,6 +37,10 @@ class OpenAICompatibleProvider(InferenceProvider):
         max_retries: int = 2,
         max_response_bytes: int = 2_000_000,
         retry_delay_seconds: float = 0.25,
+        connect_timeout_seconds: float | None = None,
+        read_timeout_seconds: float | None = None,
+        write_timeout_seconds: float | None = None,
+        pool_timeout_seconds: float | None = None,
         client: httpx.Client | None = None,
     ) -> None:
         normalized_url = base_url.strip().rstrip("/")
@@ -57,6 +63,33 @@ class OpenAICompatibleProvider(InferenceProvider):
             raise ProviderConfigurationError(
                 "retry_delay_seconds is outside the supported range"
             )
+        timeout_values = {
+            "connect_timeout_seconds": (
+                timeout_seconds
+                if connect_timeout_seconds is None
+                else float(connect_timeout_seconds)
+            ),
+            "read_timeout_seconds": (
+                timeout_seconds
+                if read_timeout_seconds is None
+                else float(read_timeout_seconds)
+            ),
+            "write_timeout_seconds": (
+                timeout_seconds
+                if write_timeout_seconds is None
+                else float(write_timeout_seconds)
+            ),
+            "pool_timeout_seconds": (
+                timeout_seconds
+                if pool_timeout_seconds is None
+                else float(pool_timeout_seconds)
+            ),
+        }
+        for timeout_name, timeout_value in timeout_values.items():
+            if timeout_value <= 0 or timeout_value > 600:
+                raise ProviderConfigurationError(
+                    f"{timeout_name} is outside the supported range"
+                )
 
         self.base_url = normalized_url
         self._api_key = api_key
@@ -64,7 +97,14 @@ class OpenAICompatibleProvider(InferenceProvider):
         self.max_retries = int(max_retries)
         self.max_response_bytes = int(max_response_bytes)
         self.retry_delay_seconds = float(retry_delay_seconds)
-        self._client = client or httpx.Client(timeout=self.timeout_seconds)
+        self.timeout = httpx.Timeout(
+            self.timeout_seconds,
+            connect=timeout_values["connect_timeout_seconds"],
+            read=timeout_values["read_timeout_seconds"],
+            write=timeout_values["write_timeout_seconds"],
+            pool=timeout_values["pool_timeout_seconds"],
+        )
+        self._client = client or httpx.Client(timeout=self.timeout)
         self._owns_client = client is None
 
     def __repr__(self) -> str:
@@ -78,11 +118,18 @@ class OpenAICompatibleProvider(InferenceProvider):
         if self._owns_client:
             self._client.close()
 
-    def _request(self, request: ModelRequest) -> ModelResponse:
+    def _request(
+        self,
+        request: ModelRequest,
+        *,
+        token: CancellationToken | None = None,
+    ) -> ModelResponse:
+        _raise_if_cancelled(token)
         payload = request.to_openai_payload()
         request_bytes = len(request.encoded_payload())
         attempts = 0
         for attempt in range(1, self.max_retries + 2):
+            _raise_if_cancelled(token)
             attempts = attempt
             try:
                 response = self._client.post(
@@ -92,16 +139,16 @@ class OpenAICompatibleProvider(InferenceProvider):
                         "Content-Type": "application/json",
                     },
                     json=payload,
-                    timeout=self.timeout_seconds,
+                    timeout=self.timeout,
                 )
             except httpx.TimeoutException as exc:
                 if attempt <= self.max_retries:
-                    self._sleep_before_retry(attempt)
+                    self._sleep_before_retry(attempt, token=token)
                     continue
                 raise ProviderTimeoutError("provider request timed out") from exc
             except httpx.RequestError as exc:
                 if attempt <= self.max_retries:
-                    self._sleep_before_retry(attempt)
+                    self._sleep_before_retry(attempt, token=token)
                     continue
                 raise ProviderTransportError("provider transport failed") from exc
 
@@ -109,7 +156,7 @@ class OpenAICompatibleProvider(InferenceProvider):
                 raise ProviderAuthenticationError("provider authentication failed")
             if response.status_code == 429 or 500 <= response.status_code <= 599:
                 if attempt <= self.max_retries:
-                    self._sleep_before_retry(attempt)
+                    self._sleep_before_retry(attempt, token=token)
                     continue
                 raise TransientProviderError(
                     f"provider returned temporary HTTP status {response.status_code}"
@@ -132,9 +179,19 @@ class OpenAICompatibleProvider(InferenceProvider):
 
         raise ProviderTransportError("provider request did not complete")
 
-    def _sleep_before_retry(self, attempt: int) -> None:
-        if self.retry_delay_seconds:
-            time.sleep(min(self.retry_delay_seconds * attempt, 30.0))
+    def _sleep_before_retry(
+        self,
+        attempt: int,
+        *,
+        token: CancellationToken | None = None,
+    ) -> None:
+        delay = min(self.retry_delay_seconds * attempt, 30.0)
+        if token is not None:
+            _raise_if_cancelled(token)
+            if token.wait(delay):
+                raise ProviderCancelledError()
+        elif delay:
+            time.sleep(delay)
 
     @staticmethod
     def _parse_response(
@@ -187,8 +244,26 @@ class OpenAICompatibleProvider(InferenceProvider):
             status_code=response.status_code,
         )
 
-    def complete_json(self, request: ModelRequest) -> ModelResponse:
-        return self._request(request)
+    def complete_json(
+        self,
+        request: ModelRequest,
+        token: CancellationToken | None = None,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> ModelResponse:
+        if (
+            token is not None
+            and cancellation_token is not None
+            and token is not cancellation_token
+        ):
+            raise ValueError("conflicting cancellation tokens")
+        active_token = cancellation_token or token
+        return self._request(request, token=active_token)
+
+
+def _raise_if_cancelled(token: CancellationToken | None) -> None:
+    if token is not None:
+        token.raise_if_cancelled()
 
 
 __all__ = ["OpenAICompatibleProvider"]

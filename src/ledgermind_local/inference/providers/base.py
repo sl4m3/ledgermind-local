@@ -8,6 +8,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..cancellation import CancellationToken
+
 
 class ChatMessage(BaseModel):
     """One bounded chat message sent to a provider."""
@@ -101,6 +103,16 @@ class ProviderTimeoutError(ProviderError):
     code = "timeout"
 
 
+class ProviderCancelledError(ProviderError):
+    """Safe provider cancellation signal without request or payload details."""
+
+    code = "cancelled"
+
+    def __init__(self, *args: object) -> None:
+        del args
+        super().__init__("provider request cancelled")
+
+
 class ProviderTransportError(ProviderError):
     code = "transport_error"
 
@@ -118,7 +130,13 @@ class InferenceProvider(Protocol):
 
     provider_kind: str = "unknown"
 
-    def complete_json(self, request: ModelRequest) -> ModelResponse: ...
+    def complete_json(
+        self,
+        request: ModelRequest,
+        token: CancellationToken | None = None,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> ModelResponse: ...
 
 
 def messages_as_dicts(messages: Iterable[ChatMessage]) -> list[dict[str, str]]:
@@ -133,6 +151,7 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "ProviderAuthenticationError",
+    "ProviderCancelledError",
     "ProviderConfigurationError",
     "ProviderError",
     "ProviderResponseError",

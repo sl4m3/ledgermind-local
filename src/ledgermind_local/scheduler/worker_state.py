@@ -26,6 +26,11 @@ class WorkerStateSnapshot:
     processed_count: int = 0
     failed_count: int = 0
     current_item_id: str | None = None
+    stopping: bool = False
+    shutdown_timed_out: bool = False
+    last_progress_at: str | None = None
+    last_iteration_failure_count: int = 0
+    degraded: bool = False
 
 
 class WorkerState:
@@ -87,11 +92,33 @@ class WorkerState:
     def current_item_id(self) -> str | None:
         return self.snapshot().current_item_id
 
+    @property
+    def stopping(self) -> bool:
+        return self.snapshot().stopping
+
+    @property
+    def shutdown_timed_out(self) -> bool:
+        return self.snapshot().shutdown_timed_out
+
+    @property
+    def last_progress_at(self) -> str | None:
+        return self.snapshot().last_progress_at
+
+    @property
+    def last_iteration_failure_count(self) -> int:
+        return self.snapshot().last_iteration_failure_count
+
+    @property
+    def degraded(self) -> bool:
+        return self.snapshot().degraded
+
     def mark_started(self, *, item_id: str | None = None) -> None:
         with self._lock:
             self._snapshot = replace(
                 self._snapshot,
                 running=True,
+                stopping=False,
+                shutdown_timed_out=False,
                 last_started_at=_now(),
                 current_item_id=item_id,
             )
@@ -99,6 +126,38 @@ class WorkerState:
     def set_current_item(self, item_id: str | None) -> None:
         with self._lock:
             self._snapshot = replace(self._snapshot, current_item_id=item_id)
+
+    def mark_progress(self) -> None:
+        """Record that the worker completed observable progress."""
+
+        with self._lock:
+            self._snapshot = replace(self._snapshot, last_progress_at=_now())
+
+    def mark_degraded(self, degraded: bool = True) -> None:
+        """Set the degraded marker without storing error details or payloads."""
+
+        with self._lock:
+            self._snapshot = replace(
+                self._snapshot,
+                degraded=bool(degraded),
+                healthy=False if degraded else self._snapshot.healthy,
+            )
+
+    set_degraded = mark_degraded
+
+    def mark_stopping(self) -> None:
+        with self._lock:
+            self._snapshot = replace(self._snapshot, stopping=True)
+
+    def mark_shutdown_timed_out(self) -> None:
+        with self._lock:
+            self._snapshot = replace(
+                self._snapshot,
+                stopping=True,
+                shutdown_timed_out=True,
+                healthy=False,
+                degraded=True,
+            )
 
     def mark_success(
         self,
@@ -111,25 +170,39 @@ class WorkerState:
                 self._snapshot,
                 running=True,
                 healthy=True,
+                degraded=False,
                 last_success_at=_now(),
                 consecutive_failures=0,
+                last_iteration_failure_count=0,
+                last_progress_at=_now(),
                 processed_count=(
                     self._snapshot.processed_count + (1 if processed else 0)
                 ),
                 current_item_id=item_id,
             )
 
-    def mark_error(self, error_code: str, *, item_id: str | None = None) -> None:
+    def mark_error(
+        self,
+        error_code: str,
+        *,
+        item_id: str | None = None,
+        failure_count: int | None = None,
+    ) -> None:
         if not error_code.strip():
             raise ValueError("worker error code must not be empty")
+        if failure_count is not None and failure_count < 1:
+            raise ValueError("failure_count must be positive")
         with self._lock:
+            consecutive_failures = self._snapshot.consecutive_failures + 1
             self._snapshot = replace(
                 self._snapshot,
                 running=True,
                 healthy=False,
+                degraded=True,
                 last_error_at=_now(),
                 last_error_code=error_code,
-                consecutive_failures=self._snapshot.consecutive_failures + 1,
+                consecutive_failures=consecutive_failures,
+                last_iteration_failure_count=failure_count or consecutive_failures,
                 failed_count=self._snapshot.failed_count + 1,
                 current_item_id=item_id,
             )
@@ -139,6 +212,7 @@ class WorkerState:
             self._snapshot = replace(
                 self._snapshot,
                 running=False,
+                stopping=False,
                 current_item_id=None,
             )
 

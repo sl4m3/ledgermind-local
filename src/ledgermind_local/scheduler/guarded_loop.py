@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from typing import Protocol
 
+from .shutdown import WorkerShutdownResult
 from .worker_state import WorkerState
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ class GuardedWorkerLoop:
         initial_backoff_seconds: float = 0.25,
         max_backoff_seconds: float = 30.0,
         close_on_stop: bool = False,
+        result_observer: Callable[[object | None, WorkerState], None] | None = None,
     ) -> None:
         max_backoff = max(float(max_backoff_seconds), 0.0)
         initial_backoff = min(max(float(initial_backoff_seconds), 0.0), max_backoff)
@@ -42,6 +45,7 @@ class GuardedWorkerLoop:
         self.initial_backoff_seconds = initial_backoff
         self.max_backoff_seconds = max_backoff
         self._close_on_stop = close_on_stop
+        self._result_observer = result_observer
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
@@ -54,10 +58,20 @@ class GuardedWorkerLoop:
     def request_stop(self) -> None:
         """Request a stop; the current iteration is allowed to finish."""
 
+        self.state.mark_stopping()
         self._stop.set()
         request_worker_stop = getattr(self.worker, "request_stop", None)
         if callable(request_worker_stop):
-            request_worker_stop()
+            try:
+                request_worker_stop()
+            except Exception as exc:  # noqa: BLE001 - shutdown must remain observable
+                logger.warning(
+                    "worker stop request failed",
+                    extra={
+                        "worker": self.state.name,
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
     stop = request_stop
 
@@ -85,6 +99,52 @@ class GuardedWorkerLoop:
             return False
         thread.join(timeout=timeout)
         return not thread.is_alive()
+
+    def is_alive(self) -> bool:
+        """Return whether the worker thread still owns an active iteration."""
+
+        with self._thread_lock:
+            thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def shutdown(self, timeout: float | None = None) -> WorkerShutdownResult:
+        """Request stop and report whether the worker actually stopped.
+
+        A timeout never clears the thread handle and never closes worker-owned
+        resources. The caller can inspect ``is_alive()`` and decide whether
+        shared resources are safe to release.
+        """
+
+        if timeout is not None and timeout < 0:
+            raise ValueError("shutdown timeout must not be negative")
+        self.request_stop()
+        with self._thread_lock:
+            thread = self._thread
+        if thread is None:
+            self.state.mark_stopped()
+            return WorkerShutdownResult(
+                stopped=True,
+                timed_out=False,
+                thread_name=None,
+                current_item_id=None,
+            )
+
+        if thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+        alive = thread.is_alive()
+        if alive:
+            self.state.mark_shutdown_timed_out()
+        else:
+            # A repeated/idempotent shutdown request must not re-leave a
+            # completed worker marked as stopping.
+            self.state.mark_stopped()
+        snapshot = self.state.snapshot()
+        return WorkerShutdownResult(
+            stopped=not alive,
+            timed_out=alive,
+            thread_name=thread.name,
+            current_item_id=snapshot.current_item_id,
+        )
 
     def run(self) -> None:
         current_thread = threading.current_thread()
@@ -123,15 +183,37 @@ class GuardedWorkerLoop:
                     item_id=item_id,
                     processed=result is not None,
                 )
+                if self._result_observer is not None:
+                    try:
+                        self._result_observer(result, self.state)
+                    except Exception as exc:  # noqa: BLE001 - observers are optional
+                        logger.warning(
+                            "worker result observer failed",
+                            extra={
+                                "worker": self.state.name,
+                                "error_type": type(exc).__name__,
+                            },
+                        )
                 backoff = self.initial_backoff_seconds
                 if self._stop.wait(self.poll_interval_seconds):
                     break
         finally:
-            if self._close_on_stop:
-                close_worker = getattr(self.worker, "close", None)
-                if callable(close_worker):
-                    close_worker()
-            self.state.mark_stopped()
+            try:
+                if self._close_on_stop:
+                    close_worker = getattr(self.worker, "close", None)
+                    if callable(close_worker):
+                        try:
+                            close_worker()
+                        except Exception as exc:  # noqa: BLE001 - loop boundary
+                            logger.warning(
+                                "worker close failed",
+                                extra={
+                                    "worker": self.state.name,
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+            finally:
+                self.state.mark_stopped()
 
 
 def _result_item_id(result: object | None) -> str | None:
@@ -144,4 +226,4 @@ def _result_item_id(result: object | None) -> str | None:
     return None
 
 
-__all__ = ["GuardedWorkerLoop"]
+__all__ = ["GuardedWorkerLoop", "WorkerShutdownResult"]
