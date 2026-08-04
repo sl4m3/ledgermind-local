@@ -14,7 +14,10 @@ import ledgermind_local.cli as cli_module
 from ledgermind_local.cli import main
 from ledgermind_local.core_gateway.maintenance import (
     BackupManifest,
+    BeginRestoreResult,
+    CommitRestoreResult,
     PrepareRestoreResult,
+    RollbackRestoreResult,
     sha256_file,
 )
 from ledgermind_local.maintenance.core_backup import CoreBackupService
@@ -62,13 +65,38 @@ class _CliCoreGateway:
             requires_restart=True,
         )
 
-    def close(self) -> None:
+    def begin_restore(self, command: object) -> BeginRestoreResult:
+        return BeginRestoreResult(
+            restore_transaction_id="transaction-1",
+            relative_path=command.relative_path,  # type: ignore[attr-defined]
+            sha256=command.sha256,  # type: ignore[attr-defined]
+            size_bytes=20,
+            schema_version=6,
+            state="applied_pending_commit",
+        )
+
+    def commit_restore(self, command: object) -> CommitRestoreResult:
+        return CommitRestoreResult(
+            restore_transaction_id=command.restore_transaction_id,  # type: ignore[attr-defined]
+            committed=True,
+            state="committed",
+        )
+
+    def rollback_restore(self, command: object) -> RollbackRestoreResult:
+        return RollbackRestoreResult(
+            restore_transaction_id=command.restore_transaction_id,  # type: ignore[attr-defined]
+            rolled_back=True,
+            state="rolled_back",
+        )
+
+    def start(self) -> None:
         return None
 
+    def health(self) -> object:
+        return True
 
-class _NoopRestoreRunner:
-    def apply_restore(self, preparation: object) -> None:
-        del preparation
+    def close(self) -> None:
+        return None
 
 
 def _patch_core_backup(monkeypatch) -> None:
@@ -84,11 +112,6 @@ def _patch_core_backup(monkeypatch) -> None:
         return gateway, service
 
     monkeypatch.setattr(cli_module, "_build_core_backup_service", _build)
-    monkeypatch.setattr(
-        cli_module,
-        "_build_core_restore_runner",
-        lambda **kwargs: _NoopRestoreRunner(),
-    )
 
 
 

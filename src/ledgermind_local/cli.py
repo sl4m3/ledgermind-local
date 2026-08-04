@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import signal
 import sqlite3
 import sys
@@ -18,14 +17,13 @@ from ledgermind_local.api.app import create_app
 from ledgermind_local.api.dependencies import Settings
 from ledgermind_local.bootstrap import (
     LocalRuntime,
-    _core_isolation_requirements,
     build_core_projection_handlers,
     build_process_core_gateway,
     build_projection_names,
     initialize_local_layout,
 )
 from ledgermind_local.config import LocalConfig
-from ledgermind_local.core_gateway import CoreGateway, CoreMaintenanceRunner
+from ledgermind_local.core_gateway import CoreGateway
 from ledgermind_local.core_gateway.doctor import build_core_doctor_report
 from ledgermind_local.diagnostics.integrity import run_database_integrity_checks
 from ledgermind_local.inference import (
@@ -33,6 +31,10 @@ from ledgermind_local.inference import (
     InferenceProfile,
     InferenceProfileStore,
     SecretStore,
+)
+from ledgermind_local.maintenance.coordinated_restore import (
+    CoordinatedRestoreError,
+    CoordinatedRestoreService,
 )
 from ledgermind_local.maintenance.core_backup import CoreBackupError, CoreBackupService
 from ledgermind_local.paths import ServicePaths
@@ -779,14 +781,13 @@ def _build_core_backup_service(
     return gateway, service
 
 
-def _build_core_restore_runner(
+def _build_coordinated_restore_service(
     *,
-    paths: ServicePaths,
-    config: LocalConfig,
     gateway: CoreGateway,
+    backup_service: CoreBackupService,
     rounds_database_path: Path,
-) -> CoreMaintenanceRunner:
-    """Build the B1 atomic Core restore lifecycle without touching Core SQL."""
+) -> CoordinatedRestoreService:
+    """Build the B1 journaled restore owner around the Core gateway."""
 
     stop_candidate = getattr(gateway, "close", None)
     health_candidate = getattr(gateway, "health", None)
@@ -800,20 +801,13 @@ def _build_core_restore_runner(
         or not callable(health_candidate)
     ):
         raise CoreBackupError("Core gateway cannot be restarted for restore")
-    stop_gateway = cast(Callable[[], None], stop_candidate)
-    start_gateway = cast(Callable[[], None], start_candidate)
-    health_check = cast(Callable[[], object], health_candidate)
-    return CoreMaintenanceRunner(
-        core_binary_path=paths.resolve_core_path(config.core_binary_path),
-        core_data_dir=paths.core_data_dir,
-        stop_gateway=stop_gateway,
-        start_gateway=start_gateway,
-        health_check=health_check,
-        signature_path=paths.resolve_core_path(config.core_signature_path),
-        public_key_path=paths.resolve_core_path(config.core_public_key_path),
-        isolation_requirements=_core_isolation_requirements(config),
-        runtime_paths=(paths.core_data_dir,),
+    return CoordinatedRestoreService(
+        core_backup_service=backup_service,
         rounds_database_path=rounds_database_path,
+        journal_path=rounds_database_path.with_name("restore-journal.json"),
+        stop_core=cast(Callable[[], object], stop_candidate),
+        start_core=cast(Callable[[], object], start_candidate),
+        health_check=cast(Callable[[], object], health_candidate),
     )
 
 
@@ -848,22 +842,11 @@ def _command_backup_create(args: argparse.Namespace) -> int:
                 close()
 
 
-def _replace_rounds_snapshot(snapshot: Path, target: Path) -> None:
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.restore-tmp")
-    try:
-        shutil.copy2(snapshot, temporary)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def _command_backup_restore(args: argparse.Namespace) -> int:
-    """Prepare Core restore through IPC and restore only Local rounds.db."""
+    """Restore Local rounds through the B1 coordinated journaled saga."""
 
-    gateway: Any | None = None
-    prepared = None
+    gateway: CoreGateway | None = None
+    prepared: object | None = None
     try:
         paths, config, _token = initialize_local_layout(
             home=Path(args.home).expanduser()
@@ -874,24 +857,42 @@ def _command_backup_restore(args: argparse.Namespace) -> int:
             else paths.resolve_rounds_database_path(config.rounds_database_path)
         ).expanduser()
         with ServiceLock(paths.service_lock_file):
-            gateway, service = _build_core_backup_service(paths=paths, config=config)
-            prepared = service.prepare_restore(args.source)
-            restore_runner = _build_core_restore_runner(
-                paths=paths,
-                config=config,
+            gateway, backup_service = _build_core_backup_service(paths=paths, config=config)
+            restore_service = _build_coordinated_restore_service(
                 gateway=gateway,
+                backup_service=backup_service,
                 rounds_database_path=target,
             )
-            restore_runner.apply_restore(prepared.preparation)
-            _replace_rounds_snapshot(prepared.rounds_snapshot_path, target)
+            prepared = restore_service.prepare_restore(args.source)
+            result = restore_service.apply_restore(prepared)
+            if result.state != "committed":
+                raise CoordinatedRestoreError(
+                    "restore_not_committed",
+                    "coordinated restore did not commit",
+                    restore_id=result.restore_id,
+                )
+            health = getattr(gateway, "health", None)
+            if callable(health):
+                health_result = health()
+                if not bool(getattr(health_result, "healthy", health_result is True)):
+                    raise CoordinatedRestoreError(
+                        "restore_health_failed",
+                        "Core health check failed after restore",
+                        restore_id=result.restore_id,
+                    )
+            initialize_local_layout(home=paths.home, rotate_token=True)
         print(f"backup restored: {args.source}")
         return 0
+    except CoordinatedRestoreError as exc:
+        print(f"restore unavailable: {exc.code}", file=sys.stderr)
+        return 1
     except (CoreBackupError, ServiceLockError, OSError, RuntimeError, ValueError) as exc:
-        print(f"restore unavailable: {exc}", file=sys.stderr)
+        print(f"restore unavailable: {type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
-        if prepared is not None:
-            prepared.cleanup()
+        cleanup = getattr(prepared, "cleanup", None)
+        if callable(cleanup):
+            cleanup()
         if gateway is not None:
             close = getattr(gateway, "close", None)
             if callable(close):

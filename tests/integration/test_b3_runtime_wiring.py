@@ -1,0 +1,314 @@
+"""B3 runtime wiring regressions."""
+
+from __future__ import annotations
+
+import json
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+
+from ledgermind_local import bootstrap, cli
+from ledgermind_local.bootstrap import LocalRuntime
+from ledgermind_local.config import CoreSecurityConfig, LocalConfig
+from ledgermind_local.core_gateway.contracts import CoreHealth
+from ledgermind_local.core_gateway.security_policy import (
+    build_core_isolation_requirements,
+)
+from ledgermind_local.paths import ServicePaths
+from ledgermind_local.scheduler.core_model_task_worker import CoreModelTaskWorkerStats
+
+
+class _Gateway:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def require_capabilities(self, *capabilities: str) -> None:
+        self.events.append("capabilities:" + ",".join(capabilities))
+
+    def health(self) -> CoreHealth:
+        self.events.append("health")
+        return CoreHealth(healthy=True, backend="fake")
+
+    def close(self) -> None:
+        self.events.append("core-close")
+
+
+class _BlockingWorker:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def process_once(self) -> None:
+        self.entered.set()
+        self.release.wait(timeout=5)
+
+    def request_stop(self) -> None:
+        return None
+
+
+class _ObservedWorker:
+    def __init__(self) -> None:
+        self.observed = threading.Event()
+
+    def process_once(self) -> CoreModelTaskWorkerStats:
+        self.observed.set()
+        return CoreModelTaskWorkerStats(
+            fetched=1,
+            failed=1,
+            retry_scheduled=1,
+            terminal_failures=1,
+            provider_failures=1,
+            last_error_code="provider_unavailable",
+        )
+
+    def request_stop(self) -> None:
+        return None
+
+
+def _runtime(
+    tmp_path: Path,
+    *,
+    config: LocalConfig,
+    gateway: object | None = None,
+    worker_factories: dict[str, object] | None = None,
+) -> LocalRuntime:
+    paths = ServicePaths(tmp_path / "service")
+    events: list[str] = []
+    selected_gateway = gateway or _Gateway(events)
+    return LocalRuntime(
+        paths=paths,
+        config=config,
+        api_token="test-token",
+        database_path=paths.resolve_rounds_database_path(config.rounds_database_path),
+        core_gateway_factory=lambda: selected_gateway,
+        worker_factories=worker_factories,  # type: ignore[arg-type]
+    )
+
+
+def _minimal_config(**workers: object) -> LocalConfig:
+    defaults = {
+        "retention": {"enabled": False},
+        "processing": {"enabled": False},
+        "core_commands": {"enabled": False},
+        "core_projections": {"enabled": False},
+        "core_model_tasks": {"enabled": False},
+    }
+    defaults.update(workers)
+    return LocalConfig(config_version=1, workers=defaults)
+
+
+def test_legacy_security_switch_migrates_to_secure_v2_without_serializing_legacy_key() -> None:
+    config = LocalConfig.from_dict(
+        {
+            "config_version": 1,
+            "require_core_network_isolation": True,
+        }
+    )
+
+    assert config.config_version == 2
+    assert config.core_security.profile == "secure"
+    assert config.core_security.require_network_isolation is True
+    payload = json.loads(config.to_json())
+    assert "require_core_network_isolation" not in payload
+    assert "require_core_network_isolation" not in config.model_dump()
+
+    migrated_false = LocalConfig.from_dict(
+        {"config_version": 1, "require_core_network_isolation": False}
+    )
+    assert migrated_false.config_version == 2
+    assert migrated_false.core_security.profile == "secure"
+    assert migrated_false.core_security.require_signature is True
+
+
+def test_persisted_legacy_config_is_rewritten_to_current_schema(tmp_path: Path) -> None:
+    paths = ServicePaths(tmp_path / "service")
+    paths.home.mkdir(parents=True)
+    paths.config_file.write_text(
+        json.dumps(
+            {
+                "config_version": 1,
+                "require_core_network_isolation": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _paths, config, _token = bootstrap.initialize_local_layout(home=paths.home)
+
+    persisted = json.loads(paths.config_file.read_text(encoding="utf-8"))
+    assert config.config_version == 2
+    assert persisted["config_version"] == 2
+    assert "require_core_network_isolation" not in persisted
+
+
+def test_runtime_bootstrap_and_doctor_share_one_policy_translation() -> None:
+    assert bootstrap.build_core_isolation_requirements is build_core_isolation_requirements
+    assert not hasattr(bootstrap, "_core_isolation_requirements")
+
+    permissive = CoreSecurityConfig(profile="permissive", require_network_isolation=True)
+    requirements = build_core_isolation_requirements(
+        permissive,
+        verify_core_signature=False,
+    )
+    assert requirements.require_network_isolation is True
+
+
+def test_runtime_does_not_close_core_when_worker_shutdown_times_out(tmp_path: Path) -> None:
+    events: list[str] = []
+    gateway = _Gateway(events)
+    worker = _BlockingWorker()
+    config = _minimal_config(
+        retention={
+            "enabled": True,
+            "interval_seconds": 0,
+            "shutdown_timeout_seconds": 0.01,
+        }
+    )
+    runtime = _runtime(
+        tmp_path,
+        config=config,
+        gateway=gateway,
+        worker_factories={"retention": lambda _runtime: worker},
+    )
+
+    runtime.start()
+    assert worker.entered.wait(timeout=1)
+    runtime.stop()
+
+    assert "core-close" not in events
+    report = runtime.health_report()
+    assert report["shutdown"]["incomplete"] is True
+    assert report["shutdown"]["timed_out_workers"] == ["retention"]
+    assert report["components"]["workers"]["retention"]["state"]["shutdown_timed_out"] is True
+
+    worker.release.set()
+    runtime.stop()
+    assert "core-close" in events
+
+
+def test_runtime_health_exposes_model_task_stats_without_result_payload(tmp_path: Path) -> None:
+    worker = _ObservedWorker()
+    config = _minimal_config(retention={"enabled": True, "interval_seconds": 0})
+    runtime = _runtime(
+        tmp_path,
+        config=config,
+        worker_factories={"retention": lambda _runtime: worker},
+    )
+
+    runtime.start()
+    try:
+        assert worker.observed.wait(timeout=1)
+        report = runtime.health_report()
+        worker_report = report["components"]["workers"]["retention"]
+        assert worker_report["ready"] is False
+        assert report["full_ready"] is False
+        assert report["degraded"] is True
+        assert worker_report["state"]["degraded"] is True
+        assert worker_report["observability"]["retry_scheduled"] == 1
+        assert worker_report["observability"]["terminal_failures"] == 1
+        assert worker_report["observability"]["provider_failures"] == 1
+        assert "fetched" in worker_report["observability"]
+        assert "provider_unavailable" in json.dumps(worker_report)
+        assert "model_input" not in json.dumps(report)
+    finally:
+        runtime.stop()
+
+
+def test_runtime_surfaces_pending_restore_journal_and_blocks_full_ready(tmp_path: Path) -> None:
+    config = _minimal_config()
+    runtime = _runtime(tmp_path, config=config)
+    journal = runtime.paths.home / "restore-journal.json"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(json.dumps({"state": "pending"}), encoding="utf-8")
+    runtime.core_gateway_factory = lambda: (_ for _ in ()).throw(RuntimeError("Core unavailable"))
+
+    runtime.start()
+    try:
+        report = runtime.health_report()
+        assert report["capture_ready"] is True
+        assert report["full_ready"] is False
+        assert report["components"]["restore"]["ready"] is False
+        assert report["components"]["restore"]["error_code"] in {
+            "restore_pending",
+            "restore_journal_corrupt",
+        }
+    finally:
+        runtime.stop()
+
+
+def test_backup_restore_uses_coordinated_saga_and_rotates_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "service"
+    assert cli.main(["--home", str(home), "init"]) == 0
+    old_token = (home / "server.token").read_text(encoding="utf-8")
+    events: list[str] = []
+
+    class _Prepared:
+        def cleanup(self) -> None:
+            events.append("cleanup")
+
+    class _Saga:
+        def __init__(self, **kwargs: object) -> None:
+            events.append("saga-init")
+            assert "core_backup_service" in kwargs
+            assert callable(kwargs["stop_core"])
+            assert callable(kwargs["start_core"])
+            assert callable(kwargs["health_check"])
+
+        def prepare_restore(self, source: Path) -> _Prepared:
+            events.append(f"prepare:{source.name}")
+            return _Prepared()
+
+        def apply_restore(self, prepared: _Prepared) -> SimpleNamespace:
+            del prepared
+            events.append("apply")
+            return SimpleNamespace(state="committed")
+
+    class _GatewayForRestore:
+        def start(self) -> None:
+            events.append("start")
+
+        def health(self) -> CoreHealth:
+            return CoreHealth(healthy=True, backend="fake")
+
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(cli, "CoordinatedRestoreService", _Saga)
+    monkeypatch.setattr(
+        cli,
+        "_build_core_backup_service",
+        lambda **_kwargs: (_GatewayForRestore(), object()),
+    )
+    source = home / "backup.zip"
+    source.write_bytes(b"opaque-test-archive")
+
+    assert (
+        cli.main(
+            ["--home", str(home), "backup", "restore", "--source", str(source)]
+        )
+        == 0
+    )
+
+    new_token = (home / "server.token").read_text(encoding="utf-8")
+    assert new_token != old_token
+    assert events[:3] == ["saga-init", "prepare:backup.zip", "apply"]
+    assert "cleanup" in events
+    assert "close" in events
+
+
+def test_permissive_runtime_emits_warning_and_reports_capabilities_honestly(
+    tmp_path: Path, caplog
+) -> None:
+    config = _minimal_config()
+    config = config.model_copy(update={"core_security": CoreSecurityConfig(profile="permissive")})
+    runtime = _runtime(tmp_path, config=config)
+
+    with caplog.at_level("WARNING", logger="ledgermind_local.bootstrap"):
+        runtime.start()
+    try:
+        assert any("permissive" in record.message for record in caplog.records)
+        assert runtime.health_report()["components"]["isolation"]["ready"] is True
+    finally:
+        runtime.stop()

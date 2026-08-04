@@ -12,17 +12,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ledgermind_local.config import LocalConfig, WorkerConfig
+from ledgermind_local.config import CURRENT_CONFIG_VERSION, LocalConfig, WorkerConfig
 from ledgermind_local.core_gateway import (
     ContextViewResult,
     CoreGateway,
     ProcessCoreGateway,
     RetrieveContextCommand,
 )
-from ledgermind_local.core_gateway.isolation import IsolationRequirements
+from ledgermind_local.core_gateway.security_policy import (
+    build_core_isolation_requirements,
+)
 from ledgermind_local.core_gateway.signing import verify_core_binary
 from ledgermind_local.core_gateway.supervisor import CoreSupervisor
 from ledgermind_local.inference import InferenceBroker, SecretStore
+from ledgermind_local.maintenance.coordinated_restore import (
+    CoordinatedRestoreError,
+    CoordinatedRestoreService,
+)
 from ledgermind_local.maintenance.core_backup import CoreBackupService
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.persistence import open_sqlite_connection
@@ -36,6 +42,7 @@ from ledgermind_local.raw_rounds import RawRoundIngestHandler
 from ledgermind_local.scheduler import (
     CoreCommandWorker,
     CoreModelTaskWorker,
+    CoreModelTaskWorkerStats,
     CoreProjectionWorker,
     GuardedWorkerLoop,
     RawRoundRetentionWorker,
@@ -287,20 +294,6 @@ class _RuntimeCoreBackedSearch(CoreBackedSearch):
             raise RuntimeError("local candidate search is unavailable")
 
 
-def _core_isolation_requirements(config: LocalConfig) -> IsolationRequirements:
-    security = config.core_security
-    return IsolationRequirements(
-        require_network_isolation=(
-            security.require_network_isolation
-            or config.require_core_network_isolation
-        ),
-        require_rounds_database_hidden=security.require_rounds_database_hidden,
-        require_filesystem_allowlist=security.require_filesystem_allowlist,
-        require_environment_sanitized=security.require_environment_sanitized,
-        require_signature=security.require_signature,
-    )
-
-
 def build_process_core_gateway(*, paths: ServicePaths, config: LocalConfig) -> ProcessCoreGateway:
     """Build the process Core boundary without starting the child process."""
 
@@ -319,7 +312,10 @@ def build_process_core_gateway(*, paths: ServicePaths, config: LocalConfig) -> P
             public_key_path=public_key_path,
         )
         signature_verified = True
-    requirements = _core_isolation_requirements(config)
+    requirements = build_core_isolation_requirements(
+        config.core_security,
+        verify_core_signature=config.verify_core_signature,
+    )
     supervisor = CoreSupervisor(
         [str(command_path), "--database", str(knowledge_database_path)],
         startup_timeout_seconds=config.core_startup_timeout_seconds,
@@ -403,6 +399,12 @@ class LocalRuntime:
         self._raw_round_handler: RawRoundIngestHandler | None = None
         self._context_search: object | None = None
         self._backup_service: CoreBackupService | None = None
+        self._restore_service: CoordinatedRestoreService | None = None
+        self._restore_status: dict[str, object] | None = None
+        self._required_core_capabilities: tuple[str, ...] = ()
+        self._worker_observations: dict[str, dict[str, object]] = {}
+        self._shutdown_incomplete = False
+        self._shutdown_timed_out_workers: list[str] = []
         self._degraded_search = False
 
     @property
@@ -449,6 +451,12 @@ class LocalRuntime:
         return getattr(self, "_backup_service", None)
 
     @property
+    def restore_service(self) -> CoordinatedRestoreService | None:
+        """Return the B1 coordinated restore owner for this runtime."""
+
+        return self._restore_service
+
+    @property
     def worker_states(self) -> dict[str, WorkerStateSnapshot]:
         return {name: handle.state.snapshot() for name, handle in self._workers.items()}
 
@@ -470,14 +478,24 @@ class LocalRuntime:
 
         if self._started:
             return self
+        if self._shutdown_incomplete:
+            if any(handle.loop.is_alive() for handle in self._workers.values()):
+                raise RuntimeError("Local runtime shutdown is incomplete")
+            self.stop()
         if self._starting:
             raise RuntimeError("Local runtime startup is already in progress")
         self._starting = True
         self._stop_requested = False
         self._component_errors.clear()
         self._workers.clear()
+        self._worker_observations.clear()
         self._core_error_code = None
         self._core_ready = False
+        self._required_core_capabilities = ()
+        self._restore_status = None
+        self._restore_service = None
+        self._shutdown_incomplete = False
+        self._shutdown_timed_out_workers = []
         self._degraded_search = False
         self._migrations_applied = False
         self._context_search = None
@@ -504,6 +522,7 @@ class LocalRuntime:
             # Core is brought up only after Local's durable schema is ready;
             # no worker can observe a partially migrated database.
             self._start_core_if_available()
+            self._recover_restore_journal()
             self._build_context_search()
             self._start_workers()
             self._started = True
@@ -522,21 +541,41 @@ class LocalRuntime:
             handle.loop.request_stop()
 
     def stop(self) -> None:
-        """Stop workers in reverse composition order, then Core and ownership files."""
+        """Stop workers before Core and preserve incomplete shutdown state."""
 
         if not self._started and self._service_lock is None and not self._pid_owned:
             return
         self.request_stop()
+        timed_out_workers: list[str] = []
         for name in reversed(self._WORKER_ORDER):
             handle = self._workers.get(name)
             if handle is None:
                 continue
-            stopped = handle.loop.join(handle.config.shutdown_timeout_seconds)
+            try:
+                result = handle.loop.shutdown(handle.config.shutdown_timeout_seconds)
+                stopped = bool(getattr(result, "stopped", False))
+            except Exception as exc:  # noqa: BLE001 - shutdown remains observable
+                stopped = False
+                self._component_errors[name] = _safe_error_code(exc)
+                handle.state.mark_shutdown_timed_out()
             if not stopped:
+                timed_out_workers.append(name)
                 self._component_errors[name] = "shutdown_timeout"
+
+        if timed_out_workers:
+            # Keep worker handles, the Core gateway, the lock and all resources
+            # reachable by a live worker.  A later stop() can finish the join.
+            self._shutdown_incomplete = True
+            self._shutdown_timed_out_workers = list(reversed(timed_out_workers))
+            self._started = False
+            return
+
+        self._shutdown_incomplete = False
+        self._shutdown_timed_out_workers = []
         self._workers.clear()
         self._context_search = None
         self._backup_service = None
+        self._restore_service = None
         self._raw_round_handler = None
         gateway = self.core_gateway
         self.core_gateway = None
@@ -557,6 +596,23 @@ class LocalRuntime:
             self._service_lock = None
         self._started = False
         self._stop_requested = False
+
+    def _capabilities_report(self) -> dict[str, object]:
+        gateway = self.core_gateway
+        advertised_operations = getattr(gateway, "advertised_operations", ())
+        advertised_capabilities = getattr(gateway, "advertised_capabilities", ())
+
+        def _safe_strings(value: object) -> list[str]:
+            if not isinstance(value, (list, tuple, set, frozenset)):
+                return []
+            return sorted(item for item in value if isinstance(item, str))
+
+        return {
+            "ready": self._core_ready,
+            "required": list(self._required_core_capabilities),
+            "advertised_operations": _safe_strings(advertised_operations),
+            "advertised_capabilities": _safe_strings(advertised_capabilities),
+        }
 
     def health_report(self) -> dict[str, object]:
         """Return secret-free capture/full readiness and component diagnostics."""
@@ -591,20 +647,35 @@ class LocalRuntime:
                     "consecutive_failures": state.consecutive_failures,
                     "processed_count": state.processed_count,
                     "failed_count": state.failed_count,
+                    "last_progress_at": state.last_progress_at,
+                    "shutdown_timed_out": state.shutdown_timed_out,
+                    "degraded": state.degraded,
                 },
+                "observability": dict(self._worker_observations.get(name, {})),
             }
             workers_ready = workers_ready and ready
 
         isolation = self._isolation_report()
+        capabilities = self._capabilities_report()
         core_report = {
             "ready": self._core_ready,
             "available": self.core_gateway is not None,
             "error_code": self._core_error_code,
             "isolation": isolation,
+            "capabilities": capabilities,
         }
         capture_ready = self.capture_ready
         core_security_ready = bool(isolation.get("ready", True))
         inference_ready = not bool(self._component_errors.get("processing"))
+        if self.config.workers.processing.enabled:
+            inference_ready = inference_ready and bool(self.config.hypothesis_profile_id)
+        restore = dict(self._restore_status or {"ready": True, "state": "clean"})
+        restore_ready = bool(restore.get("ready", False))
+        capabilities_ready = bool(capabilities.get("ready", False))
+        shutdown = {
+            "incomplete": self._shutdown_incomplete,
+            "timed_out_workers": list(self._shutdown_timed_out_workers),
+        }
         retention_report = worker_reports.get("retention", {"enabled": False, "ready": True})
         projections_report = worker_reports.get(
             "core_projections", {"enabled": False, "ready": True}
@@ -619,8 +690,12 @@ class LocalRuntime:
             capture_ready
             and self._core_ready
             and core_security_ready
+            and capabilities_ready
             and workers_ready
             and inference_ready
+            and restore_ready
+            and not self._shutdown_incomplete
+            and not self._degraded_search
         )
         core_report["isolation"] = isolation_report
         projection_ready = bool(
@@ -628,10 +703,24 @@ class LocalRuntime:
             if isinstance(projections_report, dict)
             else True
         )
+        degraded_workers = any(
+            isinstance(report, dict)
+            and isinstance(report.get("state"), dict)
+            and bool(report["state"].get("degraded"))
+            for report in worker_reports.values()
+        )
+        degraded = bool(
+            self._degraded_search
+            or degraded_workers
+            or self._shutdown_incomplete
+            or not restore_ready
+        )
         return {
             "status": "ready" if full_ready else ("capture-ready" if capture_ready else "unavailable"),
             "capture_ready": capture_ready,
             "full_ready": full_ready,
+            "degraded": degraded,
+            "shutdown": shutdown,
             "components": {
                 "capture": {
                     "ready": capture_ready,
@@ -641,6 +730,8 @@ class LocalRuntime:
                 },
                 "core": core_report,
                 "isolation": isolation_report,
+                "capabilities": capabilities,
+                "restore": restore,
                 "inference": {
                     "ready": inference_ready,
                     "processing_enabled": self.config.workers.processing.enabled,
@@ -705,6 +796,73 @@ class LocalRuntime:
                 if callable(close):
                     close()
 
+    def _build_restore_service(self) -> CoordinatedRestoreService | None:
+        backup_service = self._backup_service
+        gateway = self.core_gateway
+        if backup_service is None or gateway is None:
+            return None
+        stop_candidate = getattr(gateway, "close", None)
+        health_candidate = getattr(gateway, "health", None)
+        supervisor = getattr(gateway, "_supervisor", None)
+        start_candidate = getattr(gateway, "start", None)
+        if not callable(start_candidate):
+            start_candidate = getattr(supervisor, "start", None)
+        if (
+            not callable(stop_candidate)
+            or not callable(start_candidate)
+            or not callable(health_candidate)
+        ):
+            raise TypeError("Core gateway cannot be restarted for restore")
+        return CoordinatedRestoreService(
+            core_backup_service=backup_service,
+            rounds_database_path=self.database_path,
+            journal_path=self.database_path.with_name("restore-journal.json"),
+            stop_core=stop_candidate,
+            start_core=start_candidate,
+            health_check=health_candidate,
+        )
+
+    def _recover_restore_journal(self) -> None:
+        """Recover a durable restore journal before advertising readiness."""
+
+        journal_path = self.database_path.with_name("restore-journal.json")
+        if not journal_path.exists():
+            self._restore_status = {"ready": True, "state": "clean"}
+            return
+        if self._backup_service is None or self.core_gateway is None:
+            self._restore_status = {
+                "ready": False,
+                "state": "pending",
+                "error_code": "restore_pending",
+            }
+            self._component_errors["restore"] = "restore_pending"
+            return
+        try:
+            self._restore_service = self._build_restore_service()
+            if self._restore_service is None:
+                raise RuntimeError("restore service is unavailable")
+            result = self._restore_service.recover()
+            self._restore_status = {
+                "ready": True,
+                "state": result.state if result is not None else "clean",
+            }
+        except CoordinatedRestoreError as exc:
+            error_code = exc.code if exc.code else "restore_inconsistent"
+            self._restore_status = {
+                "ready": False,
+                "state": "restore_inconsistent" if exc.inconsistent else "pending",
+                "error_code": error_code,
+            }
+            self._component_errors["restore"] = error_code
+        except Exception as exc:  # noqa: BLE001 - startup must expose, not hide, journals
+            error_code = _safe_error_code(exc)
+            self._restore_status = {
+                "ready": False,
+                "state": "pending",
+                "error_code": error_code,
+            }
+            self._component_errors["restore"] = error_code
+
     def _start_core_if_available(self) -> None:
         try:
             if self.core_gateway is None:
@@ -717,6 +875,7 @@ class LocalRuntime:
                 required.append("projections")
             if workers.core_model_tasks.enabled:
                 required.append("model_tasks")
+            self._required_core_capabilities = tuple(required)
             start = getattr(self.core_gateway, "start", None)
             if callable(start):
                 start()
@@ -840,12 +999,19 @@ class LocalRuntime:
         state = getattr(worker, "state", None)
         if not isinstance(state, WorkerState):
             state = WorkerState(name)
+        observer = lambda result, observed_state: self._observe_worker_result(
+            name, result, observed_state
+        )
         create_loop = getattr(worker, "create_loop", None)
         if callable(create_loop):
             loop = create_loop(
                 poll_interval_seconds=config_worker.interval_seconds,
                 max_backoff_seconds=config_worker.max_backoff_seconds,
             )
+            # A5 owns the observer hook; the A5 worker implementations that
+            # predate B3 expose it on the constructed loop rather than their
+            # create_loop signature.
+            loop._result_observer = observer
         else:
             loop = GuardedWorkerLoop(
                 worker,  # type: ignore[arg-type]
@@ -854,11 +1020,44 @@ class LocalRuntime:
                 poll_interval_seconds=config_worker.interval_seconds,
                 max_backoff_seconds=config_worker.max_backoff_seconds,
                 close_on_stop=callable(getattr(worker, "close", None)),
+                result_observer=observer,
             )
         if not isinstance(loop, GuardedWorkerLoop):
             raise TypeError("worker factory returned an unsupported loop")
         loop.start()
         return _RuntimeWorkerHandle(name, config_worker, worker, loop, state)
+
+    def _observe_worker_result(
+        self,
+        name: str,
+        result: object | None,
+        state: WorkerState,
+    ) -> None:
+        """Record B2 counters through the A5 observer without result payloads."""
+
+        if not isinstance(result, CoreModelTaskWorkerStats):
+            return
+        observation: dict[str, object] = {
+            "fetched": result.fetched,
+            "completed": result.completed,
+            "duplicates": result.duplicates,
+            "failed": result.failed,
+            "released": result.released,
+            "retryable_failures": result.retryable_failures,
+            "permanent_failures": result.permanent_failures,
+            "retry_scheduled": result.retry_scheduled,
+            "terminal_failures": result.terminal_failures,
+            "provider_failures": result.provider_failures,
+            "core_poll_failures": result.core_poll_failures,
+            "core_delivery_failures": result.core_delivery_failures,
+            "last_error_code": result.last_error_code,
+            "degraded": result.degraded,
+        }
+        self._worker_observations[name] = observation
+        if result.made_progress:
+            state.mark_progress()
+        if result.degraded:
+            state.mark_degraded()
 
     def _build_context_search(self) -> None:
         if self.core_gateway is None:
@@ -909,17 +1108,36 @@ class LocalRuntime:
             return {"ready": True, "missing": (), "capabilities": {}}
         as_dict = getattr(capabilities, "as_dict", None)
         payload = as_dict() if callable(as_dict) else {}
-        missing = _core_isolation_requirements(self.config).missing(capabilities)
+        missing = build_core_isolation_requirements(
+            self.config.core_security,
+            verify_core_signature=self.config.verify_core_signature,
+        ).missing(capabilities)
         return {"ready": not missing, "missing": missing, "capabilities": payload}
 
     def _cleanup_after_failed_start(self) -> None:
         self.request_stop()
-        for handle in reversed(tuple(self._workers.values())):
-            handle.loop.join(handle.config.shutdown_timeout_seconds)
+        timed_out_workers: list[str] = []
+        for name, handle in reversed(tuple(self._workers.items())):
+            try:
+                result = handle.loop.shutdown(handle.config.shutdown_timeout_seconds)
+                stopped = bool(getattr(result, "stopped", False))
+            except Exception as exc:  # noqa: BLE001
+                stopped = False
+                self._component_errors[name] = _safe_error_code(exc)
+                handle.state.mark_shutdown_timed_out()
+            if not stopped:
+                timed_out_workers.append(name)
+                self._component_errors[name] = "shutdown_timeout"
+        if timed_out_workers:
+            self._shutdown_incomplete = True
+            self._shutdown_timed_out_workers = list(reversed(timed_out_workers))
+            self._started = False
+            return
         self._workers.clear()
         gateway = self.core_gateway
         self.core_gateway = None
         self._backup_service = None
+        self._restore_service = None
         if gateway is not None:
             close = getattr(gateway, "close", None)
             if callable(close):
@@ -972,7 +1190,9 @@ def bootstrap_local_service(
     """Prepare Local filesystem and return resolved runtime objects."""
 
     paths = ServicePaths(home=home)
-    cfg = config or LocalConfig(config_version=1)
+    cfg = config or LocalConfig(config_version=CURRENT_CONFIG_VERSION)
+    if cfg.config_version < CURRENT_CONFIG_VERSION:
+        cfg = cfg.model_copy(update={"config_version": CURRENT_CONFIG_VERSION})
     paths.home.mkdir(mode=0o700, parents=True, exist_ok=True)
     paths.logs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     database_path = paths.resolve_rounds_database_path(cfg.rounds_database_path)
@@ -1027,10 +1247,15 @@ def initialize_local_layout(
 
     config_path = paths.config_file
     if force or not config_path.exists():
-        cfg = config or LocalConfig(config_version=1)
+        cfg = config or LocalConfig(config_version=CURRENT_CONFIG_VERSION)
+        if cfg.config_version < CURRENT_CONFIG_VERSION:
+            cfg = cfg.model_copy(update={"config_version": CURRENT_CONFIG_VERSION})
         _atomic_write_text(config_path, cfg.to_json(), mode=0o600)
     elif config is None:
         cfg = LocalConfig.from_file(config_path)
+        # Persist the canonical schema after loading any legacy config so a
+        # later startup never reintroduces the removed isolation flag.
+        _atomic_write_text(config_path, cfg.to_json(), mode=0o600)
     else:
         cfg = config
 

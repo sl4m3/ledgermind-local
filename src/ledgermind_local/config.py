@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+CURRENT_CONFIG_VERSION = 2
+
 
 class VectorProjectionConfig(BaseModel):
     """Configuration for optional local vector projection settings."""
@@ -173,7 +175,6 @@ class LocalConfig(BaseModel):
     verify_core_signature: bool = True
     core_request_timeout_seconds: float = Field(default=30.0, gt=0.0)
     core_startup_timeout_seconds: float = Field(default=10.0, gt=0.0)
-    require_core_network_isolation: bool = False
     core_security: CoreSecurityConfig = Field(default_factory=_default_core_security)
     workers: WorkerSetConfig = Field(default_factory=WorkerSetConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
@@ -253,6 +254,57 @@ class LocalConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def _migrate_legacy_core_security(cls, value: object) -> object:
+        """Consume the removed isolation switch without weakening old configs."""
+
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        legacy = data.pop("require_core_network_isolation", None)
+        if legacy is None:
+            return data
+
+        # A persisted configuration carrying the removed switch is an older
+        # schema.  Always emit the current version after migration.
+        version = data.get("config_version")
+        if not isinstance(version, int) or version < CURRENT_CONFIG_VERSION:
+            data["config_version"] = CURRENT_CONFIG_VERSION
+
+        security = data.get("core_security")
+        if security is None:
+            security = {
+                "profile": "secure",
+                "require_network_isolation": True,
+                "require_rounds_database_hidden": True,
+                "require_filesystem_allowlist": True,
+                "require_environment_sanitized": True,
+                "require_signature": True,
+            }
+        elif bool(legacy):
+            # A legacy true value is an explicit security requirement.  If a
+            # hand-edited config also supplied a permissive profile, migrate
+            # to the fail-closed equivalent rather than weakening it.
+            if isinstance(security, CoreSecurityConfig):
+                security = security.model_dump(mode="python")
+            elif isinstance(security, dict):
+                security = dict(security)
+            else:
+                security = {}
+            security.update(
+                {
+                    "profile": "secure",
+                    "require_network_isolation": True,
+                    "require_rounds_database_hidden": True,
+                    "require_filesystem_allowlist": True,
+                    "require_environment_sanitized": True,
+                    "require_signature": True,
+                }
+            )
+        data["core_security"] = security
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def _materialize_legacy_worker_settings(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
@@ -307,15 +359,24 @@ class LocalConfig(BaseModel):
 
     @classmethod
     def from_json(cls, payload: str) -> LocalConfig:
-        return cls.model_validate_json(payload)
+        config = cls.model_validate_json(payload)
+        return cls._upgrade_persisted_version(config)
 
     @classmethod
     def from_file(cls, path: Path) -> LocalConfig:
-        return cls.model_validate_json(path.read_text(encoding="utf-8"))
+        config = cls.model_validate_json(path.read_text(encoding="utf-8"))
+        return cls._upgrade_persisted_version(config)
 
     @classmethod
     def from_dict(cls, payload: object) -> LocalConfig:
-        return cls.model_validate(payload)
+        config = cls.model_validate(payload)
+        return cls._upgrade_persisted_version(config)
+
+    @staticmethod
+    def _upgrade_persisted_version(config: LocalConfig) -> LocalConfig:
+        if config.config_version < CURRENT_CONFIG_VERSION:
+            return config.model_copy(update={"config_version": CURRENT_CONFIG_VERSION})
+        return config
 
     def to_json(self) -> str:
         return json.dumps(
