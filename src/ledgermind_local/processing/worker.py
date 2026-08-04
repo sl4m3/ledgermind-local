@@ -15,7 +15,7 @@ from typing import Any
 
 from typing_extensions import Self
 
-from ..persistence import RawRoundRecord, SQLiteUnitOfWork
+from ..persistence import RawRoundRecord, RoundProcessingJob, SQLiteUnitOfWork
 from ..scheduler.guarded_loop import GuardedWorkerLoop
 from ..scheduler.worker_state import WorkerState
 from .generator import HypothesisCandidate, HypothesisGenerator
@@ -261,7 +261,13 @@ class RoundProcessingWorker:
             max_backoff_seconds=max_backoff_seconds,
         ).run()
 
-    def _claim(self) -> tuple[Any, RawRoundRecord] | None:
+    def _claim(
+        self,
+    ) -> (
+        tuple[RoundProcessingJob, RawRoundRecord]
+        | tuple[ProcessingResult, None]
+        | None
+    ):
         if self._stop.is_set():
             return None
         with SQLiteUnitOfWork(self.database_path, write_transaction=True) as uow:
