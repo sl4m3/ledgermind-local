@@ -115,12 +115,14 @@ class _LeaseHeartbeat:
         database_path: str | Path,
         job_id: str,
         worker_id: str,
+        lease_generation: int,
         lease_seconds: float,
         interval_seconds: float,
     ) -> None:
         self.database_path = database_path
         self.job_id = job_id
         self.worker_id = worker_id
+        self.lease_generation = lease_generation
         self.lease_seconds = max(float(lease_seconds), 1)
         self.interval_seconds = max(
             min(float(interval_seconds), self.lease_seconds / 2),
@@ -152,6 +154,7 @@ class _LeaseHeartbeat:
                     active = uow.raw_rounds.heartbeat(
                         self.job_id,
                         worker_id=self.worker_id,
+                        lease_generation=self.lease_generation,
                         lease_seconds=self.lease_seconds,
                     )
                     if active:
@@ -248,11 +251,21 @@ class RoundProcessingWorker:
                 return None
             raw_round = uow.raw_rounds.get(job.raw_round_id)
             if raw_round is None:
-                uow.raw_rounds.finish_job(
-                    job.job_id, "failed", error="raw round not found"
+                finished = uow.raw_rounds.finish_job(
+                    job.job_id,
+                    "failed",
+                    worker_id=self.worker_id,
+                    lease_generation=job.lease_generation,
+                    error="raw round not found",
                 )
+                if not finished:
+                    uow.rollback()
+                    return (
+                        ProcessingResult(job.job_id, job.raw_round_id, "lease_lost"),
+                        None,
+                    )
                 uow.commit()
-                return ProcessingResult(job.job_id, job.raw_round_id, "failed"), None  # type: ignore[return-value]
+                return ProcessingResult(job.job_id, job.raw_round_id, "failed"), None
             uow.commit()
             return job, raw_round
 
@@ -285,12 +298,19 @@ class RoundProcessingWorker:
                 error_code=error_code,
                 error_detail=detail,
             )
-            uow.raw_rounds.finish_job(
+            finished = uow.raw_rounds.finish_job(
                 job.job_id,
                 status,
+                worker_id=self.worker_id,
+                lease_generation=job.lease_generation,
                 error=detail,
                 retry_delay_seconds=self.retry_delay_seconds,
             )
+            if not finished:
+                uow.rollback()
+                return ProcessingResult(
+                    job.job_id, raw_round.raw_round_id, "lease_lost"
+                )
             uow.commit()
         return ProcessingResult(job.job_id, raw_round.raw_round_id, status)
 
@@ -423,7 +443,17 @@ class RoundProcessingWorker:
                     payload_digest="sha256:"
                     + hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
                 )
-            uow.raw_rounds.finish_job(job.job_id, status)
+            finished = uow.raw_rounds.finish_job(
+                job.job_id,
+                status,
+                worker_id=self.worker_id,
+                lease_generation=job.lease_generation,
+            )
+            if not finished:
+                uow.rollback()
+                return ProcessingResult(
+                    job.job_id, raw_round.raw_round_id, "lease_lost"
+                )
             uow.commit()
         return ProcessingResult(
             job.job_id, raw_round.raw_round_id, status, tuple(hypothesis_ids)
@@ -460,6 +490,7 @@ class RoundProcessingWorker:
                 database_path=self.database_path,
                 job_id=job.job_id,
                 worker_id=self.worker_id,
+                lease_generation=job.lease_generation,
                 lease_seconds=self.lease_seconds,
                 interval_seconds=self.heartbeat_interval_seconds,
             ):

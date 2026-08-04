@@ -219,10 +219,12 @@ def test_processing_lease_reclaims_expired_job_and_heartbeat_extends_it(
         assert claimed.claimed_by == "worker-1"
         assert claimed.lease_expires_at is not None
         assert claimed.heartbeat_at is not None
+        assert claimed.lease_generation == 1
         assert (
             repository.heartbeat(
                 claimed.job_id,
                 worker_id="worker-1",
+                lease_generation=claimed.lease_generation,
                 lease_seconds=30,
             )
             is True
@@ -231,6 +233,7 @@ def test_processing_lease_reclaims_expired_job_and_heartbeat_extends_it(
             repository.heartbeat(
                 claimed.job_id,
                 worker_id="other-worker",
+                lease_generation=claimed.lease_generation,
                 lease_seconds=30,
             )
             is False
@@ -247,5 +250,84 @@ def test_processing_lease_reclaims_expired_job_and_heartbeat_extends_it(
         assert reclaimed.job_id == claimed.job_id
         assert reclaimed.attempts == 2
         assert reclaimed.claimed_by == "worker-2"
+        assert reclaimed.lease_generation == 2
+        assert (
+            repository.finish_job(
+                reclaimed.job_id,
+                "completed",
+                worker_id="worker-1",
+                lease_generation=claimed.lease_generation,
+            )
+            is False
+        )
+        assert (
+            repository.finish_job(
+                reclaimed.job_id,
+                "completed",
+                worker_id="worker-2",
+                lease_generation=reclaimed.lease_generation,
+            )
+            is True
+        )
+    finally:
+        connection.close()
+
+
+def test_processing_lease_generation_rejects_stale_heartbeat_and_finish(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rounds.db"
+    connection, repository = _open_database(database)
+    try:
+        raw_round_id = _insert_round(repository)
+        repository.create_job(
+            job_id="job-1",
+            raw_round_id=raw_round_id,
+            pipeline_version=1,
+            normalizer_version=1,
+            prompt_version=1,
+        )
+        connection.commit()
+
+        first = repository.claim_ready_job(worker_id="worker-1", lease_seconds=30)
+        assert first is not None
+        connection.execute(
+            "UPDATE round_processing_jobs SET lease_expires_at = ? WHERE job_id = ?",
+            ("2020-01-01T00:00:00+00:00", first.job_id),
+        )
+        connection.commit()
+        second = repository.claim_ready_job(worker_id="worker-2", lease_seconds=30)
+        assert second is not None
+        assert second.lease_generation == first.lease_generation + 1
+
+        assert (
+            repository.heartbeat(
+                first.job_id,
+                worker_id="worker-1",
+                lease_generation=first.lease_generation,
+                lease_seconds=30,
+            )
+            is False
+        )
+        assert (
+            repository.finish_job(
+                first.job_id,
+                "failed",
+                worker_id="worker-1",
+                lease_generation=first.lease_generation,
+                error="stale worker",
+            )
+            is False
+        )
+        current = repository.get_job_for_round(
+            raw_round_id,
+            pipeline_version=1,
+            normalizer_version=1,
+            prompt_version=1,
+        )
+        assert current is not None
+        assert current.status == "processing"
+        assert current.claimed_by == "worker-2"
+        assert current.lease_generation == second.lease_generation
     finally:
         connection.close()

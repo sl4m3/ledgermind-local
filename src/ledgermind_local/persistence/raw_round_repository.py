@@ -57,6 +57,7 @@ class RoundProcessingJob:
     last_error: str | None
     lease_expires_at: str | None
     heartbeat_at: str | None
+    lease_generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,7 +332,7 @@ class SQLiteRawRoundRepository:
             """
             UPDATE round_processing_jobs
             SET status = 'processing', claimed_at = ?, claimed_by = ?, attempts = attempts + 1,
-                lease_expires_at = ?, heartbeat_at = ?
+                lease_expires_at = ?, heartbeat_at = ?, lease_generation = lease_generation + 1
             WHERE job_id = ? AND (
                 (status IN ('received', 'retry_wait') AND available_at <= ?)
                 OR (
@@ -355,6 +356,7 @@ class SQLiteRawRoundRepository:
         job_id: str,
         *,
         worker_id: str,
+        lease_generation: int,
         lease_seconds: float = 300,
     ) -> bool:
         now_datetime = datetime.now(timezone.utc)
@@ -367,8 +369,9 @@ class SQLiteRawRoundRepository:
             UPDATE round_processing_jobs
             SET heartbeat_at = ?, lease_expires_at = ?
             WHERE job_id = ? AND status = 'processing' AND claimed_by = ?
+              AND lease_generation = ? AND lease_expires_at > ?
             """,
-            (now, lease_expires_at, job_id, worker_id),
+            (now, lease_expires_at, job_id, worker_id, lease_generation, now),
         )
         return updated.rowcount == 1
 
@@ -377,14 +380,16 @@ class SQLiteRawRoundRepository:
         job_id: str,
         status: str,
         *,
+        worker_id: str,
+        lease_generation: int,
         error: str | None = None,
         retry_delay_seconds: float = 0,
-    ) -> None:
+    ) -> bool:
         if status not in {"completed", "no_knowledge", "retry_wait", "failed"}:
             raise ValueError(f"unsupported processing status: {status}")
         now = datetime.now(timezone.utc)
         available_at = now + timedelta(seconds=max(retry_delay_seconds, 0))
-        self._connection.execute(
+        updated = self._connection.execute(
             """
             UPDATE round_processing_jobs
             SET status = ?, completed_at = CASE WHEN ? IN ('completed', 'no_knowledge', 'failed') THEN ? ELSE NULL END,
@@ -392,6 +397,10 @@ class SQLiteRawRoundRepository:
                 last_error = ?, claimed_at = NULL, claimed_by = NULL,
                 lease_expires_at = NULL, heartbeat_at = NULL
             WHERE job_id = ?
+              AND status = 'processing'
+              AND claimed_by = ?
+              AND lease_generation = ?
+              AND lease_expires_at > ?
             """,
             (
                 status,
@@ -401,8 +410,12 @@ class SQLiteRawRoundRepository:
                 available_at.isoformat(timespec="seconds"),
                 error,
                 job_id,
+                worker_id,
+                lease_generation,
+                now.isoformat(timespec="seconds"),
             ),
         )
+        return updated.rowcount == 1
 
     def create_attempt(
         self,
@@ -768,6 +781,7 @@ class SQLiteRawRoundRepository:
             last_error=row["last_error"],
             lease_expires_at=row["lease_expires_at"],
             heartbeat_at=row["heartbeat_at"],
+            lease_generation=int(row["lease_generation"]),
         )
 
     @staticmethod
