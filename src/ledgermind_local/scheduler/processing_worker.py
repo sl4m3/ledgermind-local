@@ -11,7 +11,9 @@ class _ProcessingWorker(Protocol):
 
 
 class ProcessingWorkerLoop:
-    def __init__(self, worker: _ProcessingWorker, *, poll_interval_seconds: float = 1.0) -> None:
+    def __init__(
+        self, worker: _ProcessingWorker, *, poll_interval_seconds: float = 1.0
+    ) -> None:
         self.worker = worker
         self.poll_interval_seconds = max(float(poll_interval_seconds), 0)
         self._stop = threading.Event()

@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import cast
 
-from ledgermind_core.domain.events import (
+from ledgermind_local.core_gateway.event_contracts import (
     KnowledgeCreated,
     KnowledgeDeleted,
     KnowledgeSuperseded,
@@ -59,7 +59,9 @@ class KnowledgeMarkdownGitAuditProjection:
         self._markdown_root = Path(markdown_root)
         self._batch_size = batch_size
         self._git_author_name = git_author_name.strip() or "LedgerMind Local"
-        self._git_author_email = git_author_email.strip() or "local-audit@ledgermind.internal"
+        self._git_author_email = (
+            git_author_email.strip() or "local-audit@ledgermind.internal"
+        )
         self._pending = 0
         self._last_error: str | None = None
         self._git_binary = shutil.which("git")
@@ -193,8 +195,12 @@ class KnowledgeMarkdownGitAuditProjection:
             raise RuntimeError("nothing to commit")
 
     def _set_local_author(self) -> None:
-        self._run(["config", "--local", "user.name", self._git_author_name], check=False)
-        self._run(["config", "--local", "user.email", self._git_author_email], check=False)
+        self._run(
+            ["config", "--local", "user.name", self._git_author_name], check=False
+        )
+        self._run(
+            ["config", "--local", "user.email", self._git_author_email], check=False
+        )
 
     def _build_commit_message(self, staged_files: list[str]) -> str:
         del staged_files
@@ -227,7 +233,9 @@ class KnowledgeMarkdownGitAuditProjection:
             if line.strip()
         ]
 
-    def _run(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, args: list[str], check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         if self._git_binary is None:
             raise RuntimeError("git is not available")
 

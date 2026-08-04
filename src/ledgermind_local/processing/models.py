@@ -6,10 +6,16 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
-class NormalizedToolCall:
+class NormalizedToolInteraction:
     tool_call_id: str
     tool_name: str
     arguments_json: str
+    result_text: str
+    result_json: str | None
+    status: str
+    error_text: str
+    source_call_event_id: str
+    source_result_event_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,5 +31,7 @@ class NormalizedRound:
     user_text: str
     assistant_text: str
     transcript: str
-    tool_calls: tuple[NormalizedToolCall, ...]
+    tool_interactions: tuple[NormalizedToolInteraction, ...]
     normalized_digest: str
+    source_event_ids: tuple[str, ...] = ()
+    normalizer_version: int = 1

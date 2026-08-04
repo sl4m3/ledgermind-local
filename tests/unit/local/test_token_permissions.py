@@ -10,7 +10,9 @@ def test_token_file_has_private_permissions_on_posix(tmp_path: Path) -> None:
     home = tmp_path / "service"
     home.mkdir()
     exit_code = _command_init(
-        __import__("argparse").Namespace(home=str(home), force=False, rotate_token=False)
+        __import__("argparse").Namespace(
+            home=str(home), force=False, rotate_token=False
+        )
     )
     assert exit_code == 0
     token_file = home / "server.token"

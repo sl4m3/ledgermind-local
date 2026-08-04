@@ -72,14 +72,14 @@ class RawRoundIngestHandler:
         self,
         *,
         database_path: str | Path,
-        max_payload_bytes: int = 5_000_000,
+        max_raw_round_bytes: int = 5_000_000,
         retention_days: int = 30,
         pipeline_version: int = 1,
         normalizer_version: int = 1,
         prompt_version: int = 1,
     ) -> None:
         self.database_path = database_path
-        self.max_payload_bytes = max(int(max_payload_bytes), 1)
+        self.max_raw_round_bytes = max(int(max_raw_round_bytes), 1)
         self.retention_days = max(int(retention_days), 1)
         self.pipeline_version = max(int(pipeline_version), 1)
         self.normalizer_version = max(int(normalizer_version), 1)
@@ -99,7 +99,7 @@ class RawRoundIngestHandler:
             raise RawRoundError("round.completed_at must not precede started_at")
 
         payload_json = _payload_json(request)
-        if len(payload_json.encode("utf-8")) > self.max_payload_bytes:
+        if len(payload_json.encode("utf-8")) > self.max_raw_round_bytes:
             raise RawRoundTooLarge("raw round payload exceeds configured limit")
 
         source_round_key = _source_round_key(request)
@@ -129,7 +129,9 @@ class RawRoundIngestHandler:
                         prompt_version=self.prompt_version,
                     )
                     uow.commit()
-                return RawRoundIngestResult(existing.raw_round_id, job.job_id, True, job.status)
+                return RawRoundIngestResult(
+                    existing.raw_round_id, job.job_id, True, job.status
+                )
 
             self._ensure_memory_space(uow.connection, request.memory_space_id)
             raw_round = uow.raw_rounds.insert(
@@ -159,10 +161,14 @@ class RawRoundIngestHandler:
                 prompt_version=self.prompt_version,
             )
             uow.commit()
-            return RawRoundIngestResult(raw_round.raw_round_id, job.job_id, False, job.status)
+            return RawRoundIngestResult(
+                raw_round.raw_round_id, job.job_id, False, job.status
+            )
 
     @staticmethod
-    def _ensure_memory_space(connection: sqlite3.Connection, memory_space_id: str) -> None:
+    def _ensure_memory_space(
+        connection: sqlite3.Connection, memory_space_id: str
+    ) -> None:
         now = _now()
         connection.execute(
             """

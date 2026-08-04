@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import threading
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from typing_extensions import Self
+
 from ..persistence import RawRoundRecord, SQLiteUnitOfWork
-from .generator import HypothesisDraft, HypothesisGenerator
+from .generator import HypothesisCandidate, HypothesisGenerator
 from .models import NormalizedRound
 from .normalizer import normalize_raw_round, redact_text, redact_value
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +35,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _digest_draft(draft: HypothesisDraft) -> str:
+def _digest_candidate(draft: HypothesisCandidate) -> str:
     material = {
         "title": draft.title,
         "target": draft.target,
@@ -37,12 +43,15 @@ def _digest_draft(draft: HypothesisDraft) -> str:
         "rationale": draft.rationale,
         "result": draft.result,
         "artifacts": list(draft.artifacts),
+        "source_event_ids": list(draft.source_event_ids),
     }
-    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(
+        material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _response_digest(drafts: Sequence[HypothesisDraft]) -> str:
+def _response_digest(drafts: Sequence[HypothesisCandidate]) -> str:
     material = [
         {
             "title": draft.title,
@@ -51,25 +60,123 @@ def _response_digest(drafts: Sequence[HypothesisDraft]) -> str:
             "rationale": draft.rationale,
             "result": draft.result,
             "artifacts": list(draft.artifacts),
+            "source_event_ids": list(draft.source_event_ids),
         }
         for draft in drafts
     ]
-    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(
+        material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _sanitize_draft(value: object) -> HypothesisDraft:
-    if not isinstance(value, HypothesisDraft):
-        raise TypeError("HypothesisGenerator must return HypothesisDraft values")
+def _normalized_round_payload(normalized_round: NormalizedRound) -> str:
+    payload = {
+        "memory_space_id": normalized_round.memory_space_id,
+        "source_system": normalized_round.source_system,
+        "source_instance_id": normalized_round.source_instance_id,
+        "source_profile_id": normalized_round.source_profile_id,
+        "source_session_id": normalized_round.source_session_id,
+        "source_round_id": normalized_round.source_round_id,
+        "started_at": normalized_round.started_at,
+        "completed_at": normalized_round.completed_at,
+        "user_text": normalized_round.user_text,
+        "assistant_text": normalized_round.assistant_text,
+        "transcript": normalized_round.transcript,
+        "tool_interactions": [
+            {
+                "tool_call_id": interaction.tool_call_id,
+                "tool_name": interaction.tool_name,
+                "arguments_json": interaction.arguments_json,
+                "result_text": interaction.result_text,
+                "result_json": interaction.result_json,
+                "status": interaction.status,
+                "error_text": interaction.error_text,
+                "source_call_event_id": interaction.source_call_event_id,
+                "source_result_event_id": interaction.source_result_event_id,
+            }
+            for interaction in normalized_round.tool_interactions
+        ],
+        "normalized_digest": normalized_round.normalized_digest,
+        "source_event_ids": list(normalized_round.source_event_ids),
+        "normalizer_version": normalized_round.normalizer_version,
+    }
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+class _LeaseHeartbeat:
+    def __init__(
+        self,
+        *,
+        database_path: str | Path,
+        job_id: str,
+        worker_id: str,
+        lease_seconds: float,
+        interval_seconds: float,
+    ) -> None:
+        self.database_path = database_path
+        self.job_id = job_id
+        self.worker_id = worker_id
+        self.lease_seconds = max(float(lease_seconds), 1)
+        self.interval_seconds = max(
+            min(float(interval_seconds), self.lease_seconds / 2),
+            0.1,
+        )
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> Self:
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"ledgermind-lease-{self.job_id}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(self.interval_seconds * 2, 1))
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                with SQLiteUnitOfWork(
+                    self.database_path, write_transaction=True
+                ) as uow:
+                    active = uow.raw_rounds.heartbeat(
+                        self.job_id,
+                        worker_id=self.worker_id,
+                        lease_seconds=self.lease_seconds,
+                    )
+                    if active:
+                        uow.commit()
+            except Exception:
+                logger.debug("processing lease heartbeat failed", exc_info=True)
+                continue
+
+
+def _sanitize_candidate(
+    value: object,
+    normalized_round: NormalizedRound,
+) -> HypothesisCandidate:
+    if not isinstance(value, HypothesisCandidate):
+        raise TypeError("HypothesisGenerator must return HypothesisCandidate values")
     artifacts = tuple(str(redact_value(item)) for item in value.artifacts)
-    return HypothesisDraft(
+    candidate = HypothesisCandidate(
         title=redact_text(value.title),
         target=redact_text(value.target),
         statement=redact_text(value.statement),
         rationale=redact_text(value.rationale),
         result=redact_text(value.result),
         artifacts=artifacts,
+        source_event_ids=value.source_event_ids,
     )
+    candidate.validate_source_events(normalized_round)
+    return candidate
 
 
 class RoundProcessingWorker:
@@ -78,26 +185,33 @@ class RoundProcessingWorker:
         *,
         database_path: str | Path,
         generator: HypothesisGenerator,
-        bridge: Callable[[RawRoundRecord, HypothesisDraft], object] | None = None,
         worker_id: str | None = None,
         max_attempts: int = 3,
         retry_delay_seconds: float = 30,
+        lease_seconds: float = 300,
+        heartbeat_interval_seconds: float = 30,
     ) -> None:
         self.database_path = database_path
         self.generator = generator
-        self.bridge = bridge
         self.worker_id = worker_id or str(uuid.uuid4())
         self.max_attempts = max(int(max_attempts), 1)
         self.retry_delay_seconds = max(float(retry_delay_seconds), 0)
+        self.lease_seconds = max(float(lease_seconds), 1)
+        self.heartbeat_interval_seconds = max(float(heartbeat_interval_seconds), 0.1)
 
     def _claim(self) -> tuple[Any, RawRoundRecord] | None:
         with SQLiteUnitOfWork(self.database_path, write_transaction=True) as uow:
-            job = uow.raw_rounds.claim_ready_job(worker_id=self.worker_id)
+            job = uow.raw_rounds.claim_ready_job(
+                worker_id=self.worker_id,
+                lease_seconds=self.lease_seconds,
+            )
             if job is None:
                 return None
             raw_round = uow.raw_rounds.get(job.raw_round_id)
             if raw_round is None:
-                uow.raw_rounds.finish_job(job.job_id, "failed", error="raw round not found")
+                uow.raw_rounds.finish_job(
+                    job.job_id, "failed", error="raw round not found"
+                )
                 uow.commit()
                 return ProcessingResult(job.job_id, job.raw_round_id, "failed"), None  # type: ignore[return-value]
             uow.commit()
@@ -123,7 +237,9 @@ class RoundProcessingWorker:
                 normalizer_version=job.normalizer_version,
                 provider=getattr(self.generator, "provider", "unknown"),
                 model=getattr(self.generator, "model", "unknown"),
-                prompt_version=getattr(self.generator, "prompt_version", job.prompt_version),
+                prompt_version=getattr(
+                    self.generator, "prompt_version", job.prompt_version
+                ),
                 schema_version=getattr(self.generator, "schema_version", 1),
                 started_at=started_at,
                 completed_at=_now(),
@@ -143,12 +259,14 @@ class RoundProcessingWorker:
         self,
         job: Any,
         raw_round: RawRoundRecord,
-        drafts: Sequence[HypothesisDraft],
+        drafts: Sequence[HypothesisCandidate],
         *,
+        normalized: NormalizedRound,
         started_at: str,
     ) -> ProcessingResult:
         status = "completed" if drafts else "no_knowledge"
         hypothesis_ids: list[str] = []
+        completed_at = _now()
         with SQLiteUnitOfWork(self.database_path, write_transaction=True) as uow:
             attempt_id = str(uuid.uuid4())
             uow.raw_rounds.create_attempt(
@@ -159,15 +277,84 @@ class RoundProcessingWorker:
                 normalizer_version=job.normalizer_version,
                 provider=getattr(self.generator, "provider", "unknown"),
                 model=getattr(self.generator, "model", "unknown"),
-                prompt_version=getattr(self.generator, "prompt_version", job.prompt_version),
+                prompt_version=getattr(
+                    self.generator, "prompt_version", job.prompt_version
+                ),
                 schema_version=getattr(self.generator, "schema_version", 1),
                 started_at=started_at,
-                completed_at=_now(),
+                completed_at=completed_at,
                 response_digest=_response_digest(drafts),
             )
             for index, draft in enumerate(drafts):
                 hypothesis_id = str(uuid.uuid4())
                 hypothesis_ids.append(hypothesis_id)
+                content_digest = _digest_candidate(draft)
+                idempotency_material = {
+                    "memory_space_id": raw_round.memory_space_id,
+                    "raw_round_id": raw_round.raw_round_id,
+                    "hypothesis_index": index,
+                    "content_digest": content_digest,
+                    "pipeline_version": job.pipeline_version,
+                    "normalizer_version": job.normalizer_version,
+                    "prompt_version": job.prompt_version,
+                }
+                idempotency_key = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        json.dumps(
+                            idempotency_material,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
+                command_payload = {
+                    "protocol_version": 1,
+                    "command_id": str(uuid.uuid4()),
+                    "idempotency_key": idempotency_key,
+                    "memory_space_id": raw_round.memory_space_id,
+                    "hypothesis": {
+                        "hypothesis_id": hypothesis_id,
+                        "content_digest": content_digest,
+                        "title": draft.title,
+                        "target": draft.target,
+                        "statement": draft.statement,
+                        "rationale": draft.rationale,
+                        "result": draft.result,
+                        "artifacts": list(draft.artifacts),
+                        "evidence": {
+                            "source_system": raw_round.source_system,
+                            "source_instance_id": raw_round.source_instance_id,
+                            "source_profile_id": raw_round.source_profile_id,
+                            "source_session_id": raw_round.source_session_id,
+                            "source_round_id": raw_round.source_round_id,
+                            "raw_round_digest": raw_round.payload_digest,
+                            "normalized_round_digest": normalized.normalized_digest,
+                            "source_event_ids": list(draft.source_event_ids),
+                        },
+                        "extraction": {
+                            "provider": getattr(self.generator, "provider", "unknown"),
+                            "model": getattr(self.generator, "model", "unknown"),
+                            "prompt_version": getattr(
+                                self.generator,
+                                "prompt_version",
+                                job.prompt_version,
+                            ),
+                            "schema_version": getattr(
+                                self.generator, "schema_version", 1
+                            ),
+                            "completed_at": completed_at,
+                        },
+                    },
+                }
+                payload_json = json.dumps(
+                    command_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                command_id = str(command_payload["command_id"])
                 uow.raw_rounds.insert_hypothesis(
                     hypothesis_id=hypothesis_id,
                     raw_round_id=raw_round.raw_round_id,
@@ -178,12 +365,42 @@ class RoundProcessingWorker:
                     statement=draft.statement,
                     rationale=draft.rationale,
                     result=draft.result,
-                    artifacts_json=json.dumps(list(draft.artifacts), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                    content_digest=_digest_draft(draft),
+                    artifacts_json=json.dumps(
+                        list(draft.artifacts),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    content_digest=content_digest,
+                    status="queued_for_core",
+                    core_command_id=command_id,
+                )
+                uow.raw_rounds.create_core_command(
+                    command_id=command_id,
+                    command_type="accept_hypothesis",
+                    memory_space_id=raw_round.memory_space_id,
+                    idempotency_key=idempotency_key,
+                    payload_json=payload_json,
+                    payload_digest="sha256:"
+                    + hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
                 )
             uow.raw_rounds.finish_job(job.job_id, status)
             uow.commit()
-        return ProcessingResult(job.job_id, raw_round.raw_round_id, status, tuple(hypothesis_ids))
+        return ProcessingResult(
+            job.job_id, raw_round.raw_round_id, status, tuple(hypothesis_ids)
+        )
+
+    def _persist_normalized(
+        self, raw_round_id: str, normalized: NormalizedRound
+    ) -> None:
+        with SQLiteUnitOfWork(self.database_path, write_transaction=True) as uow:
+            uow.raw_rounds.store_normalized_round(
+                raw_round_id=raw_round_id,
+                normalizer_version=normalized.normalizer_version,
+                payload_json=_normalized_round_payload(normalized),
+                payload_digest=normalized.normalized_digest,
+            )
+            uow.commit()
 
     def process_once(self) -> ProcessingResult | None:
         claimed = self._claim()
@@ -195,11 +412,22 @@ class RoundProcessingWorker:
         started_at = _now()
         try:
             payload = json.loads(raw_round.payload_json)
-            normalized: NormalizedRound = normalize_raw_round(payload)
-            drafts = tuple(_sanitize_draft(item) for item in self.generator.generate(normalized))
-            if self.bridge is not None:
-                for draft in drafts:
-                    self.bridge(raw_round, draft)
+            normalized = normalize_raw_round(
+                payload,
+                normalizer_version=job.normalizer_version,
+            )
+            self._persist_normalized(raw_round.raw_round_id, normalized)
+            with _LeaseHeartbeat(
+                database_path=self.database_path,
+                job_id=job.job_id,
+                worker_id=self.worker_id,
+                lease_seconds=self.lease_seconds,
+                interval_seconds=self.heartbeat_interval_seconds,
+            ):
+                drafts = tuple(
+                    _sanitize_candidate(item, normalized)
+                    for item in self.generator.generate(normalized)
+                )
         except Exception as exc:  # noqa: BLE001
             return self._error_result(
                 job,
@@ -208,4 +436,10 @@ class RoundProcessingWorker:
                 error=exc,
                 started_at=started_at,
             )
-        return self._persist_success(job, raw_round, drafts, started_at=started_at)
+        return self._persist_success(
+            job,
+            raw_round,
+            drafts,
+            normalized=normalized,
+            started_at=started_at,
+        )

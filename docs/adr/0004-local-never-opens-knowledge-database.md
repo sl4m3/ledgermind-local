@@ -3,7 +3,9 @@
 - **Статус:** accepted
 - **Дата:** 2026-08-03
 
-Даже временный Python backend изолируется за `CoreGateway`; единственный файл, имеющий право импортировать переходный Python Core, — `core_gateway/python_backend.py`.
-Обычный Local runtime не импортирует внутренние Core repository adapters и не открывает `knowledge.db`.
+Local не содержит Python Core backend и не имеет transitional production fallback.
+Единственный runtime путь к knowledge database проходит через supervised
+`CoreGateway` к отдельному signed Rust process `ledgermind-core`; Local никогда
+не импортирует внутренние Core repository adapters и не открывает `knowledge.db`.
 
 Публичный ContextView минимален и не раскрывает фазу, evidence count, внутренние scores, rationale или source atom IDs.

@@ -17,7 +17,9 @@ class _FakeModel:
         self.calls: list[tuple[str, int | None]] = []
         self.closed = 0
 
-    def create_embedding(self, text: str, *, n_threads: int | None = None) -> dict[str, Any]:
+    def create_embedding(
+        self, text: str, *, n_threads: int | None = None
+    ) -> dict[str, Any]:
         self.calls.append((text, n_threads))
         if not self._vectors:
             return {"embedding": []}
@@ -27,7 +29,9 @@ class _FakeModel:
         self.closed += 1
 
 
-def _builder_factory(vectors: list[list[float]]) -> tuple[Callable[[str, int, int], _FakeModel], _FakeModel]:
+def _builder_factory(
+    vectors: list[list[float]],
+) -> tuple[Callable[[str, int, int], _FakeModel], _FakeModel]:
     model = _FakeModel(vectors)
 
     def _builder(model_path: str, n_threads: int, gpu_layers: int) -> _FakeModel:

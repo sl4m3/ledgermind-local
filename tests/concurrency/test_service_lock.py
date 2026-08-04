@@ -37,7 +37,9 @@ def _write_lock_runner_script(root: Path) -> Path:
     return script
 
 
-def _run_runner(script: Path, lock: Path, hold_seconds: float) -> subprocess.CompletedProcess[str]:
+def _run_runner(
+    script: Path, lock: Path, hold_seconds: float
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(script), str(lock), str(hold_seconds)],
         capture_output=True,

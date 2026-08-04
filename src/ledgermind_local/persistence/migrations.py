@@ -47,12 +47,12 @@ def _read_file_text(entry: Path) -> str:
     return entry.read_text(encoding="utf-8")
 
 
-def _discover_migrations() -> tuple[Migration, ...]:
-    if not MIGRATION_DIR.is_dir():
+def _discover_migrations(migration_dir: Path = MIGRATION_DIR) -> tuple[Migration, ...]:
+    if not migration_dir.is_dir():
         return ()
 
     migrations: list[Migration] = []
-    for entry in MIGRATION_DIR.iterdir():
+    for entry in migration_dir.iterdir():
         name = entry.name
         match = _MIGRATION_FILE_RE.fullmatch(name)
         if not match or not entry.is_file():
@@ -72,10 +72,10 @@ def _discover_migrations() -> tuple[Migration, ...]:
     return tuple(sorted(migrations, key=lambda migration: migration.version))
 
 
-def load_migrations() -> tuple[Migration, ...]:
+def load_migrations(migration_dir: Path = MIGRATION_DIR) -> tuple[Migration, ...]:
     """Return packaged migrations sorted by version."""
 
-    loaded = _discover_migrations()
+    loaded = _discover_migrations(migration_dir)
     versions = [migration.version for migration in loaded]
     if len(set(versions)) != len(versions):
         duplicates = sorted(
@@ -131,7 +131,9 @@ def _validate_applied_state(
     applied_versions = tuple(sorted(applied))
     latest_available = available_versions[-1]
 
-    unknown = sorted(version for version in applied_versions if version not in available)
+    unknown = sorted(
+        version for version in applied_versions if version not in available
+    )
     if unknown:
         max_unknown = unknown[-1]
         if max_unknown > latest_available:
@@ -179,7 +181,12 @@ def _apply_single_migration(
             INSERT INTO schema_migrations (version, name, checksum, applied_at)
             VALUES (?, ?, ?, ?)
             """,
-            (migration.version, migration.name, migration.checksum, _applied_at_timestamp()),
+            (
+                migration.version,
+                migration.name,
+                migration.checksum,
+                _applied_at_timestamp(),
+            ),
         )
         if owns_transaction:
             conn.commit()
@@ -189,10 +196,17 @@ def _apply_single_migration(
         raise
 
 
-def apply_migrations(conn: sqlite3.Connection) -> tuple[Migration, ...]:
+def apply_migrations(
+    conn: sqlite3.Connection,
+    migration_dir: Path = MIGRATION_DIR,
+) -> tuple[Migration, ...]:
     """Apply pending migrations to ``conn`` and return applied migrations."""
 
-    migrations = load_migrations()
+    migrations = (
+        load_migrations()
+        if migration_dir == MIGRATION_DIR
+        else load_migrations(migration_dir)
+    )
     current = _validate_applied_state(conn, migrations)
     pending = [m for m in migrations if m.version > current]
     applied: list[Migration] = []

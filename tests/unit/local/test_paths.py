@@ -18,14 +18,18 @@ def test_default_home_uses_explicit_constant() -> None:
     assert paths.home == Path("~/.ledgermind/local").expanduser()
 
 
-def test_env_home_is_respected_when_not_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_home_is_respected_when_not_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     home = "/tmp/ledgermind-env-home"
     monkeypatch.setenv("LEDGERMIND_HOME", home)
     paths = ServicePaths()
     assert paths.home == Path(home)
 
 
-def test_explicit_home_has_precedence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_explicit_home_has_precedence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("LEDGERMIND_HOME", "/tmp/ledgermind-env-home")
     explicit = tmp_path / "explicit"
     paths = ServicePaths(home=explicit)
@@ -41,7 +45,9 @@ def test_windows_like_path_is_handled_without_posix_assumptions() -> None:
 
 def test_bootstrap_creates_private_directories(tmp_path: Path) -> None:
     service_dir = tmp_path / "secure"
-    paths, _ = bootstrap_local_service(home=service_dir, config=LocalConfig(config_version=1))
+    paths, _ = bootstrap_local_service(
+        home=service_dir, config=LocalConfig(config_version=1)
+    )
 
     assert paths.home.exists()
     assert paths.logs_dir.exists()
@@ -52,7 +58,9 @@ def test_bootstrap_creates_private_directories(tmp_path: Path) -> None:
     assert logs_mode <= 0o700
 
 
-def test_configured_database_path_is_resolved_under_service_home(tmp_path: Path) -> None:
+def test_configured_database_path_is_resolved_under_service_home(
+    tmp_path: Path,
+) -> None:
     paths, _ = bootstrap_local_service(
         home=tmp_path / "secure",
         config=LocalConfig(config_version=1, database_path="state/custom.db"),
@@ -63,7 +71,9 @@ def test_configured_database_path_is_resolved_under_service_home(tmp_path: Path)
     assert database.is_file()
 
 
-def test_existing_config_controls_database_path_without_creating_default(tmp_path: Path) -> None:
+def test_existing_config_controls_database_path_without_creating_default(
+    tmp_path: Path,
+) -> None:
     home = tmp_path / "configured"
     home.mkdir()
     config = LocalConfig(config_version=1, database_path="state.db")

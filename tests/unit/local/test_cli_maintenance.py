@@ -9,7 +9,9 @@ import zipfile
 from pathlib import Path
 
 from ledgermind_local.cli import main
-from ledgermind_local.persistence import migrations, open_sqlite_connection
+from ledgermind_local.paths import ServicePaths
+from ledgermind_local.persistence import open_sqlite_connection
+from ledgermind_local.persistence import rounds_migrations as migrations
 
 
 def test_rotate_token_updates_existing_token(tmp_path: Path) -> None:
@@ -48,7 +50,7 @@ def test_backup_create_writes_zip_archive(tmp_path: Path) -> None:
     assert archives
     with zipfile.ZipFile(archives[0], "r") as archive:
         names = set(archive.namelist())
-    assert "ledgermind.db" in names
+    assert "rounds.db" in names
     assert "config.json" in names
     assert "server.token" in names
 
@@ -65,11 +67,33 @@ def test_backup_create_writes_to_requested_path(tmp_path: Path) -> None:
     assert target.exists()
 
 
+def test_backup_restore_carries_core_knowledge_artifact_opaque(tmp_path: Path) -> None:
+    home = tmp_path / "service"
+    assert main(["--home", str(home), "init"]) == 0
+    knowledge = ServicePaths(home).knowledge_database_file
+    knowledge.parent.mkdir(parents=True, exist_ok=True)
+    knowledge.write_bytes(b"core-owned-knowledge")
+
+    backup = home / "snapshot.zip"
+    assert (
+        main(["--home", str(home), "backup", "create", "--destination", str(backup)])
+        == 0
+    )
+    with zipfile.ZipFile(backup, "r") as archive:
+        assert "knowledge.db" in archive.namelist()
+
+    knowledge.write_bytes(b"mutated")
+    assert (
+        main(["--home", str(home), "backup", "restore", "--source", str(backup)]) == 0
+    )
+    assert knowledge.read_bytes() == b"core-owned-knowledge"
+
+
 def test_backup_restore_reverts_database_to_backup(tmp_path: Path) -> None:
     home = tmp_path / "service"
     assert main(["--home", str(home), "init"]) == 0
 
-    database = home / "ledgermind.db"
+    database = home / "rounds.db"
     connection = open_sqlite_connection(database)
     try:
         migrations.apply_migrations(connection)
@@ -97,21 +121,20 @@ def test_backup_restore_reverts_database_to_backup(tmp_path: Path) -> None:
 
     backup = home / "snapshot.zip"
     assert (
-        main(
-            ["--home", str(home), "backup", "create", "--destination", str(backup)]
-        )
+        main(["--home", str(home), "backup", "create", "--destination", str(backup)])
         == 0
     )
 
     connection = sqlite3.connect(database)
     try:
-        connection.execute("DELETE FROM knowledge_items")
         connection.execute("DELETE FROM memory_spaces")
         connection.commit()
     finally:
         connection.close()
 
-    assert main(["--home", str(home), "backup", "restore", "--source", str(backup)]) == 0
+    assert (
+        main(["--home", str(home), "backup", "restore", "--source", str(backup)]) == 0
+    )
 
     connection = sqlite3.connect(database)
     try:
@@ -130,7 +153,10 @@ def test_backup_restore_fails_when_service_is_running(tmp_path: Path) -> None:
     assert main(["--home", str(home), "init"]) == 0
 
     backup = home / "snapshot.zip"
-    assert main(["--home", str(home), "backup", "create", "--destination", str(backup)]) == 0
+    assert (
+        main(["--home", str(home), "backup", "create", "--destination", str(backup)])
+        == 0
+    )
 
     lock_path = home / "service.lock"
     lock_path.write_text(

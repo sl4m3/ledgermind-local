@@ -92,7 +92,9 @@ class VectorProjectionStore:
     def dirty(self) -> bool:
         return self._dirty
 
-    def upsert(self, knowledge_ids: Sequence[str], vectors: Sequence[Sequence[float]]) -> None:
+    def upsert(
+        self, knowledge_ids: Sequence[str], vectors: Sequence[Sequence[float]]
+    ) -> None:
         self._validate_lengths(knowledge_ids, vectors)
         if len(set(knowledge_ids)) != len(knowledge_ids):
             raise ValueError("duplicate knowledge id in batch")
@@ -131,7 +133,9 @@ class VectorProjectionStore:
         self._checkpoint()
         self._dirty = False
 
-    def rebuild(self, knowledge_ids: Sequence[str], vectors: Sequence[Sequence[float]]) -> None:
+    def rebuild(
+        self, knowledge_ids: Sequence[str], vectors: Sequence[Sequence[float]]
+    ) -> None:
         self._validate_lengths(knowledge_ids, vectors)
         self._ensure_dimension(vectors)
 
@@ -150,10 +154,18 @@ class VectorProjectionStore:
         vectors_path = self._root / self.VECTORS_FILE
         manifest_path = self._root / self.MANIFEST_FILE
 
-        if not ids_path.exists() and not vectors_path.exists() and not manifest_path.exists():
+        if (
+            not ids_path.exists()
+            and not vectors_path.exists()
+            and not manifest_path.exists()
+        ):
             return
 
-        if not ids_path.exists() or not vectors_path.exists() or not manifest_path.exists():
+        if (
+            not ids_path.exists()
+            or not vectors_path.exists()
+            or not manifest_path.exists()
+        ):
             raise ValueError("vector projection index is incomplete")
 
         manifest = self._load_json(manifest_path)
@@ -202,10 +214,16 @@ class VectorProjectionStore:
         manifest = self.manifest
         manifest["document_count"] = len(self._ids)
 
-        self._persist(root=self._root, ids=self._ids, vectors=self._vectors, manifest=manifest)
+        self._persist(
+            root=self._root, ids=self._ids, vectors=self._vectors, manifest=manifest
+        )
 
-    def _upsert_in_memory(self, knowledge_ids: Sequence[str], vectors: Sequence[Sequence[float]]) -> None:
-        existing_index = {knowledge_id: idx for idx, knowledge_id in enumerate(self._ids)}
+    def _upsert_in_memory(
+        self, knowledge_ids: Sequence[str], vectors: Sequence[Sequence[float]]
+    ) -> None:
+        existing_index = {
+            knowledge_id: idx for idx, knowledge_id in enumerate(self._ids)
+        }
         for knowledge_id, vector in zip(knowledge_ids, vectors):
             normalized_id = str(knowledge_id)
             mapped = existing_index.get(normalized_id)
@@ -245,7 +263,14 @@ class VectorProjectionStore:
             raise ValueError("vector dimension does not match store dimension")
         self._model_dimension = dimension
 
-    def _persist(self, *, root: Path, ids: list[str], vectors: list[list[float]], manifest: dict[str, Any]) -> None:
+    def _persist(
+        self,
+        *,
+        root: Path,
+        ids: list[str],
+        vectors: list[list[float]],
+        manifest: dict[str, Any],
+    ) -> None:
         if root.exists() and not root.is_dir():
             raise RuntimeError("vector projection root is not a directory")
 
@@ -314,13 +339,17 @@ class VectorProjectionStore:
         return payload
 
     def _write_json(self, path: Path, value: object) -> None:
-        payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
         path.write_text(payload, encoding="utf-8")
 
     def _write_vectors(self, path: Path, vectors: list[list[float]]) -> None:
         if np is None:
             path.write_text(
-                json.dumps(vectors, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                json.dumps(
+                    vectors, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+                ),
                 encoding="utf-8",
             )
             return
@@ -361,7 +390,9 @@ class VectorProjectionStore:
         return [self._coerce_vector(row) for row in vector_list]
 
     def _coerce_vector(self, vector: Sequence[float] | Any) -> list[float]:
-        if not isinstance(vector, Sequence) or isinstance(vector, (str, bytes, bytearray)):
+        if not isinstance(vector, Sequence) or isinstance(
+            vector, (str, bytes, bytearray)
+        ):
             raise ValueError("vector must be a sequence of numbers")  # noqa: TRY004 - persisted data contract
         coerced: list[float] = [float(value) for value in vector]
         return coerced

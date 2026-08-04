@@ -19,7 +19,9 @@ from ledgermind_local.raw_rounds import (
 from .http import build_request_id, error_payload
 
 
-def create_rounds_router(require_token: Callable[..., str], raw_round_handler: Any) -> APIRouter:
+def create_rounds_router(
+    require_token: Callable[..., str], raw_round_handler: Any
+) -> APIRouter:
     router = APIRouter()
 
     @router.post("/v1/rounds", status_code=status.HTTP_202_ACCEPTED)
@@ -54,10 +56,14 @@ def create_rounds_router(require_token: Callable[..., str], raw_round_handler: A
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=error_payload("raw_round_ingestion_failed", "raw round ingestion failed"),
+                detail=error_payload(
+                    "raw_round_ingestion_failed", "raw round ingestion failed"
+                ),
             ) from exc
 
-        response.status_code = status.HTTP_200_OK if result.duplicate else status.HTTP_202_ACCEPTED
+        response.status_code = (
+            status.HTTP_200_OK if result.duplicate else status.HTTP_202_ACCEPTED
+        )
         response.headers["X-Request-ID"] = build_request_id(request.headers)
         response.headers["Cache-Control"] = "no-store"
         return {

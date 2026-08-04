@@ -9,9 +9,9 @@ import pytest
 from ledgermind_local.persistence import (
     MemorySpaceSourceClientChangedError,
     SQLiteMemorySpaceRepository,
-    migrations,
     open_sqlite_connection,
 )
+from ledgermind_local.persistence import rounds_migrations as migrations
 
 
 def _create_database(path) -> sqlite3.Connection:

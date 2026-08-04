@@ -1,23 +1,25 @@
 """Processing package for RawRound normalization and hypothesis generation."""
 
-from .bridge import CoreHypothesisBridge
 from .generator import (
+    BrokerHypothesisGenerator,
     CallableHypothesisGenerator,
-    HypothesisDraft,
+    HypothesisBroker,
+    HypothesisCandidate,
     HypothesisGenerator,
     NullHypothesisGenerator,
 )
-from .models import NormalizedRound, NormalizedToolCall
+from .models import NormalizedRound, NormalizedToolInteraction
 from .normalizer import normalize_raw_round, redact_text, redact_value
 from .worker import ProcessingResult, RoundProcessingWorker
 
 __all__ = [
+    "BrokerHypothesisGenerator",
     "CallableHypothesisGenerator",
-    "CoreHypothesisBridge",
-    "HypothesisDraft",
+    "HypothesisBroker",
+    "HypothesisCandidate",
     "HypothesisGenerator",
     "NormalizedRound",
-    "NormalizedToolCall",
+    "NormalizedToolInteraction",
     "NullHypothesisGenerator",
     "ProcessingResult",
     "RoundProcessingWorker",

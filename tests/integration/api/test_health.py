@@ -61,7 +61,9 @@ def test_health_ready_fails_without_service_lock(tmp_path: Path) -> None:
     assert payload["checks"]["service_lock"]["detail"] == "service lock file is missing"
 
 
-def test_health_ready_succeeds_when_service_lock_is_held_by_current_process(tmp_path: Path) -> None:
+def test_health_ready_succeeds_when_service_lock_is_held_by_current_process(
+    tmp_path: Path,
+) -> None:
     token = "secret-token"
     lock_path = tmp_path / "service.lock"
     client = _build_client(
@@ -101,7 +103,9 @@ def test_health_details_fails_without_service_lock(tmp_path: Path) -> None:
     assert payload["checks"]["service_lock"]["ok"] is False
 
 
-def test_health_details_succeeds_when_service_lock_is_held_by_current_process(tmp_path: Path) -> None:
+def test_health_details_succeeds_when_service_lock_is_held_by_current_process(
+    tmp_path: Path,
+) -> None:
     token = "secret-token"
     lock_path = tmp_path / "service.lock"
     client = _build_client(

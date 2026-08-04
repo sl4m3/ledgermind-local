@@ -9,10 +9,11 @@ description = "LedgerMind local service bootstrap for v4 architecture"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.7,<3",
+    "cryptography>=42,<49",
+    "httpx>=0.27,<1",
     "fastapi>=0.111,<1",
     "PyYAML>=6.0,<7",
     "ledgermind-protocol>=2.0.0a1,<2.1",
-    "ledgermind-core>=4.0.0a1,<4.1",
     "uvicorn>=0.30,<1"
 ]
 
@@ -37,12 +38,14 @@ where = ["src"]
 include = ["ledgermind_local*"]
 
 [tool.setuptools.package-data]
-"ledgermind_local.persistence" = ["migrations/*.sql"]
+"ledgermind_local.persistence" = ["rounds_migrations/*.sql"]
+"ledgermind_local.inference" = ["prompts/*.txt", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+markers = ["integration: exercises a real Core daemon boundary"]
 
 [tool.mypy]
 python_version = "3.10"

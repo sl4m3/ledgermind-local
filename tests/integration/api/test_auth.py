@@ -70,6 +70,7 @@ def test_query_token_does_not_open_protected_endpoint() -> None:
     response = client.get(f"/v1/ping?api_token={token}")
     assert response.status_code == 401
 
+
 def test_create_app_does_not_create_database_file(tmp_path) -> None:
     database = tmp_path / "local.db"
     assert not database.exists()

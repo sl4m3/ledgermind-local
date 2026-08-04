@@ -7,8 +7,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from ledgermind_core.domain.events import KnowledgeCreated
 
+from ledgermind_local.core_gateway.event_contracts import KnowledgeCreated
 from ledgermind_local.projections import KnowledgeMarkdownGitAuditProjection
 
 
@@ -63,21 +63,27 @@ def test_git_audit_projection_batches_events(tmp_path: Path) -> None:
         batch_size=2,
     )
 
-    assert projection.handle_event(
-        event_type=KnowledgeCreated.EVENT_NAME,
-        memory_space_id="space-a",
-        aggregate_id="k-1",
-        payload_json='{"event_type":"knowledge.created","aggregate_id":"k-1"}',
-    ) is False
+    assert (
+        projection.handle_event(
+            event_type=KnowledgeCreated.EVENT_NAME,
+            memory_space_id="space-a",
+            aggregate_id="k-1",
+            payload_json='{"event_type":"knowledge.created","aggregate_id":"k-1"}',
+        )
+        is False
+    )
     assert _git_log_count(root) == 0
 
     (root / "knowledge" / "c3Jj" / "k-2.md").write_text("# Another\n", encoding="utf-8")
-    assert projection.handle_event(
-        event_type=KnowledgeCreated.EVENT_NAME,
-        memory_space_id="space-a",
-        aggregate_id="k-2",
-        payload_json='{"event_type":"knowledge.created","aggregate_id":"k-2"}',
-    ) is True
+    assert (
+        projection.handle_event(
+            event_type=KnowledgeCreated.EVENT_NAME,
+            memory_space_id="space-a",
+            aggregate_id="k-2",
+            payload_json='{"event_type":"knowledge.created","aggregate_id":"k-2"}',
+        )
+        is True
+    )
     assert _git_log_count(root) == 1
 
 
@@ -86,7 +92,9 @@ def test_git_audit_projection_nothing_to_commit_is_not_an_error(tmp_path: Path) 
     root = tmp_path / "markdown"
     root.mkdir(parents=True)
 
-    projection = KnowledgeMarkdownGitAuditProjection(markdown_root=root, enabled=True, batch_size=1)
+    projection = KnowledgeMarkdownGitAuditProjection(
+        markdown_root=root, enabled=True, batch_size=1
+    )
 
     assert projection.rebuild() == 0
     assert projection.last_error is None
@@ -99,7 +107,9 @@ def test_git_audit_projection_ignores_sensitive_files(tmp_path: Path) -> None:
     root = tmp_path / "markdown"
     _init_markdown_file(root)
 
-    projection = KnowledgeMarkdownGitAuditProjection(markdown_root=root, enabled=True, batch_size=1)
+    projection = KnowledgeMarkdownGitAuditProjection(
+        markdown_root=root, enabled=True, batch_size=1
+    )
     assert projection.rebuild() == 1
 
     gitignore = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
@@ -132,23 +142,33 @@ def test_git_audit_projection_ignores_sensitive_files(tmp_path: Path) -> None:
         assert check.returncode == 0, f"{ignored} is not ignored by git"
 
 
-def test_git_audit_projection_reports_missing_git_without_crash(tmp_path: Path, monkeypatch) -> None:
+def test_git_audit_projection_reports_missing_git_without_crash(
+    tmp_path: Path, monkeypatch
+) -> None:
     root = tmp_path / "markdown"
     _init_markdown_file(root)
-    monkeypatch.setattr("ledgermind_local.projections.git_audit.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "ledgermind_local.projections.git_audit.shutil.which", lambda _name: None
+    )
 
-    projection = KnowledgeMarkdownGitAuditProjection(markdown_root=root, enabled=True, batch_size=1)
+    projection = KnowledgeMarkdownGitAuditProjection(
+        markdown_root=root, enabled=True, batch_size=1
+    )
     assert projection.rebuild() == 0
     assert projection.last_error is not None
     assert "git is not available" in projection.last_error
 
 
-def test_git_audit_projection_records_git_error_without_crash(tmp_path: Path, monkeypatch) -> None:
+def test_git_audit_projection_records_git_error_without_crash(
+    tmp_path: Path, monkeypatch
+) -> None:
     _require_git()
     root = tmp_path / "markdown"
     _init_markdown_file(root)
 
-    projection = KnowledgeMarkdownGitAuditProjection(markdown_root=root, enabled=True, batch_size=1)
+    projection = KnowledgeMarkdownGitAuditProjection(
+        markdown_root=root, enabled=True, batch_size=1
+    )
     original_run = projection._run
 
     def _run(args: list[str], check: bool = True):  # type: ignore[override]

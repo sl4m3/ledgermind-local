@@ -13,14 +13,14 @@ _EmbeddingModelBuilder: TypeAlias = Callable[[str, int, int], Any]
 
 
 class _EmbeddingModel(Protocol):
-    def close(self) -> None:
-        ...
+    def close(self) -> None: ...
 
-    def create_embedding(self, text: str, *, n_threads: int | None = None) -> Any:
-        ...
+    def create_embedding(self, text: str, *, n_threads: int | None = None) -> Any: ...
 
 
-def _default_embedding_model_builder(model_path: str, n_threads: int, gpu_layers: int) -> Any:
+def _default_embedding_model_builder(
+    model_path: str, n_threads: int, gpu_layers: int
+) -> Any:
     try:
         from llama_cpp import Llama
     except ModuleNotFoundError as exc:
@@ -77,7 +77,9 @@ class GGUFVectorizer(Vectorizer):
             else None
         )
         resolved_manifest_fingerprint = (
-            str(manifest["model_fingerprint"]) if manifest and manifest.get("model_fingerprint") else None
+            str(manifest["model_fingerprint"])
+            if manifest and manifest.get("model_fingerprint")
+            else None
         )
         resolved_dimension = (
             _read_uint64(manifest["dimension"])
@@ -85,10 +87,14 @@ class GGUFVectorizer(Vectorizer):
             else None
         )
         manifest_model_name = (
-            str(manifest["model_name"]) if manifest and manifest.get("model_name") else None
+            str(manifest["model_name"])
+            if manifest and manifest.get("model_name")
+            else None
         )
         resolved_prefix = model_prefix or (
-            str(manifest["model_prefix"]) if manifest and manifest.get("model_prefix") else None
+            str(manifest["model_prefix"])
+            if manifest and manifest.get("model_prefix")
+            else None
         )
 
         resolved_model_path = model_path or config_model_path

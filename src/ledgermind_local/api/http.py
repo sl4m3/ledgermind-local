@@ -8,7 +8,6 @@ from fastapi import HTTPException
 from starlette import status
 from starlette.datastructures import Headers
 
-MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 _JSON_CONTENT_TYPE = "application/json"
 
 
@@ -32,46 +31,50 @@ def enforce_json_content_type(headers: Headers) -> None:
     if media_type != _JSON_CONTENT_TYPE:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=error_payload("unsupported_media_type", "content type must be application/json"),
+            detail=error_payload(
+                "unsupported_media_type", "content type must be application/json"
+            ),
         )
 
 
-def enforce_body_limit(headers: Headers, *, raw: bytes) -> None:
+def enforce_body_limit(headers: Headers, *, raw: bytes, max_bytes: int) -> None:
     """Enforce request body size limit using headers and actual payload size."""
 
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
     length = headers.get("content-length")
     if length is not None:
         try:
-            if int(length) > MAX_JSON_BODY_BYTES:
+            if int(length) > max_bytes:
                 raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                     detail=error_payload(
                         "request_too_large",
-                        "request body exceeds 2 MB",
+                        f"request body exceeds {max_bytes} bytes",
                     ),
                 )
         except ValueError:
             pass
 
-    if len(raw) > MAX_JSON_BODY_BYTES:
+    if len(raw) > max_bytes:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=error_payload(
                 "request_too_large",
-                "request body exceeds 2 MB",
+                f"request body exceeds {max_bytes} bytes",
             ),
         )
 
 
-def validate_json_request(headers: Headers, *, raw: bytes) -> None:
+def validate_json_request(headers: Headers, *, raw: bytes, max_bytes: int) -> None:
     """Validate request shape expectations for JSON endpoints."""
 
     enforce_json_content_type(headers=headers)
-    enforce_body_limit(headers=headers, raw=raw)
+    enforce_body_limit(headers=headers, raw=raw, max_bytes=max_bytes)
 
 
-def validate_json_request_headers(headers: Headers) -> None:
+def validate_json_request_headers(headers: Headers, *, max_bytes: int) -> None:
     """Validate JSON media type and declared size before FastAPI parses a body."""
 
     enforce_json_content_type(headers=headers)
-    enforce_body_limit(headers=headers, raw=b"")
+    enforce_body_limit(headers=headers, raw=b"", max_bytes=max_bytes)

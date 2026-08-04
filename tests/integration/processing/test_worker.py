@@ -5,8 +5,9 @@ from pathlib import Path
 
 from ledgermind_protocol import RawRoundRequest, calculate_raw_round_digest
 
-from ledgermind_local.persistence import migrations, open_sqlite_connection
-from ledgermind_local.processing.generator import HypothesisDraft
+from ledgermind_local.persistence import open_sqlite_connection
+from ledgermind_local.persistence import rounds_migrations as migrations
+from ledgermind_local.processing.generator import HypothesisCandidate
 from ledgermind_local.processing.worker import RoundProcessingWorker
 from ledgermind_local.raw_rounds import RawRoundIngestHandler
 
@@ -41,8 +42,21 @@ def _request() -> RawRoundRequest:
             "started_at": "2026-08-02T20:00:00Z",
             "completed_at": "2026-08-02T20:01:00Z",
             "events": [
-                {"event_id": "m-1", "sequence": 0, "kind": "message", "role": "user", "content": [{"type": "text", "text": "request"}]},
-                {"event_id": "m-2", "sequence": 1, "kind": "message", "role": "assistant", "final": True, "content": [{"type": "text", "text": "answer"}]},
+                {
+                    "event_id": "m-1",
+                    "sequence": 0,
+                    "kind": "message",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "request"}],
+                },
+                {
+                    "event_id": "m-2",
+                    "sequence": 1,
+                    "kind": "message",
+                    "role": "assistant",
+                    "final": True,
+                    "content": [{"type": "text", "text": "answer"}],
+                },
             ],
         },
         "payload_digest": "sha256:" + "0" * 64,
@@ -76,12 +90,13 @@ def _ingest(path: Path) -> None:
     assert result.duplicate is False
 
 
-def test_worker_persists_hypothesis_after_callback_outside_write_lock(tmp_path: Path) -> None:
+def test_worker_persists_hypothesis_and_core_command_outside_write_lock(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "state.db"
     _bootstrap(database)
     _ingest(database)
     lock_probe = {"ok": False}
-    bridge_calls: list[str] = []
 
     def probe_lock() -> None:
         connection = sqlite3.connect(database)
@@ -96,7 +111,7 @@ def test_worker_persists_hypothesis_after_callback_outside_write_lock(tmp_path: 
         database_path=database,
         generator=_Generator(
             drafts=(
-                HypothesisDraft(
+                HypothesisCandidate(
                     title="Deployment rule",
                     target="operations",
                     statement="Deployments require a staging check token=secret.",
@@ -105,7 +120,6 @@ def test_worker_persists_hypothesis_after_callback_outside_write_lock(tmp_path: 
             ),
             probe=probe_lock,
         ),
-        bridge=lambda raw, draft: bridge_calls.append(draft.title),
         worker_id="worker-1",
     )
 
@@ -114,41 +128,53 @@ def test_worker_persists_hypothesis_after_callback_outside_write_lock(tmp_path: 
     assert result is not None
     assert result.status == "completed"
     assert lock_probe["ok"] is True
-    assert bridge_calls == ["Deployment rule"]
+    assert result.hypothesis_ids
     with sqlite3.connect(database) as connection:
         row = connection.execute("SELECT status FROM round_processing_jobs").fetchone()
         assert row == ("completed",)
         hypothesis = connection.execute(
-            "SELECT title, statement, artifacts_json FROM hypotheses"
+            "SELECT title, statement, artifacts_json, status, core_command_id FROM hypotheses"
         ).fetchone()
         assert hypothesis[0] == "Deployment rule"
         assert "secret" not in hypothesis[1]
         assert "[REDACTED]" in hypothesis[1]
+        assert hypothesis[3] == "queued_for_core"
+        assert hypothesis[4]
         assert connection.execute("SELECT COUNT(*) FROM raw_rounds").fetchone()[0] == 1
-        assert connection.execute("SELECT COUNT(*) FROM hypothesis_attempts").fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT COUNT(*) FROM hypothesis_attempts").fetchone()[0]
+            == 1
+        )
+        assert connection.execute(
+            "SELECT command_type, status FROM core_commands"
+        ).fetchone() == ("accept_hypothesis", "pending")
 
 
-def test_worker_marks_no_knowledge_without_bridge(tmp_path: Path) -> None:
+def test_worker_marks_no_knowledge_without_hypothesis_command(tmp_path: Path) -> None:
     database = tmp_path / "state.db"
     _bootstrap(database)
     _ingest(database)
-    bridge_calls: list[str] = []
-
     result = RoundProcessingWorker(
         database_path=database,
         generator=_Generator(),
-        bridge=lambda raw, draft: bridge_calls.append(draft.title),
     ).process_once()
 
     assert result is not None
     assert result.status == "no_knowledge"
-    assert bridge_calls == []
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM hypothesis_attempts").fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT COUNT(*) FROM core_commands").fetchone()[0] == 0
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM hypothesis_attempts").fetchone()[0]
+            == 1
+        )
 
 
-def test_worker_retries_generation_error_without_duplicate_raw_round(tmp_path: Path) -> None:
+def test_worker_retries_generation_error_without_duplicate_raw_round(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "state.db"
     _bootstrap(database)
     _ingest(database)
@@ -164,7 +190,11 @@ def test_worker_retries_generation_error_without_duplicate_raw_round(tmp_path: P
     assert result.status == "retry_wait"
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM raw_rounds").fetchone()[0] == 1
-        assert connection.execute("SELECT attempts, status FROM round_processing_jobs").fetchone() == (1, "retry_wait")
-        error_detail = connection.execute("SELECT error_detail FROM hypothesis_attempts").fetchone()[0]
+        assert connection.execute(
+            "SELECT attempts, status FROM round_processing_jobs"
+        ).fetchone() == (1, "retry_wait")
+        error_detail = connection.execute(
+            "SELECT error_detail FROM hypothesis_attempts"
+        ).fetchone()[0]
         assert "secret" not in error_detail
         assert "[REDACTED]" in error_detail

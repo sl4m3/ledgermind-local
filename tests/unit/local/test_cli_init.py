@@ -27,7 +27,7 @@ def test_init_is_idempotent(tmp_path: Path) -> None:
     assert code == 0
     second_token = (home / "server.token").read_text(encoding="utf-8")
     assert second_token == first_token
-    assert (home / "ledgermind.db").exists()
+    assert (home / "rounds.db").exists()
     assert (home / "config.json").exists()
 
 
@@ -70,7 +70,9 @@ def test_token_file_has_private_permissions_on_posix(tmp_path: Path) -> None:
     assert mode == 0o600
 
 
-def test_partial_failure_does_not_create_empty_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_partial_failure_does_not_create_empty_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home = tmp_path / "service"
     code = _run_init(home)
     assert code == 0

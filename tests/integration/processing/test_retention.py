@@ -7,9 +7,9 @@ from ledgermind_protocol import RawRoundRequest, calculate_raw_round_digest
 
 from ledgermind_local.persistence import (
     SQLiteUnitOfWork,
-    migrations,
     open_sqlite_connection,
 )
+from ledgermind_local.persistence import rounds_migrations as migrations
 from ledgermind_local.raw_rounds import RawRoundIngestHandler
 
 _FIXTURE = {
@@ -32,8 +32,21 @@ _FIXTURE = {
         "started_at": "2026-08-02T20:00:00Z",
         "completed_at": "2026-08-02T20:01:00Z",
         "events": [
-            {"event_id": "event-1", "sequence": 0, "kind": "message", "role": "user", "content": [{"type": "text", "text": "request"}]},
-            {"event_id": "event-2", "sequence": 1, "kind": "message", "role": "assistant", "final": True, "content": [{"type": "text", "text": "response"}]},
+            {
+                "event_id": "event-1",
+                "sequence": 0,
+                "kind": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": "request"}],
+            },
+            {
+                "event_id": "event-2",
+                "sequence": 1,
+                "kind": "message",
+                "role": "assistant",
+                "final": True,
+                "content": [{"type": "text", "text": "response"}],
+            },
         ],
     },
     "payload_digest": "sha256:" + "0" * 64,
@@ -51,14 +64,18 @@ def _bootstrap(path: Path) -> None:
         connection.close()
 
 
-def test_expired_raw_round_without_hypothesis_is_purged(tmp_path: Path) -> None:
+def test_expired_raw_round_payload_is_purged_but_metadata_remains(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "state.db"
     _bootstrap(database)
     request = RawRoundRequest.model_validate(_FIXTURE)
-    result = RawRoundIngestHandler(database_path=database, retention_days=1).handle(request)
+    result = RawRoundIngestHandler(database_path=database, retention_days=1).handle(
+        request
+    )
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "UPDATE raw_rounds SET retention_expires_at = ? WHERE raw_round_id = ?",
+            "UPDATE raw_round_payloads SET retention_expires_at = ? WHERE raw_round_id = ?",
             ("2020-01-01T00:00:00+00:00", result.raw_round_id),
         )
         connection.commit()
@@ -69,4 +86,11 @@ def test_expired_raw_round_without_hypothesis_is_purged(tmp_path: Path) -> None:
 
     assert purged == 1
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM raw_rounds").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM raw_rounds").fetchone()[0] == 1
+        payload = connection.execute(
+            "SELECT payload_json, payload_bytes, deleted_at FROM raw_round_payloads WHERE raw_round_id = ?",
+            (result.raw_round_id,),
+        ).fetchone()
+        assert payload[0] == "{}"
+        assert payload[1] == 0
+        assert payload[2] is not None

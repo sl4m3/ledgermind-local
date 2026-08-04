@@ -43,13 +43,24 @@ def test_config_has_expected_6_2_shape() -> None:
     )
     payload = config.to_json()
     assert '"config_version":1' in payload
-    assert '"database_path":"ledgermind.db"' in payload
+    assert '"rounds_database_path":"rounds.db"' in payload
     assert '"log_level":"INFO"' in payload
     assert '"projection_poll_interval_seconds":1.0' in payload
     assert '"vector":{"enabled":false' in payload
     assert '"markdown_projection":{"enabled":false' in payload
     assert '"markdown_audit":{"enabled":false' in payload
     assert "markdown_audit_enabled" not in payload
+
+
+def test_process_core_backend_is_the_only_default() -> None:
+    config = LocalConfig.model_validate({"config_version": 1})
+
+    assert config.core_backend == "process"
+
+
+def test_python_core_backend_is_rejected_after_cutover() -> None:
+    with pytest.raises(ValidationError):
+        LocalConfig.model_validate({"config_version": 1, "core_backend": "python"})
 
 
 def test_config_to_json_is_deterministic() -> None:
@@ -66,7 +77,9 @@ def test_markdown_audit_disabled_by_default() -> None:
 
 
 def test_markdown_audit_can_be_enabled() -> None:
-    config = LocalConfig.model_validate({"config_version": 1, "markdown_audit_enabled": True})
+    config = LocalConfig.model_validate(
+        {"config_version": 1, "markdown_audit_enabled": True}
+    )
     assert config.markdown_audit_enabled is True
     assert config.markdown_projection.enabled is True
 

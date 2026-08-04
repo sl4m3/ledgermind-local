@@ -12,7 +12,7 @@
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-PYTHONPATH="$HOME/Проекты/ledgermind/ledgermind/src:$PWD/src" \
+PYTHONPATH="$PWD/src" \
 /home/stanislav/.hermes/hermes-agent/venv/bin/python -m pytest -q --tb=short
 
 /home/stanislav/.hermes/hermes-agent/venv/bin/python -m build
@@ -26,6 +26,6 @@ PYTHONPATH="$HOME/Проекты/ledgermind/ledgermind/src:$PWD/src" \
 
 ## Known skipped checks
 
-- Rust checks are not applicable to the Python Local repository.
-- `cargo deny` is not applicable until the Rust workspace is created in Stage 8.
+- Rust checks run in the private `ledgermind-core` repository.
+- `cargo deny` is part of the private Core release gate.
 - Ruff and mypy were not part of the Stage 0 baseline command set; they remain required for subsequent Python changes.

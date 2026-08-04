@@ -10,7 +10,9 @@ from ledgermind_local.projections import Vectorizer
 class _TestVectorizer:
     """Simple deterministic fake vectorizer for contract tests."""
 
-    def __init__(self, *, dimension: int, fingerprint: str, partial: bool = False) -> None:
+    def __init__(
+        self, *, dimension: int, fingerprint: str, partial: bool = False
+    ) -> None:
         self._dimension = dimension
         self._fingerprint = fingerprint
         self._partial = partial
@@ -33,7 +35,9 @@ class _TestVectorizer:
         self.closed = True
 
 
-def _assert_complete_vectors(vectorizer: Vectorizer, texts: list[str]) -> list[tuple[float, ...]]:
+def _assert_complete_vectors(
+    vectorizer: Vectorizer, texts: list[str]
+) -> list[tuple[float, ...]]:
     vectors = vectorizer.encode(texts)
     if len(vectors) != len(texts):
         raise ValueError("partial vectorization result")

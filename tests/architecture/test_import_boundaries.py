@@ -32,7 +32,9 @@ def test_local_does_not_import_integrations_repository() -> None:
         if module == "ledgermind_integrations"
         or module.startswith("ledgermind_integrations.")
     ]
-    assert not violations, "Local must not import client integrations:\n" + "\n".join(violations)
+    assert not violations, "Local must not import client integrations:\n" + "\n".join(
+        violations
+    )
 
 
 def test_local_boundary_scan_is_not_empty() -> None:
@@ -52,3 +54,26 @@ def test_rounds_api_does_not_import_core() -> None:
         if module == "ledgermind_core" or module.startswith("ledgermind_core.")
     ]
     assert not violations, "RawRound API must consume ledgermind-protocol, not Core"
+
+
+def test_local_no_longer_contains_transitional_python_core_surfaces() -> None:
+    forbidden = (
+        PACKAGE_ROOT / "core_gateway" / "python_backend.py",
+        PACKAGE_ROOT / "core_gateway" / "python_backend_migrations.py",
+        PACKAGE_ROOT / "core_gateway" / "python_backend_migrations",
+        PACKAGE_ROOT / "persistence" / "atom_repository.py",
+        PACKAGE_ROOT / "persistence" / "knowledge_repository.py",
+        PACKAGE_ROOT / "persistence" / "evidence_repository.py",
+        PACKAGE_ROOT / "persistence" / "revision_repository.py",
+        PACKAGE_ROOT / "processing" / "bridge.py",
+        PACKAGE_ROOT / "persistence" / "split_database.py",
+    )
+
+    present = [str(path.relative_to(ROOT)) for path in forbidden if path.exists()]
+    assert not present, "transitional Core surfaces remain: " + ", ".join(present)
+
+
+def test_local_package_does_not_depend_on_python_core() -> None:
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "ledgermind-core" not in pyproject

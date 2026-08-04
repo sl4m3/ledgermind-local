@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ledgermind.local/schemas/merge-response-v1.schema.json",
+  "title": "LedgerMind Merge Response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "target", "statement", "rationale", "preserved_references", "preserved_constraints"],
+  "properties": {
+    "title": {"type": "string", "minLength": 1, "maxLength": 240},
+    "target": {"type": "string", "minLength": 1, "maxLength": 240},
+    "statement": {"type": "string", "minLength": 1, "maxLength": 20000},
+    "rationale": {"type": "string", "maxLength": 40000},
+    "preserved_references": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 500,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "preserved_constraints": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

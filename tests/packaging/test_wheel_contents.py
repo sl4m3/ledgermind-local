@@ -8,7 +8,14 @@ import sys
 from pathlib import Path
 from zipfile import ZipFile
 
-_FORBIDDEN_TOP_LEVEL = {"application", "contracts", "domain", "ports", "api", "persistence"}
+_FORBIDDEN_TOP_LEVEL = {
+    "application",
+    "contracts",
+    "domain",
+    "ports",
+    "api",
+    "persistence",
+}
 
 
 def _build_wheel_names(source: Path, tmp_path: Path) -> list[str]:

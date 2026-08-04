@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class VectorProjectionConfig(BaseModel):
@@ -44,20 +51,44 @@ class LocalConfig(BaseModel):
     config_version: int = Field(ge=1)
     bind_host: str = "127.0.0.1"
     bind_port: int = Field(default=8765, ge=1, le=65535)
-    database_path: str = "ledgermind.db"
+    rounds_database_path: str = Field(
+        default="rounds.db",
+        validation_alias=AliasChoices("rounds_database_path", "database_path"),
+    )
+    knowledge_database_path: str = "../core/knowledge.db"
+    core_backend: Literal["process"] = "process"
+    core_binary_path: str = "../core/bin/ledgermind-core"
+    core_signature_path: str = "../core/bin/ledgermind-core.sig"
+    core_public_key_path: str = "../core/bin/ledgermind-core.pub"
+    verify_core_signature: bool = True
+    core_request_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    core_startup_timeout_seconds: float = Field(default=10.0, gt=0.0)
+    require_core_network_isolation: bool = False
     log_level: str = "INFO"
     projection_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
     processing_enabled: bool = False
     processing_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
     processing_max_attempts: int = Field(default=3, ge=1)
     processing_retry_delay_seconds: float = Field(default=30.0, ge=0.0)
-    raw_round_max_bytes: int = Field(default=5_000_000, ge=1)
+    processing_lease_seconds: float = Field(default=300.0, ge=1.0)
+    processing_heartbeat_interval_seconds: float = Field(default=30.0, ge=1.0)
+    hypothesis_profile_id: str | None = None
+    inference_secrets_path: str = "secrets.json"
+    max_raw_round_bytes: int = Field(default=5_000_000, ge=1)
     raw_round_retention_days: int = Field(default=30, ge=1)
     allow_remote_bind: bool = False
     vector: VectorProjectionConfig = Field(default_factory=VectorProjectionConfig)
-    markdown_projection: MarkdownProjectionConfig = Field(default_factory=MarkdownProjectionConfig)
+    markdown_projection: MarkdownProjectionConfig = Field(
+        default_factory=MarkdownProjectionConfig
+    )
     markdown_audit: GitAuditConfig = Field(default_factory=GitAuditConfig)
     markdown_audit_enabled: bool = False
+
+    @property
+    def database_path(self) -> str:
+        """Compatibility read alias; serialized config uses rounds name."""
+
+        return self.rounds_database_path
 
     @field_validator("log_level", mode="after")
     @classmethod
@@ -75,6 +106,24 @@ class LocalConfig(BaseModel):
             raise ValueError("bind_host must not be empty")
         return stripped
 
+    @field_validator("hypothesis_profile_id")
+    @classmethod
+    def _normalize_hypothesis_profile_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("hypothesis_profile_id must not be empty when configured")
+        return normalized
+
+    @field_validator("inference_secrets_path")
+    @classmethod
+    def _normalize_inference_secrets_path(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("inference_secrets_path must not be empty")
+        return normalized
+
     @field_validator("allow_remote_bind", mode="after")
     @classmethod
     def _validate_remote_bind(cls, value: bool, info: Any) -> bool:
@@ -84,7 +133,9 @@ class LocalConfig(BaseModel):
             "localhost",
             "::1",
         }:
-            raise ValueError("bind_host outside localhost requires allow_remote_bind=true")
+            raise ValueError(
+                "bind_host outside localhost requires allow_remote_bind=true"
+            )
         return value
 
     @model_validator(mode="after")

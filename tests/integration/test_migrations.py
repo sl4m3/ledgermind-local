@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from ledgermind_local.persistence import migrations
+from ledgermind_local.persistence import rounds_migrations as migrations
 
 
 def _connect(path):
@@ -75,7 +75,12 @@ def test_newer_schema_version_is_blocked(tmp_path):
             VALUES
                 (?, ?, ?, ?)
             """,
-            (latest + 1, "future.sql", hashlib.sha256(b"future").hexdigest(), "2020-01-01T00:00:00Z"),
+            (
+                latest + 1,
+                "future.sql",
+                hashlib.sha256(b"future").hexdigest(),
+                "2020-01-01T00:00:00Z",
+            ),
         )
         conn.commit()
 
@@ -86,14 +91,18 @@ def test_newer_schema_version_is_blocked(tmp_path):
 
 
 def test_failed_migration_is_rolled_back(tmp_path, monkeypatch):
-    fake_sql = "CREATE TABLE should_not_exist(id INTEGER PRIMARY KEY);" "BROKEN SQL;"
+    fake_sql = "CREATE TABLE should_not_exist(id INTEGER PRIMARY KEY);BROKEN SQL;"
     bad_migration = migrations.Migration(
         version=1,
         name="0001_bad.sql",
         checksum=hashlib.sha256(fake_sql.encode("utf-8")).hexdigest(),
         sql=fake_sql,
     )
-    monkeypatch.setattr(migrations, "load_migrations", lambda: (bad_migration,))
+    monkeypatch.setattr(
+        migrations._shared,
+        "load_migrations",
+        lambda _migration_dir: (bad_migration,),
+    )
 
     conn = _connect(tmp_path / "state.db")
     try:

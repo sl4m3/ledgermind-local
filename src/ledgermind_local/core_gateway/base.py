@@ -1,0 +1,63 @@
+"""Boundary protocol for the future isolated Core backend."""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from .contracts import (
+    AcceptHypothesisCommand,
+    AcceptHypothesisResult,
+    ContextViewResult,
+    CoreHealth,
+    RecordContextUsageCommand,
+    RetrieveContextCommand,
+)
+from .model_task_contracts import (
+    PollModelTasksCommand,
+    PollModelTasksResult,
+    SubmitModelResult,
+    SubmitModelResultCommand,
+)
+from .projection_contracts import (
+    AckProjectionEventsCommand,
+    AckProjectionEventsResult,
+    PollProjectionEventsCommand,
+    PollProjectionEventsResult,
+)
+
+
+class CoreGateway(Protocol):
+    """Only supported Local boundary for Core operations."""
+
+    def accept_hypothesis(
+        self,
+        command: AcceptHypothesisCommand,
+    ) -> AcceptHypothesisResult: ...
+
+    def retrieve_context(
+        self,
+        request: RetrieveContextCommand,
+    ) -> ContextViewResult: ...
+
+    def record_context_usage(self, command: RecordContextUsageCommand) -> None: ...
+
+    def poll_projection_events(
+        self, command: PollProjectionEventsCommand
+    ) -> PollProjectionEventsResult: ...
+
+    def ack_projection_events(
+        self, command: AckProjectionEventsCommand
+    ) -> AckProjectionEventsResult: ...
+
+    def poll_model_tasks(
+        self, command: PollModelTasksCommand
+    ) -> PollModelTasksResult: ...
+
+    def submit_model_result(
+        self, command: SubmitModelResultCommand
+    ) -> SubmitModelResult: ...
+
+    def health(self) -> CoreHealth: ...
+
+
+__all__ = ["CoreGateway"]

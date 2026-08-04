@@ -9,7 +9,8 @@ from ledgermind_protocol import calculate_raw_round_digest
 
 from ledgermind_local.api.app import create_app
 from ledgermind_local.api.dependencies import Settings
-from ledgermind_local.persistence import migrations, open_sqlite_connection
+from ledgermind_local.persistence import open_sqlite_connection
+from ledgermind_local.persistence import rounds_migrations as migrations
 
 _FIXTURE = {
     "api_version": "2",
@@ -31,9 +32,29 @@ _FIXTURE = {
         "started_at": "2026-08-02T20:00:00Z",
         "completed_at": "2026-08-02T20:01:05Z",
         "events": [
-            {"event_id": "1001", "sequence": 0, "kind": "message", "role": "user", "content": [{"type": "text", "text": "request"}]},
-            {"event_id": "1002", "sequence": 1, "kind": "tool_call", "tool_call_id": "call_1", "tool_name": "read_file", "arguments": {"path": "README.md"}},
-            {"event_id": "1003", "sequence": 2, "kind": "message", "role": "assistant", "final": True, "content": [{"type": "text", "text": "response"}]},
+            {
+                "event_id": "1001",
+                "sequence": 0,
+                "kind": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": "request"}],
+            },
+            {
+                "event_id": "1002",
+                "sequence": 1,
+                "kind": "tool_call",
+                "tool_call_id": "call_1",
+                "tool_name": "read_file",
+                "arguments": {"path": "README.md"},
+            },
+            {
+                "event_id": "1003",
+                "sequence": 2,
+                "kind": "message",
+                "role": "assistant",
+                "final": True,
+                "content": [{"type": "text", "text": "response"}],
+            },
         ],
     },
     "payload_digest": "sha256:19dd0368d25bd5888fffe1f5d0a1e7ace48337459dcbd27d325c1030243e7b08",
@@ -50,7 +71,12 @@ def _bootstrap(path) -> None:
 
 
 def _client(path) -> TestClient:
-    return TestClient(create_app(application=object(), settings=Settings(database_path=path, api_token="token")))
+    return TestClient(
+        create_app(
+            application=object(),
+            settings=Settings(database_path=path, api_token="token"),
+        )
+    )
 
 
 def test_post_round_persists_raw_round_and_job_without_model(tmp_path) -> None:
@@ -69,7 +95,12 @@ def test_post_round_persists_raw_round_and_job_without_model(tmp_path) -> None:
     assert payload["status"] == "received"
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM raw_rounds").fetchone()[0] == 1
-        assert connection.execute("SELECT COUNT(*) FROM round_processing_jobs").fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT COUNT(*) FROM round_processing_jobs").fetchone()[
+                0
+            ]
+            == 1
+        )
         stored = connection.execute("SELECT payload_json FROM raw_rounds").fetchone()[0]
         assert "statement" not in stored
 
@@ -79,8 +110,12 @@ def test_post_round_duplicate_returns_existing_ids(tmp_path) -> None:
     _bootstrap(database)
     client = _client(database)
 
-    first = client.post("/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE)
-    second = client.post("/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE)
+    first = client.post(
+        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
+    )
+    second = client.post(
+        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
+    )
 
     assert first.status_code == 202
     assert second.status_code == 200
@@ -92,13 +127,20 @@ def test_post_round_same_source_different_payload_is_conflict(tmp_path) -> None:
     database = tmp_path / "state.db"
     _bootstrap(database)
     client = _client(database)
-    assert client.post("/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE).status_code == 202
+    assert (
+        client.post(
+            "/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
+        ).status_code
+        == 202
+    )
 
     changed = deepcopy(_FIXTURE)
     changed["round"]["events"][1]["arguments"]["path"] = "different.md"
     changed["payload_digest"] = calculate_raw_round_digest(changed)
     changed["idempotency_key"] = changed["payload_digest"]
-    response = client.post("/v1/rounds", headers={"Authorization": "Bearer token"}, json=changed)
+    response = client.post(
+        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=changed
+    )
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "source_round_conflict"
@@ -111,8 +153,12 @@ def test_post_round_same_source_isolated_by_memory_space(tmp_path) -> None:
     second = json.loads(json.dumps(_FIXTURE))
     second["memory_space_id"] = "workspace_02"
 
-    first_response = client.post("/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE)
-    second_response = client.post("/v1/rounds", headers={"Authorization": "Bearer token"}, json=second)
+    first_response = client.post(
+        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
+    )
+    second_response = client.post(
+        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=second
+    )
 
     assert first_response.status_code == 202
     assert second_response.status_code == 202

@@ -11,7 +11,9 @@ from ledgermind_local.projections import VectorProjectionStore
 
 
 def _write_json(path: Path, payload: object) -> None:
-    path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+    )
 
 
 def test_vector_store_rebuild_roundtrip_and_manifest(tmp_path: Path) -> None:
@@ -97,7 +99,9 @@ def test_vector_store_rebuild_rejects_length_mismatch(tmp_path: Path) -> None:
         store.rebuild(["a", "b"], [[1.0, 2.0]])
 
 
-def test_vector_store_failure_after_vectors_write_keeps_previous_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_vector_store_failure_after_vectors_write_keeps_previous_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = tmp_path / "vector"
     store = VectorProjectionStore(root, model_dimension=2)
     store.rebuild(["a"], [[1.0, 2.0]])
@@ -116,7 +120,9 @@ def test_vector_store_failure_after_vectors_write_keeps_previous_index(tmp_path:
     assert reloaded.manifest["document_count"] == 1
 
 
-def test_vector_store_failure_after_ids_write_keeps_previous_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_vector_store_failure_after_ids_write_keeps_previous_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = tmp_path / "vector"
     store = VectorProjectionStore(root, model_dimension=2)
     store.rebuild(["a"], [[1.0, 2.0]])
@@ -187,12 +193,16 @@ def test_vector_store_load_rejects_duplicate_or_excess_ids(tmp_path: Path) -> No
         VectorProjectionStore(root, model_dimension=2)
 
 
-def test_vector_store_interrupted_rebuild_keeps_previous_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_vector_store_interrupted_rebuild_keeps_previous_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = tmp_path / "vector"
     store = VectorProjectionStore(root, model_dimension=2)
     store.rebuild(["a"], [[1.0, 2.0]])
 
-    monkeypatch.setattr(store, "_checkpoint", lambda: (_ for _ in ()).throw(RuntimeError("interrupted")))
+    monkeypatch.setattr(
+        store, "_checkpoint", lambda: (_ for _ in ()).throw(RuntimeError("interrupted"))
+    )
     with pytest.raises(RuntimeError, match="interrupted"):
         store.rebuild(["a"], [[3.0, 4.0]])
 

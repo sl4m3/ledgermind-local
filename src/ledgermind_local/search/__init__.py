@@ -1,10 +1,9 @@
 """Search helpers and adapters for local knowledge retrieval."""
 
-from .fts import RawSQLiteKnowledgeSearchAdapter, SQLiteKnowledgeSearchAdapter
-from .hybrid import HybridKnowledgeSearchAdapter
+from .core_backed import CoreBackedSearch
+from .fts import CoreProjectionSearchAdapter
 
 __all__ = [
-    "HybridKnowledgeSearchAdapter",
-    "RawSQLiteKnowledgeSearchAdapter",
-    "SQLiteKnowledgeSearchAdapter",
+    "CoreBackedSearch",
+    "CoreProjectionSearchAdapter",
 ]

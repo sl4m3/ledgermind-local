@@ -86,9 +86,7 @@ class SQLiteMemorySpaceRepository:
 
         space = self.get(memory_space_id)
         if space is None:
-            raise RuntimeError(
-                f"memory space '{memory_space_id}' could not be ensured"
-            )
+            raise RuntimeError(f"memory space '{memory_space_id}' could not be ensured")
         if space.source_client != source_client:
             raise MemorySpaceSourceClientChangedError(
                 f"memory space '{memory_space_id}' has different source_client"

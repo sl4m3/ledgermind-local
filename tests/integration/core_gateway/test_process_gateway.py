@@ -1,0 +1,289 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from ledgermind_local.core_gateway.contracts import (
+    AcceptHypothesisCommand,
+    DomainRejectedError,
+    HypothesisEvidence,
+    HypothesisExtraction,
+    HypothesisPayload,
+    RecordContextUsageCommand,
+    RetrieveContextCommand,
+)
+from ledgermind_local.core_gateway.process import ProcessCoreGateway
+from ledgermind_local.core_gateway.supervisor import CoreSupervisor
+
+_FAKE_PROCESS = (
+    Path(__file__).resolve().parents[2] / "fixtures" / "fake_core_process.py"
+)
+
+
+def _command(*args: str) -> tuple[str, ...]:
+    return (sys.executable, str(_FAKE_PROCESS), *args)
+
+
+def _accept_command(statement: str = "same statement") -> AcceptHypothesisCommand:
+    digest = "sha256:" + "a" * 64
+    return AcceptHypothesisCommand(
+        protocol_version=1,
+        command_id="command-1",
+        idempotency_key=digest,
+        memory_space_id="space-1",
+        hypothesis=HypothesisPayload(
+            hypothesis_id="hypothesis-1",
+            content_digest=digest,
+            title="Title",
+            target="Target",
+            statement=statement,
+            rationale="Rationale",
+            result="Result",
+            artifacts=(),
+            evidence=HypothesisEvidence(
+                source_system="tests",
+                source_instance_id="instance-1",
+                source_profile_id="profile-1",
+                source_session_id="session-1",
+                source_round_id="round-1",
+                raw_round_digest=digest,
+                normalized_round_digest=digest,
+                source_event_ids=("event-1",),
+            ),
+            extraction=HypothesisExtraction(
+                provider="test",
+                model="fake",
+                prompt_version=1,
+                schema_version=1,
+                completed_at="2026-08-03T00:00:00Z",
+            ),
+        ),
+    )
+
+
+def test_process_gateway_performs_handshake_and_health() -> None:
+    supervisor = CoreSupervisor(_command(), startup_timeout_seconds=2.0)
+    gateway = ProcessCoreGateway(supervisor)
+
+    try:
+        health = gateway.health()
+    finally:
+        gateway.close()
+
+    assert health.healthy is True
+    assert health.backend == "process"
+
+
+def test_process_gateway_restarts_after_child_crash(tmp_path: Path) -> None:
+    crash_marker = tmp_path / "crash-once.marker"
+    supervisor = CoreSupervisor(
+        _command("--crash-once-file", str(crash_marker)),
+        startup_timeout_seconds=2.0,
+        core_data_dir=tmp_path,
+    )
+    gateway = ProcessCoreGateway(supervisor)
+
+    try:
+        first_health = gateway.health()
+        second_health = gateway.health()
+    finally:
+        gateway.close()
+
+    assert first_health.healthy is False
+    assert second_health.healthy is True
+
+
+def test_process_gateway_marks_timeout_unhealthy_and_terminates_child() -> None:
+    supervisor = CoreSupervisor(
+        _command("--delay-seconds", "0.2"),
+        startup_timeout_seconds=2.0,
+        operation_timeout_seconds=0.05,
+    )
+    gateway = ProcessCoreGateway(supervisor)
+
+    try:
+        health = gateway.health()
+        assert supervisor.pid is None
+    finally:
+        gateway.close()
+
+    assert health.healthy is False
+    assert "timed out" in (health.detail or "")
+
+
+def test_accept_hypothesis_replay_is_idempotent() -> None:
+    supervisor = CoreSupervisor(_command(), startup_timeout_seconds=2.0)
+    gateway = ProcessCoreGateway(supervisor)
+    command = _accept_command()
+
+    try:
+        first = gateway.accept_hypothesis(command)
+        replay = gateway.accept_hypothesis(command)
+    finally:
+        gateway.close()
+
+    assert first.accepted is True
+    assert first.duplicate is False
+    assert replay.accepted is True
+    assert replay.duplicate is True
+
+
+def test_accept_hypothesis_idempotency_conflict_is_domain_rejection() -> None:
+    supervisor = CoreSupervisor(_command(), startup_timeout_seconds=2.0)
+    gateway = ProcessCoreGateway(supervisor)
+
+    try:
+        gateway.accept_hypothesis(_accept_command("first statement"))
+        with pytest.raises(DomainRejectedError) as error:
+            gateway.accept_hypothesis(_accept_command("different statement"))
+    finally:
+        gateway.close()
+
+    assert error.value.code == "IDEMPOTENCY_CONFLICT"
+
+
+def test_process_gateway_retrieves_context_and_records_usage() -> None:
+    supervisor = CoreSupervisor(_command(), startup_timeout_seconds=2.0)
+    gateway = ProcessCoreGateway(supervisor)
+
+    try:
+        context = gateway.retrieve_context(
+            RetrieveContextCommand(
+                request_id="retrieve-1",
+                memory_space_id="space-1",
+                query="query",
+                limit=3,
+            )
+        )
+        gateway.record_context_usage(
+            RecordContextUsageCommand(
+                request_id="usage-1",
+                memory_space_id="space-1",
+                item_ids=("knowledge-1",),
+            )
+        )
+    finally:
+        gateway.close()
+
+    assert context.api_version == "1"
+    assert len(context.items) == 1
+    assert context.items[0].knowledge_id == "knowledge-1"
+
+
+def test_process_stderr_is_captured_without_corrupting_stdout_protocol() -> None:
+    supervisor = CoreSupervisor(
+        _command("--stderr-line", "fake diagnostic"),
+        startup_timeout_seconds=2.0,
+    )
+    gateway = ProcessCoreGateway(supervisor)
+
+    try:
+        health = gateway.health()
+        deadline = time.monotonic() + 1.0
+        while "fake diagnostic" not in supervisor.stderr_lines():
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        stderr_lines = supervisor.stderr_lines()
+    finally:
+        gateway.close()
+
+    assert health.healthy is True
+    assert "fake diagnostic" in stderr_lines
+
+
+def test_process_gateway_import_does_not_load_python_core() -> None:
+    local_root = Path(__file__).resolve().parents[3]
+    integrations_root = local_root.parent / "ledgermind-integrations"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        (
+            str(local_root / "src"),
+            str(integrations_root / "protocol" / "python" / "src"),
+        )
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import ledgermind_local.core_gateway.process; "
+                "print('ledgermind_core' in sys.modules)"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.stdout.strip() == "False"
+
+
+def test_local_runtime_graph_imports_without_python_core() -> None:
+    local_root = Path(__file__).resolve().parents[3]
+    protocol_root = (
+        local_root.parent / "ledgermind-integrations" / "protocol" / "python"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(local_root / "src"), str(protocol_root / "src")]
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import ledgermind_local.bootstrap; "
+                "import ledgermind_local.api.app; import ledgermind_local.cli; "
+                "import ledgermind_local.projections; import ledgermind_local.search; "
+                "print('ledgermind_core' in sys.modules)"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.stdout.strip() == "False"
+
+
+def test_process_gateway_rejects_mismatched_response_id() -> None:
+    supervisor = CoreSupervisor(
+        _command("--mismatched-health-id"),
+        startup_timeout_seconds=2.0,
+    )
+    gateway = ProcessCoreGateway(supervisor)
+
+    try:
+        health = gateway.health()
+        assert supervisor.pid is None
+    finally:
+        gateway.close()
+
+    assert health.healthy is False
+    assert "request_id does not match" in (health.detail or "")
+
+
+def test_process_gateway_rejects_malformed_response() -> None:
+    supervisor = CoreSupervisor(
+        _command("--malformed-health-response"),
+        startup_timeout_seconds=2.0,
+    )
+    gateway = ProcessCoreGateway(supervisor)
+
+    try:
+        health = gateway.health()
+        assert supervisor.pid is None
+    finally:
+        gateway.close()
+
+    assert health.healthy is False
+    assert "invalid Core response" in (health.detail or "")

@@ -8,60 +8,73 @@ import os
 import shutil
 import signal
 import sqlite3
+import sys
 import tempfile
 import threading
 import zipfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from types import FrameType
+from types import FrameType, SimpleNamespace
 from typing import Any
 
 from ledgermind_local.api.app import create_app
 from ledgermind_local.api.dependencies import Settings
 from ledgermind_local.bootstrap import (
-    _build_markdown_root,
-    _build_vector_store_root,
-    _build_vectorizer_factory,
+    build_core_projection_handlers,
     build_projection_names,
     build_round_processing_worker,
     initialize_local_layout,
 )
 from ledgermind_local.config import LocalConfig
+from ledgermind_local.core_gateway import ProcessCoreGateway
+from ledgermind_local.core_gateway.doctor import build_core_doctor_report
+from ledgermind_local.core_gateway.signing import verify_core_binary
+from ledgermind_local.core_gateway.supervisor import CoreSupervisor
 from ledgermind_local.diagnostics.integrity import run_database_integrity_checks
-from ledgermind_local.paths import ServicePaths
-from ledgermind_local.persistence import migrations, open_sqlite_connection
-from ledgermind_local.projections import (
-    KnowledgeFTSProjection,
-    KnowledgeMarkdownGitAuditProjection,
-    KnowledgeMarkdownProjection,
-    KnowledgeVectorProjection,
-    ProjectionDispatcher,
-    _ProjectionHandler,
+from ledgermind_local.inference import (
+    InferenceBroker,
+    InferenceProfile,
+    InferenceProfileStore,
+    SecretStore,
 )
-from ledgermind_local.scheduler import OutboxWorker, ProcessingWorkerLoop
+from ledgermind_local.paths import ServicePaths
+from ledgermind_local.persistence import open_sqlite_connection
+from ledgermind_local.persistence import rounds_migrations as migrations
+from ledgermind_local.scheduler import (
+    CoreCommandWorker,
+    CoreModelTaskWorker,
+    CoreProjectionWorker,
+    ProcessingWorkerLoop,
+)
 from ledgermind_local.service_lock import ServiceLock, ServiceLockError
 
-OUTBOX_WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
-class _NoopProjectionHandler:
-    def __init__(self, projection_name: str):
-        self.projection_name = projection_name
-
-    def handle_event(
-        self,
-        *,
-        event_type: str,
-        memory_space_id: str,
-        aggregate_id: str,
-        payload_json: str | None = None,
-    ) -> bool:
-        del event_type
-        del memory_space_id
-        del aggregate_id
-        del payload_json
-        return False
+def _build_core_gateway(*, paths: ServicePaths, config: LocalConfig) -> Any:
+    command_path = paths.resolve_core_path(config.core_binary_path)
+    signature_path = paths.resolve_core_path(config.core_signature_path)
+    public_key_path = paths.resolve_core_path(config.core_public_key_path)
+    knowledge_database_path = paths.resolve_knowledge_database_path(
+        config.knowledge_database_path
+    )
+    paths.core_data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if config.verify_core_signature:
+        verify_core_binary(
+            command_path,
+            signature_path=signature_path,
+            public_key_path=public_key_path,
+        )
+    supervisor = CoreSupervisor(
+        [str(command_path), "--database", str(knowledge_database_path)],
+        startup_timeout_seconds=config.core_startup_timeout_seconds,
+        operation_timeout_seconds=config.core_request_timeout_seconds,
+        core_data_dir=paths.core_data_dir,
+        blocked_data_dirs=(paths.home,),
+        require_network_isolation=config.require_core_network_isolation,
+    )
+    return ProcessCoreGateway(supervisor)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -73,7 +86,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = subparsers.add_parser("init", help="Initialize local storage directory")
+    init_parser = subparsers.add_parser(
+        "init", help="Initialize local storage directory"
+    )
     init_parser.add_argument(
         "--force",
         action="store_true",
@@ -103,7 +118,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.set_defaults(func=_command_serve)
 
-    status_parser = subparsers.add_parser("status", help="Print configured service state")
+    status_parser = subparsers.add_parser(
+        "status", help="Print configured service state"
+    )
     status_parser.set_defaults(func=_command_status)
 
     doctor_parser = subparsers.add_parser(
@@ -115,12 +132,24 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="SQLite database file to check; defaults to ledgermind.db from --home",
     )
-    doctor_parser.add_argument(
-        "--allow-orphan-atoms",
-        choices=("migration", "inactive"),
-        help="Documented reason to allow atoms without evidence",
-    )
     doctor_parser.set_defaults(func=_command_doctor)
+
+    core_parser = subparsers.add_parser("core", help="Rust Core operations")
+    core_subparsers = core_parser.add_subparsers(
+        dest="core_command",
+        required=True,
+    )
+    core_doctor_parser = core_subparsers.add_parser(
+        "doctor",
+        help="Verify the Core binary and print secret-safe runtime diagnostics",
+    )
+    core_doctor_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        help="Print machine-readable diagnostics",
+    )
+    core_doctor_parser.set_defaults(func=_command_core_doctor)
 
     rotate_token_parser = subparsers.add_parser(
         "rotate-token",
@@ -129,7 +158,9 @@ def _build_parser() -> argparse.ArgumentParser:
     rotate_token_parser.set_defaults(func=_command_rotate_token)
 
     backup_parser = subparsers.add_parser("backup", help="Backup operations")
-    backup_subparsers = backup_parser.add_subparsers(dest="backup_command", required=True)
+    backup_subparsers = backup_parser.add_subparsers(
+        dest="backup_command", required=True
+    )
     backup_create_parser = backup_subparsers.add_parser(
         "create",
         help="Create a local backup archive",
@@ -158,17 +189,97 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     backup_restore_parser.set_defaults(func=_command_backup_restore)
 
-    rebuild_parser = subparsers.add_parser(
-        "rebuild-projections",
-        help="Rebuild derivative projections from canonical data",
+    profiles_parser = subparsers.add_parser(
+        "profiles",
+        help="Manage Local-owned inference profiles and memory-space bindings",
     )
-    rebuild_parser.add_argument(
-        "--only",
-        action="append",
-        choices=("vector", "fts", "markdown", "markdown_audit"),
-        help="Projection names to rebuild (vector, fts, markdown, markdown_audit)",
+    profiles_subparsers = profiles_parser.add_subparsers(
+        dest="profiles_command",
+        required=True,
     )
-    rebuild_parser.set_defaults(func=_command_rebuild_projections)
+
+    profiles_list_parser = profiles_subparsers.add_parser(
+        "list",
+        help="List configured inference profiles",
+    )
+    profiles_list_parser.add_argument(
+        "--enabled-only",
+        action="store_true",
+        help="Only include enabled profiles",
+    )
+    profiles_list_parser.set_defaults(func=_command_profiles_list)
+
+    profiles_add_parser = profiles_subparsers.add_parser(
+        "add",
+        help="Create or update an inference profile",
+    )
+    profiles_add_parser.add_argument("--id", dest="profile_id", required=True)
+    profiles_add_parser.add_argument(
+        "--provider",
+        dest="provider_kind",
+        choices=("openai_compatible",),
+        default="openai_compatible",
+    )
+    profiles_add_parser.add_argument("--base-url", required=True)
+    profiles_add_parser.add_argument("--model", required=True)
+    profiles_add_parser.add_argument("--secret-ref", required=True)
+    profiles_add_parser.add_argument("--timeout-seconds", type=float, default=60.0)
+    profiles_add_parser.add_argument("--max-retries", type=int, default=2)
+    profiles_add_parser.add_argument("--max-input-tokens", type=int, default=12_000)
+    profiles_add_parser.add_argument("--max-output-tokens", type=int, default=2_000)
+    profiles_add_parser.add_argument("--disabled", action="store_true")
+    profiles_add_parser.set_defaults(func=_command_profiles_add)
+
+    profiles_remove_parser = profiles_subparsers.add_parser(
+        "remove",
+        help="Remove an inference profile",
+    )
+    profiles_remove_parser.add_argument("--id", dest="profile_id", required=True)
+    profiles_remove_parser.set_defaults(func=_command_profiles_remove)
+
+    profiles_bind_parser = profiles_subparsers.add_parser(
+        "bind",
+        help="Bind inference profiles to a memory space",
+    )
+    profiles_bind_parser.add_argument("--memory-space-id", required=True)
+    profiles_bind_parser.add_argument("--hypothesis-profile")
+    profiles_bind_parser.add_argument("--merge-profile")
+    profiles_bind_parser.set_defaults(func=_command_profiles_bind)
+
+    secrets_parser = subparsers.add_parser(
+        "secrets",
+        help="Manage Local-owned provider secrets without exposing values",
+    )
+    secrets_subparsers = secrets_parser.add_subparsers(
+        dest="secrets_command",
+        required=True,
+    )
+
+    secrets_set_parser = secrets_subparsers.add_parser(
+        "set",
+        help="Read one secret value from stdin and store it by reference",
+    )
+    secrets_set_parser.add_argument("--ref", dest="secret_ref", required=True)
+    secrets_set_parser.add_argument(
+        "--value-stdin",
+        action="store_true",
+        required=True,
+        help="Read the secret value from stdin; never pass it as an argument",
+    )
+    secrets_set_parser.set_defaults(func=_command_secrets_set)
+
+    secrets_list_parser = secrets_subparsers.add_parser(
+        "list",
+        help="List secret references without values",
+    )
+    secrets_list_parser.set_defaults(func=_command_secrets_list)
+
+    secrets_delete_parser = secrets_subparsers.add_parser(
+        "delete",
+        help="Delete a secret by reference",
+    )
+    secrets_delete_parser.add_argument("--ref", dest="secret_ref", required=True)
+    secrets_delete_parser.set_defaults(func=_command_secrets_delete)
 
     return parser
 
@@ -188,23 +299,158 @@ def _command_init(args: argparse.Namespace) -> int:
     print(f"initialized {paths.home}")
     print(f"config: {paths.config_file}")
     print(f"token file: {paths.token_file}")
-    print(f"database: {paths.resolve_database_path(config.database_path)}")
+    print(
+        f"database: {paths.resolve_rounds_database_path(config.rounds_database_path)}"
+    )
     print(f"logs: {paths.logs_dir}")
     if not token:
         raise RuntimeError("token must be generated or loaded")
     return 0
 
 
+def _open_profile_store(
+    args: argparse.Namespace,
+) -> tuple[ServicePaths, sqlite3.Connection, InferenceProfileStore]:
+    paths, config, _ = initialize_local_layout(home=Path(args.home).expanduser())
+    database_path = paths.resolve_rounds_database_path(config.rounds_database_path)
+    connection = open_sqlite_connection(database_path)
+    migrations.apply_migrations(connection)
+    return paths, connection, InferenceProfileStore(connection)
+
+
+def _command_profiles_list(args: argparse.Namespace) -> int:
+    _, connection, store = _open_profile_store(args)
+    try:
+        profiles = store.list(enabled_only=bool(args.enabled_only))
+        print(
+            json.dumps(
+                [profile.model_dump(mode="json") for profile in profiles],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
+    finally:
+        connection.close()
+
+
+def _command_profiles_add(args: argparse.Namespace) -> int:
+    _, connection, store = _open_profile_store(args)
+    try:
+        profile = InferenceProfile(
+            profile_id=args.profile_id,
+            provider_kind=args.provider_kind,
+            base_url=args.base_url,
+            model=args.model,
+            secret_ref=args.secret_ref,
+            timeout_seconds=args.timeout_seconds,
+            max_retries=args.max_retries,
+            max_input_tokens=args.max_input_tokens,
+            max_output_tokens=args.max_output_tokens,
+            enabled=not bool(args.disabled),
+        )
+        store.upsert(profile)
+        connection.commit()
+        print(f"profile saved: {profile.profile_id} (secret_ref={profile.secret_ref})")
+        return 0
+    except ValueError as exc:
+        connection.rollback()
+        print(f"invalid profile: {exc}")
+        return 2
+    finally:
+        connection.close()
+
+
+def _command_profiles_remove(args: argparse.Namespace) -> int:
+    _, connection, store = _open_profile_store(args)
+    try:
+        try:
+            removed = store.remove(args.profile_id)
+            if not removed:
+                print(f"profile not found: {args.profile_id}")
+                return 1
+            connection.commit()
+        except sqlite3.IntegrityError:
+            connection.rollback()
+            print("profile is still bound to a memory space")
+            return 2
+        print(f"profile removed: {args.profile_id}")
+        return 0
+    finally:
+        connection.close()
+
+
+def _command_profiles_bind(args: argparse.Namespace) -> int:
+    if args.hypothesis_profile is None and args.merge_profile is None:
+        print("at least one profile binding is required")
+        return 2
+    _, connection, store = _open_profile_store(args)
+    try:
+        try:
+            store.bind(
+                args.memory_space_id,
+                hypothesis_profile_id=args.hypothesis_profile,
+                merge_profile_id=args.merge_profile,
+            )
+            connection.commit()
+        except sqlite3.IntegrityError:
+            connection.rollback()
+            print("invalid memory space or profile binding")
+            return 2
+        print(f"profiles bound: {args.memory_space_id}")
+        return 0
+    finally:
+        connection.close()
+
+
+def _open_secret_store(args: argparse.Namespace) -> SecretStore:
+    paths, config, _ = initialize_local_layout(home=Path(args.home).expanduser())
+    return SecretStore(paths.resolve_home_path(config.inference_secrets_path))
+
+
+def _command_secrets_set(args: argparse.Namespace) -> int:
+    store = _open_secret_store(args)
+    value = sys.stdin.read().rstrip("\r\n")
+    try:
+        store.put(args.secret_ref, value)
+    except (RuntimeError, ValueError) as exc:
+        print(f"invalid secret: {exc}")
+        return 2
+    print(f"secret saved: {args.secret_ref}")
+    return 0
+
+
+def _command_secrets_list(args: argparse.Namespace) -> int:
+    store = _open_secret_store(args)
+    print(json.dumps(store.list_refs(), ensure_ascii=False))
+    return 0
+
+
+def _command_secrets_delete(args: argparse.Namespace) -> int:
+    store = _open_secret_store(args)
+    try:
+        removed = store.delete(args.secret_ref)
+    except (RuntimeError, ValueError) as exc:
+        print(f"invalid secret reference: {exc}")
+        return 2
+    if not removed:
+        print(f"secret not found: {args.secret_ref}")
+        return 1
+    print(f"secret deleted: {args.secret_ref}")
+    return 0
+
 
 def _command_serve(args: argparse.Namespace) -> int:
     paths, config, token = initialize_local_layout(home=Path(args.home).expanduser())
-    database_path = paths.resolve_database_path(config.database_path)
+    database_path = paths.resolve_rounds_database_path(config.rounds_database_path)
     bind_host = _coalesce_optional(args.host, config.bind_host)
     bind_port = _coalesce_optional(args.port, config.bind_port)
     if token is None:
         print("api token not configured")
         return 2
-    if not _assert_bind_host_allowed(str(bind_host), allow_remote_bind=config.allow_remote_bind):
+    if not _assert_bind_host_allowed(
+        str(bind_host), allow_remote_bind=config.allow_remote_bind
+    ):
         return 2
 
     try:
@@ -216,29 +462,92 @@ def _command_serve(args: argparse.Namespace) -> int:
                         return 1
 
                     projection_names = build_projection_names(config)
-                    outbox_worker = _build_outbox_worker(
-                        database_path=database_path,
-                        projection_names=projection_names,
-                        config=config,
-                        projection_poll_interval_seconds=config.projection_poll_interval_seconds,
-                    )
-                    outbox_thread: threading.Thread | None = None
-                    if outbox_worker is not None:
-                        outbox_thread = threading.Thread(
-                            target=outbox_worker.run,
-                            name="ledgermind-outbox-worker",
-                        )
-                        outbox_thread.start()
-
-                    processing_loop: ProcessingWorkerLoop | None = None
-                    processing_thread: threading.Thread | None = None
+                    processing_worker = None
+                    core_command_worker = None
+                    core_gateway = None
+                    core_projection_worker = None
+                    core_model_task_worker = None
+                    if config.processing_enabled or config.core_backend == "process":
+                        core_gateway = _build_core_gateway(paths=paths, config=config)
                     if config.processing_enabled:
+                        if config.hypothesis_profile_id is None:
+                            print("processing_enabled requires hypothesis_profile_id")
+                            return 2
                         processing_worker = build_round_processing_worker(
                             database_path=database_path,
+                            hypothesis_profile_id=config.hypothesis_profile_id,
+                            secrets_path=paths.resolve_home_path(
+                                config.inference_secrets_path
+                            ),
                             worker_id=f"processing:{os.getpid()}",
                             max_attempts=config.processing_max_attempts,
                             retry_delay_seconds=config.processing_retry_delay_seconds,
+                            lease_seconds=config.processing_lease_seconds,
+                            heartbeat_interval_seconds=config.processing_heartbeat_interval_seconds,
                         )
+                        assert core_gateway is not None
+                        core_command_worker = CoreCommandWorker(
+                            database_path=database_path,
+                            gateway=core_gateway,
+                            worker_id=f"core-command:{os.getpid()}",
+                            max_attempts=config.processing_max_attempts,
+                            retry_delay_seconds=config.processing_retry_delay_seconds,
+                            lease_seconds=config.processing_lease_seconds,
+                        )
+                    if config.core_backend == "process":
+                        assert core_gateway is not None
+                        core_projection_worker = CoreProjectionWorker(
+                            database_path=database_path,
+                            gateway=core_gateway,
+                            consumer_id="local-projections",
+                            handlers_factory=lambda connection: build_core_projection_handlers(
+                                connection=connection,
+                                database_path=database_path,
+                                config=config,
+                            ),
+                        )
+                        core_model_task_worker = CoreModelTaskWorker(
+                            database_path=database_path,
+                            gateway=core_gateway,
+                            broker=InferenceBroker(
+                                database_path=database_path,
+                                secret_store=SecretStore(
+                                    paths.resolve_home_path(config.inference_secrets_path)
+                                ),
+                            ),
+                            worker_id="local-model-tasks",
+                            lease_seconds=int(config.processing_lease_seconds),
+                        )
+                    core_projection_loop: ProcessingWorkerLoop | None = None
+                    core_projection_thread: threading.Thread | None = None
+                    core_model_task_loop: ProcessingWorkerLoop | None = None
+                    core_model_task_thread: threading.Thread | None = None
+                    if core_projection_worker is not None:
+                        core_projection_loop = ProcessingWorkerLoop(
+                            core_projection_worker,
+                            poll_interval_seconds=config.projection_poll_interval_seconds,
+                        )
+                        core_projection_thread = threading.Thread(
+                            target=core_projection_loop.run,
+                            name="ledgermind-core-projection-worker",
+                        )
+                        core_projection_thread.start()
+                    if core_model_task_worker is not None:
+                        core_model_task_loop = ProcessingWorkerLoop(
+                            core_model_task_worker,
+                            poll_interval_seconds=config.processing_poll_interval_seconds,
+                        )
+                        core_model_task_thread = threading.Thread(
+                            target=core_model_task_loop.run,
+                            name="ledgermind-core-model-task-worker",
+                        )
+                        core_model_task_thread.start()
+
+                    processing_loop: ProcessingWorkerLoop | None = None
+                    processing_thread: threading.Thread | None = None
+                    core_command_loop: ProcessingWorkerLoop | None = None
+                    core_command_thread: threading.Thread | None = None
+                    if processing_worker is not None:
                         processing_loop = ProcessingWorkerLoop(
                             processing_worker,
                             poll_interval_seconds=config.processing_poll_interval_seconds,
@@ -248,19 +557,29 @@ def _command_serve(args: argparse.Namespace) -> int:
                             name="ledgermind-round-processing-worker",
                         )
                         processing_thread.start()
+                    if core_command_worker is not None:
+                        core_command_loop = ProcessingWorkerLoop(
+                            core_command_worker,
+                            poll_interval_seconds=config.processing_poll_interval_seconds,
+                        )
+                        core_command_thread = threading.Thread(
+                            target=core_command_loop.run,
+                            name="ledgermind-core-command-worker",
+                        )
+                        core_command_thread.start()
 
                     run_result = 1
                     _write_pid_file(paths.service_pid_file, os.getpid())
                     try:
                         settings = Settings(
-                            database_path=database_path,
+                            rounds_database_path=database_path,
                             api_token=token,
                             service_lock_path=paths.service_lock_file,
-                            max_raw_round_bytes=config.raw_round_max_bytes,
+                            max_raw_round_bytes=config.max_raw_round_bytes,
                             raw_round_retention_days=config.raw_round_retention_days,
                         )
                         app = create_app(
-                            application=object(),  # type: ignore[arg-type]
+                            application=SimpleNamespace(core_gateway=core_gateway),
                             settings=settings,
                             projection_names=projection_names,
                         )
@@ -273,27 +592,51 @@ def _command_serve(args: argparse.Namespace) -> int:
                         run_result = _run_uvicorn_server(
                             server,
                             on_terminate=lambda: _request_worker_stops(
-                                outbox_worker=outbox_worker,
+                                core_projection_loop=core_projection_loop,
+                                core_model_task_loop=core_model_task_loop,
                                 processing_loop=processing_loop,
+                                core_command_loop=core_command_loop,
                             ),
                         )
                     finally:
-                        worker_stopped = _stop_outbox_worker(
-                            worker=outbox_worker,
-                            worker_thread=outbox_thread,
+                        core_projection_stopped = _stop_processing_worker(
+                            loop=core_projection_loop,
+                            worker_thread=core_projection_thread,
                         )
-                        if outbox_worker is not None and not worker_stopped:
-                            print("failed to stop projection worker within timeout")
+                        if not core_projection_stopped:
+                            print("failed to stop Core projection worker within timeout")
                             run_result = 1
-                        if outbox_worker is not None:
-                            outbox_worker.close()
+                        if core_projection_worker is not None:
+                            core_projection_worker.close()
+                        core_model_task_stopped = _stop_processing_worker(
+                            loop=core_model_task_loop,
+                            worker_thread=core_model_task_thread,
+                        )
+                        if not core_model_task_stopped:
+                            print("failed to stop Core model task worker within timeout")
+                            run_result = 1
+                        if core_model_task_worker is not None:
+                            core_model_task_worker.close()
                         processing_stopped = _stop_processing_worker(
                             loop=processing_loop,
                             worker_thread=processing_thread,
                         )
                         if not processing_stopped:
-                            print("failed to stop round processing worker within timeout")
+                            print(
+                                "failed to stop round processing worker within timeout"
+                            )
                             run_result = 1
+                        core_command_stopped = _stop_processing_worker(
+                            loop=core_command_loop,
+                            worker_thread=core_command_thread,
+                        )
+                        if not core_command_stopped:
+                            print("failed to stop Core command worker within timeout")
+                            run_result = 1
+                        if core_gateway is not None:
+                            close_gateway = getattr(core_gateway, "close", None)
+                            if callable(close_gateway):
+                                close_gateway()
                         _checkpoint_wal_passive(connection)
                         _remove_pid_file(paths.service_pid_file)
                     return run_result
@@ -305,117 +648,21 @@ def _command_serve(args: argparse.Namespace) -> int:
         return 1
 
 
-def _build_projection_handlers(
-    *,
-    connection: object,
-    database_path: str | Path,
-    projection_names: tuple[str, ...],
-    config: LocalConfig,
-) -> dict[str, _ProjectionHandler]:
-    if not hasattr(connection, "execute"):
-        return {}
-
-    handlers: dict[str, _ProjectionHandler] = {}
-    database_path = Path(database_path)
-
-    if "projections.search" in projection_names:
-        handlers["projections.search"] = KnowledgeFTSProjection(connection=connection)  # type: ignore[arg-type]
-
-    if "projections.knowledge" in projection_names:
-        vectorizer_factory = _build_vectorizer_factory()
-        if vectorizer_factory is None:
-            handlers["projections.knowledge"] = _NoopProjectionHandler(
-                projection_name="projections.knowledge",
-            )
-        else:
-            handlers["projections.knowledge"] = KnowledgeVectorProjection(
-                connection=connection,  # type: ignore[arg-type]
-                vector_store_root=_build_vector_store_root(database_path),
-                vectorizer_factory=vectorizer_factory,
-            )
-
-    if "projections.markdown" in projection_names:
-        handlers["projections.markdown"] = KnowledgeMarkdownProjection(
-            connection=connection,
-            markdown_root=_build_markdown_root(database_path),
-        )
-
-    if "projections.markdown_audit" in projection_names:
-        handlers["projections.markdown_audit"] = KnowledgeMarkdownGitAuditProjection(
-            markdown_root=_build_markdown_root(database_path),
-            enabled=bool(config.markdown_audit_enabled),
-        )
-
-    return handlers
-
-
-def _build_outbox_worker(
-    *,
-    database_path: str | Path,
-    projection_names: tuple[str, ...],
-    config: LocalConfig,
-    projection_poll_interval_seconds: float,
-) -> OutboxWorker | None:
-    projection_connection = open_sqlite_connection(database_path)
-    try:
-        handlers = _build_projection_handlers(
-            connection=projection_connection,
-            database_path=database_path,
-            projection_names=projection_names,
-            config=config,
-        )
-        if not handlers:
-            _close_projection_connection(projection_connection)
-            return None
-
-        dispatcher = ProjectionDispatcher(handlers)
-        return OutboxWorker(
-            database_path=database_path,
-            dispatcher=dispatcher,
-            worker_id=f"serve:{os.getpid()}",
-            poll_interval_seconds=projection_poll_interval_seconds,
-            close_callback=lambda: _close_projection_connection(projection_connection),
-        )
-    except Exception:
-        _close_projection_connection(projection_connection)
-        raise
-
-
-def _close_projection_handlers(handlers: Mapping[str, object]) -> None:
-    for handler in handlers.values():
-        close_handler = getattr(handler, "close", None)
-        if callable(close_handler):
-            close_handler()
-
-
-def _close_projection_connection(connection: object) -> None:
-    close_connection = getattr(connection, "close", None)
-    if callable(close_connection):
-        close_connection()
-
-
 def _request_worker_stops(
     *,
-    outbox_worker: OutboxWorker | None,
+    core_projection_loop: ProcessingWorkerLoop | None,
+    core_model_task_loop: ProcessingWorkerLoop | None,
     processing_loop: ProcessingWorkerLoop | None,
+    core_command_loop: ProcessingWorkerLoop | None,
 ) -> None:
-    if outbox_worker is not None:
-        outbox_worker.request_stop()
+    if core_projection_loop is not None:
+        core_projection_loop.request_stop()
+    if core_model_task_loop is not None:
+        core_model_task_loop.request_stop()
     if processing_loop is not None:
         processing_loop.request_stop()
-
-
-def _stop_outbox_worker(
-    *,
-    worker: OutboxWorker | None,
-    worker_thread: threading.Thread | None,
-) -> bool:
-    if worker is None or worker_thread is None:
-        return True
-
-    worker.request_stop()
-    worker_thread.join(OUTBOX_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
-    return not worker_thread.is_alive()
+    if core_command_loop is not None:
+        core_command_loop.request_stop()
 
 
 def _stop_processing_worker(
@@ -426,7 +673,7 @@ def _stop_processing_worker(
     if loop is None or worker_thread is None:
         return True
     loop.request_stop()
-    worker_thread.join(OUTBOX_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+    worker_thread.join(WORKER_SHUTDOWN_TIMEOUT_SECONDS)
     return not worker_thread.is_alive()
 
 
@@ -481,7 +728,7 @@ def _assert_bind_host_allowed(bind_host: str, *, allow_remote_bind: bool) -> boo
 
 
 def _build_uvicorn_server(
-    app: object,
+    app: Any,
     *,
     host: str,
     port: int,
@@ -490,7 +737,7 @@ def _build_uvicorn_server(
     import uvicorn
 
     config = uvicorn.Config(
-        app=app,  # type: ignore[arg-type]
+        app=app,
         host=host,
         port=port,
         reload=reload,
@@ -504,7 +751,9 @@ def _install_signal_handlers(
     *,
     on_terminate: Callable[[], None] | None = None,
 ) -> dict[int, Callable[[int, FrameType | None], Any] | int | signal.Handlers | None]:
-    previous: dict[int, Callable[[int, FrameType | None], Any] | int | signal.Handlers | None] = {}
+    previous: dict[
+        int, Callable[[int, FrameType | None], Any] | int | signal.Handlers | None
+    ] = {}
 
     def _handle(_signal: int, _frame: FrameType | None) -> None:
         server.should_exit = True  # type: ignore[attr-defined]
@@ -519,7 +768,9 @@ def _install_signal_handlers(
 
 
 def _restore_signal_handlers(
-    previous: dict[int, Callable[[int, FrameType | None], Any] | int | signal.Handlers | None],
+    previous: dict[
+        int, Callable[[int, FrameType | None], Any] | int | signal.Handlers | None
+    ],
 ) -> None:
     for signum, handler in previous.items():
         signal.signal(signum, handler)
@@ -551,12 +802,16 @@ def _remove_pid_file(pid_file: Path) -> None:
 def _command_status(args: argparse.Namespace) -> int:
     try:
         paths = ServicePaths(home=Path(args.home).expanduser())
-        database_exists = paths.database_file.exists()
+        database_exists = paths.rounds_database_file.exists()
         config_exists = paths.config_file.exists()
         token_exists = paths.token_file.exists()
         print(f"service home: {paths.home}")
-        print(f"database: {paths.database_file} ({'present' if database_exists else 'missing'})")
-        print(f"config: {paths.config_file} ({'present' if config_exists else 'missing'})")
+        print(
+            f"database: {paths.rounds_database_file} ({'present' if database_exists else 'missing'})"
+        )
+        print(
+            f"config: {paths.config_file} ({'present' if config_exists else 'missing'})"
+        )
         print(f"token: {paths.token_file} ({'present' if token_exists else 'missing'})")
         if not (database_exists and config_exists and token_exists):
             print("service layout is incomplete")
@@ -570,7 +825,9 @@ def _command_status(args: argparse.Namespace) -> int:
 def _command_doctor(args: argparse.Namespace) -> int:
     home = Path(args.home).expanduser()
     paths = ServicePaths(home=home)
-    database = args.database if args.database is not None else paths.database_file
+    database = (
+        args.database if args.database is not None else paths.rounds_database_file
+    )
     database = Path(database).expanduser()
 
     try:
@@ -580,10 +837,7 @@ def _command_doctor(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        issues = run_database_integrity_checks(
-            connection,
-            allow_orphan_atoms_reason=args.allow_orphan_atoms,
-        )
+        issues = run_database_integrity_checks(connection)
     finally:
         connection.close()
 
@@ -595,6 +849,54 @@ def _command_doctor(args: argparse.Namespace) -> int:
 
     print("database integrity checks passed")
     return 0
+
+
+def _command_core_doctor(args: argparse.Namespace) -> int:
+    paths = ServicePaths(home=Path(args.home).expanduser())
+    try:
+        if not paths.config_file.is_file():
+            raise FileNotFoundError("Local config is missing")
+        config = LocalConfig.from_file(paths.config_file)
+        report = build_core_doctor_report(paths=paths, config=config)
+    except Exception:  # noqa: BLE001
+        report = {
+            "ok": False,
+            "error": "unable to load Core diagnostics configuration",
+        }
+
+    if bool(args.json_output):
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    else:
+        _print_core_doctor_report(report)
+    return 0 if report.get("ok") is True else 1
+
+
+def _print_core_doctor_report(report: dict[str, Any]) -> None:
+    print(f"core doctor: {'PASS' if report.get('ok') else 'FAIL'}")
+    if "error" in report:
+        print(f"error: {report['error']}")
+        return
+    binary = report["binary"]
+    signature = report["signature"]
+    sandbox = report["sandbox"]
+    health = report["health"]
+    environment = report["environment"]
+    print(f"binary: {binary['path']} ({'present' if binary['present'] else 'missing'})")
+    print(f"version: {report.get('version') or 'unavailable'}")
+    print(f"sha256: {binary['sha256'] or 'unavailable'}")
+    print(f"signature: {signature['status']}")
+    print(f"sandbox: {sandbox['level']} ({sandbox['detail']})")
+    print(
+        "health: "
+        f"{'healthy' if health['healthy'] else 'unhealthy'} "
+        f"protocol={health['protocol_version'] or 'unavailable'} "
+        f"schema={health['schema_version'] or 'unavailable'}"
+    )
+    print(f"environment keys: {', '.join(environment['keys']) or 'none'}")
+    print(
+        "secret-like environment keys: "
+        f"{', '.join(environment['secret_like_keys']) or 'none'}"
+    )
 
 
 def _command_rotate_token(args: argparse.Namespace) -> int:
@@ -618,12 +920,17 @@ def _command_rotate_token(args: argparse.Namespace) -> int:
 
 def _command_backup_create(args: argparse.Namespace) -> int:
     try:
-        paths, config, _token = initialize_local_layout(home=Path(args.home).expanduser())
+        paths, config, _token = initialize_local_layout(
+            home=Path(args.home).expanduser()
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"failed to resolve service paths: {exc}")
         return 1
 
-    database_path = paths.resolve_database_path(config.database_path)
+    database_path = paths.resolve_rounds_database_path(config.rounds_database_path)
+    knowledge_database_path = paths.resolve_knowledge_database_path(
+        config.knowledge_database_path
+    )
     if not database_path.exists():
         print(f"database file not found: {database_path}")
         return 1
@@ -638,20 +945,34 @@ def _command_backup_create(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory() as staging:
         staging_root = Path(staging)
         snapshot = staging_root / database_path.name
+        knowledge_snapshot = staging_root / knowledge_database_path.name
         manifest = staging_root / "backup_manifest.json"
         try:
             _create_sqlite_backup_copy(source=database_path, target=snapshot)
+            if knowledge_database_path.exists():
+                shutil.copy2(knowledge_database_path, knowledge_snapshot)
             manifest_payload = _build_backup_manifest(
                 database_path=database_path,
+                knowledge_database_path=knowledge_database_path,
                 config_file=paths.config_file,
             )
             manifest.write_text(manifest_payload, encoding="utf-8")
-            with zipfile.ZipFile(backup_base, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(
+                backup_base, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
                 _add_to_archive(archive, paths.config_file, paths.home)
                 _add_to_archive(archive, paths.token_file, paths.home)
                 _add_to_archive_with_name(archive, snapshot, database_path.name)
-                _add_to_archive(archive, database_path.with_suffix(".markdown"), paths.home)
-                _add_to_archive(archive, database_path.with_suffix(".vectors"), paths.home)
+                if knowledge_snapshot.exists():
+                    _add_to_archive_with_name(
+                        archive, knowledge_snapshot, knowledge_database_path.name
+                    )
+                _add_to_archive(
+                    archive, database_path.with_suffix(".markdown"), paths.home
+                )
+                _add_to_archive(
+                    archive, database_path.with_suffix(".vectors"), paths.home
+                )
                 _add_to_archive_with_name(archive, manifest, "backup_manifest.json")
         except Exception as exc:  # noqa: BLE001
             print(f"failed to create backup archive: {exc}")
@@ -663,7 +984,9 @@ def _command_backup_create(args: argparse.Namespace) -> int:
 
 def _command_backup_restore(args: argparse.Namespace) -> int:
     try:
-        paths, config, _token = initialize_local_layout(home=Path(args.home).expanduser())
+        paths, config, _token = initialize_local_layout(
+            home=Path(args.home).expanduser()
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"failed to resolve service paths: {exc}")
         return 1
@@ -676,9 +999,15 @@ def _command_backup_restore(args: argparse.Namespace) -> int:
     target_database = (
         Path(args.database).expanduser()
         if args.database is not None
-        else paths.resolve_database_path(config.database_path)
+        else paths.resolve_rounds_database_path(config.rounds_database_path)
     )
-    database_archive_name = paths.resolve_database_path(config.database_path).name
+    target_knowledge_database = paths.resolve_knowledge_database_path(
+        config.knowledge_database_path
+    )
+    database_archive_name = paths.resolve_rounds_database_path(
+        config.rounds_database_path
+    ).name
+    knowledge_archive_name = target_knowledge_database.name
 
     with tempfile.TemporaryDirectory() as staging:
         staging_root = Path(staging)
@@ -693,13 +1022,14 @@ def _command_backup_restore(args: argparse.Namespace) -> int:
                     archive=archive,
                     member_prefixes=(
                         database_archive_name,
+                        knowledge_archive_name,
                         "config.json",
                         "server.token",
                         "backup_manifest.json",
-                        f"{paths.resolve_database_path(config.database_path).with_suffix('.markdown').name}",
-                        f"{paths.resolve_database_path(config.database_path).with_suffix('.vectors').name}",
+                        f"{paths.resolve_rounds_database_path(config.rounds_database_path).with_suffix('.markdown').name}",
+                        f"{paths.resolve_rounds_database_path(config.rounds_database_path).with_suffix('.vectors').name}",
                     ),
-                    )
+                )
                 for member in selected:
                     _safe_extract_zip_member(
                         archive=archive,
@@ -722,6 +1052,8 @@ def _command_backup_restore(args: argparse.Namespace) -> int:
             target_paths=paths,
             target_database=target_database,
             database_archive_name=database_archive_name,
+            target_knowledge_database=target_knowledge_database,
+            knowledge_archive_name=knowledge_archive_name,
         ):
             return 1
 
@@ -823,7 +1155,9 @@ def _assert_service_is_stopped(service_lock_path: Path) -> bool:
 
     owner_pid = int(data.get("pid", 0))
     if _is_process_running(owner_pid):
-        print(f"restore requires stopped service; lock is held by running pid {owner_pid}")
+        print(
+            f"restore requires stopped service; lock is held by running pid {owner_pid}"
+        )
         return False
 
     service_lock_path.unlink(missing_ok=True)
@@ -836,6 +1170,8 @@ def _restore_from_staging_path(
     target_paths: ServicePaths,
     target_database: Path,
     database_archive_name: str,
+    target_knowledge_database: Path,
+    knowledge_archive_name: str,
 ) -> bool:
     backup_database: Path | None = None
     staged_db = staging_root / database_archive_name
@@ -871,16 +1207,32 @@ def _restore_from_staging_path(
     if backup_database is not None and backup_database.exists():
         backup_database.unlink(missing_ok=True)
 
+    staged_knowledge = staging_root / knowledge_archive_name
+    if staged_knowledge.exists():
+        temporary_knowledge = target_knowledge_database.with_name(
+            f"{target_knowledge_database.name}.{os.getpid()}.restore-tmp"
+        )
+        try:
+            target_knowledge_database.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(staged_knowledge, temporary_knowledge)
+            os.replace(temporary_knowledge, target_knowledge_database)
+        except Exception as exc:  # noqa: BLE001
+            temporary_knowledge.unlink(missing_ok=True)
+            print(f"failed to restore Core knowledge artifact: {exc}")
+            return False
+
     optional_targets = (
         ("config.json", target_paths.config_file),
         ("server.token", target_paths.token_file),
         (
-            f"{target_paths.database_file.with_suffix('.markdown').name}",
-            target_paths.home / f"{target_paths.database_file.with_suffix('.markdown').name}",
+            f"{target_paths.rounds_database_file.with_suffix('.markdown').name}",
+            target_paths.home
+            / f"{target_paths.rounds_database_file.with_suffix('.markdown').name}",
         ),
         (
-            f"{target_paths.database_file.with_suffix('.vectors').name}",
-            target_paths.home / f"{target_paths.database_file.with_suffix('.vectors').name}",
+            f"{target_paths.rounds_database_file.with_suffix('.vectors').name}",
+            target_paths.home
+            / f"{target_paths.rounds_database_file.with_suffix('.vectors').name}",
         ),
     )
 
@@ -913,10 +1265,13 @@ def _create_sqlite_backup_copy(*, source: Path, target: Path) -> None:
         connection.close()
 
 
-def _build_backup_manifest(*, database_path: Path, config_file: Path) -> str:
+def _build_backup_manifest(
+    *, database_path: Path, knowledge_database_path: Path, config_file: Path
+) -> str:
     payload = {
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "database": str(database_path.name),
+        "knowledge_database": str(knowledge_database_path.name),
         "config_path": str(config_file.name),
         "tool": "ledgermind-local-backup",
     }
@@ -950,108 +1305,6 @@ def _add_to_archive_with_name(
     arcname: str,
 ) -> None:
     archive.write(source, arcname=arcname)
-
-
-def _command_rebuild_projections(args: argparse.Namespace) -> int:
-    paths, config, _token = initialize_local_layout(home=Path(args.home).expanduser())
-    database_path = paths.resolve_database_path(config.database_path)
-
-    connection = open_sqlite_connection(database_path)
-    try:
-        migrations.apply_migrations(connection)
-        connection.commit()
-    except Exception as exc:  # noqa: BLE001
-        print(f"failed to ensure database migrations: {exc}")
-        connection.close()
-        return 1
-
-    requested = set(getattr(args, "only", ()) or ("vector",))
-    supported = {"vector", "fts", "markdown", "markdown_audit"}
-    unknown = [item for item in requested if item not in supported]
-    if unknown:
-        print(f"unsupported projection(s) for rebuild: {', '.join(sorted(unknown))}")
-        connection.close()
-        return 2
-    if "markdown_audit" in requested and not config.markdown_audit_enabled:
-        print("markdown_audit projection is disabled in config")
-        connection.close()
-        return 2
-
-    projections_to_rebuild: list[tuple[str, Any]] = []
-
-    if "vector" in requested:
-        vectorizer_factory = _build_vectorizer_factory()
-        if vectorizer_factory is None:
-            print("vector projections require LEDGERMIND_VECTOR_MODEL_PATH")
-            connection.close()
-            return 2
-        projections_to_rebuild.append(
-            (
-                "vector",
-                KnowledgeVectorProjection(
-                    connection=connection,
-                    vector_store_root=_build_vector_store_root(database_path),
-                    vectorizer_factory=vectorizer_factory,
-                ),
-            )
-        )
-
-    if "fts" in requested:
-        projections_to_rebuild.append(
-            (
-                "fts",
-                KnowledgeFTSProjection(connection=connection),
-            )
-        )
-
-    if "markdown" in requested:
-        projections_to_rebuild.append(
-            (
-                "markdown",
-                KnowledgeMarkdownProjection(
-                    connection=connection,
-                    markdown_root=_build_markdown_root(database_path),
-                ),
-            )
-        )
-
-    if "markdown_audit" in requested:
-        projections_to_rebuild.append(
-            (
-                "markdown_audit",
-                KnowledgeMarkdownGitAuditProjection(
-                    markdown_root=_build_markdown_root(database_path),
-                    enabled=True,
-                ),
-            )
-        )
-
-    results: list[str] = []
-    success = False
-    try:
-        for projection_name, projection in projections_to_rebuild:
-            rebuilt = projection.rebuild()
-            results.append(f"{projection_name} projection rebuilt with {rebuilt} documents")
-        connection.commit()
-        success = True
-    except Exception as exc:  # noqa: BLE001
-        print(f"failed to rebuild projections: {exc}")
-        try:
-            connection.rollback()
-        except Exception as rollback_exc:  # noqa: BLE001
-            print(f"failed to rollback projection rebuild: {rollback_exc}")
-        return 1
-    finally:
-        for _, projection in projections_to_rebuild:
-            if hasattr(projection, "close"):
-                projection.close()
-        connection.close()
-
-    if not success:
-        return 1
-    for message in results:
-        print(message)
-    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

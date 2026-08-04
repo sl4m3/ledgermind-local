@@ -1,24 +1,27 @@
-"""SQLite FTS projection for knowledge search."""
+"""SQLite FTS projection for Rust Core knowledge events."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, ClassVar, cast
+from typing import ClassVar
 
-from ledgermind_core.ports import KnowledgeSearch, SearchHit
+from ledgermind_local.core_gateway.projection_contracts import (
+    CORE_PROJECTION_DELETE,
+    CORE_PROJECTION_UPSERT,
+    CoreProjectionEvent,
+    ProjectionDeletePayload,
+    ProjectionUpsertPayload,
+)
+from ledgermind_local.core_gateway.search_contracts import KnowledgeSearch, SearchHit
 
-__all__ = [
-    "KnowledgeFTSProjection",
-    "SQLiteKnowledgeSearchAdapter",
-]
-
+__all__ = ["KnowledgeFTSProjection", "SQLiteKnowledgeSearchAdapter"]
 
 _PROJECTION_NAME = "projections.search"
 _PROJECTION_VERSION = 1
+_FTS_TABLE = "core_knowledge_fts"
 
 
 class _SafeTokenizer:
@@ -31,9 +34,7 @@ class _SafeTokenizer:
         seen: set[str] = set()
         for token in cls._TOKEN_RE.findall(query):
             normalized = token.strip().lower()
-            if not normalized or normalized in cls._STOP_TOKENS:
-                continue
-            if normalized in seen:
+            if not normalized or normalized in cls._STOP_TOKENS or normalized in seen:
                 continue
             seen.add(normalized)
             tokens.append(normalized)
@@ -41,7 +42,7 @@ class _SafeTokenizer:
 
 
 class KnowledgeFTSProjection:
-    """Projector that maintains the ``knowledge_fts`` index from knowledge events."""
+    """Maintain the Local FTS projection from public Core payloads."""
 
     projection_name = _PROJECTION_NAME
     projection_version = _PROJECTION_VERSION
@@ -49,193 +50,88 @@ class KnowledgeFTSProjection:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
-    def _table_exists(self, table_name: str) -> bool:
+    def _table_exists(self) -> bool:
         row = self._connection.execute(
             """
-            SELECT 1
-            FROM sqlite_master
-            WHERE type IN ('table', 'view')
-              AND name = ?
-            LIMIT 1
+            SELECT 1 FROM sqlite_master
+            WHERE type IN ('table', 'view') AND name = ? LIMIT 1
             """,
-            (table_name,),
+            (_FTS_TABLE,),
         ).fetchone()
         return row is not None
 
-    def _load_knowledge(self, *, knowledge_id: str, memory_space_id: str) -> sqlite3.Row | None:
-        row = self._connection.execute(
-            """
-            SELECT
-                knowledge_id,
-                memory_space_id,
-                title,
-                target,
-                statement,
-                rationale,
-                superseded_by_id,
-                deleted_at
-            FROM knowledge_items
-            WHERE knowledge_id = ?
-              AND memory_space_id = ?
-            LIMIT 1
-            """,
-            (knowledge_id, memory_space_id),
-        ).fetchone()
-        return cast(sqlite3.Row | None, row)
+    def handle_core_event(self, event: CoreProjectionEvent) -> bool:
+        """Apply a Core event without reading canonical Core rows."""
 
-    def _knowledge_in_index(self, *, knowledge_id: str, memory_space_id: str) -> bool:
-        row = self._connection.execute(
-            """
-            SELECT 1
-            FROM knowledge_fts
-            WHERE knowledge_id = ?
-              AND memory_space_id = ?
-            LIMIT 1
-            """,
-            (knowledge_id, memory_space_id),
-        ).fetchone()
-        return row is not None
+        parsed = event.parse_payload()
+        if event.event_type == CORE_PROJECTION_UPSERT:
+            if not isinstance(parsed, ProjectionUpsertPayload):
+                raise TypeError("upsert event did not produce an upsert payload")
+            if not self._table_exists():
+                return False
+            with self._connection:
+                self._connection.execute(
+                    f"DELETE FROM {_FTS_TABLE} WHERE knowledge_id = ? AND memory_space_id = ?",
+                    (parsed.knowledge_id, parsed.memory_space_id),
+                )
+                self._connection.execute(
+                    f"""
+                    INSERT INTO {_FTS_TABLE} (
+                        knowledge_id, memory_space_id, title, target, statement
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        parsed.knowledge_id,
+                        parsed.memory_space_id,
+                        parsed.title,
+                        parsed.target,
+                        parsed.statement,
+                    ),
+                )
+            return True
 
-    def _remove(self, knowledge_id: str, memory_space_id: str) -> bool:
-        if not self._table_exists("knowledge_fts"):
-            return False
-        had_entry = self._knowledge_in_index(
-            knowledge_id=knowledge_id,
-            memory_space_id=memory_space_id,
-        )
-        self._connection.execute(
-            """
-            DELETE FROM knowledge_fts
-            WHERE knowledge_id = ?
-              AND memory_space_id = ?
-            """,
-            (knowledge_id, memory_space_id),
-        )
-        return had_entry
+        if event.event_type == CORE_PROJECTION_DELETE:
+            if not isinstance(parsed, ProjectionDeletePayload):
+                raise TypeError("delete event did not produce a delete payload")
+            if not self._table_exists():
+                return False
+            with self._connection:
+                row = self._connection.execute(
+                    f"""
+                    SELECT 1 FROM {_FTS_TABLE}
+                    WHERE knowledge_id = ? AND memory_space_id = ? LIMIT 1
+                    """,
+                    (parsed.knowledge_id, parsed.memory_space_id),
+                ).fetchone()
+                self._connection.execute(
+                    f"DELETE FROM {_FTS_TABLE} WHERE knowledge_id = ? AND memory_space_id = ?",
+                    (parsed.knowledge_id, parsed.memory_space_id),
+                )
+            return row is not None
 
-    def _upsert(self, knowledge_id: str, memory_space_id: str) -> bool:
-        if not self._table_exists("knowledge_fts"):
-            return False
-
-        row = self._load_knowledge(knowledge_id=knowledge_id, memory_space_id=memory_space_id)
-        if row is None:
-            return self._remove(knowledge_id=knowledge_id, memory_space_id=memory_space_id)
-
-        current = row["deleted_at"] is None and row["superseded_by_id"] is None
-        if not current:
-            return self._remove(knowledge_id=knowledge_id, memory_space_id=memory_space_id)
-
-        self._remove(knowledge_id=knowledge_id, memory_space_id=memory_space_id)
-        self._connection.execute(
-            """
-            INSERT INTO knowledge_fts (
-                knowledge_id,
-                memory_space_id,
-                title,
-                target,
-                statement,
-                rationale
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                row["knowledge_id"],
-                row["memory_space_id"],
-                row["title"],
-                row["target"],
-                row["statement"],
-                row["rationale"],
-            ),
-        )
-        return True
+        raise ValueError(f"unsupported Core projection event type: {event.event_type}")
 
     @staticmethod
-    def _coerce_string(value: Any) -> str | None:
-        if isinstance(value, str) and value:
-            return value
-        return None
-
-    @staticmethod
-    def _extract_payload(raw: str | None) -> dict[str, Any]:
-        if not raw:
-            return {}
-        try:
-            payload = json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
-
-    def _event_knowledge_id(
-        self,
-        payload: dict[str, Any],
-        aggregate_id: str,
-    ) -> str | None:
-        return (
-            self._coerce_string(payload.get("knowledge_id"))
-            or self._coerce_string(payload.get("aggregate_id"))
-            or aggregate_id
-            or None
-        )
-
-    def handle_event(
-        self,
-        *,
-        event_type: str,
-        memory_space_id: str,
-        aggregate_id: str,
-        payload_json: str | None = None,
-    ) -> bool:
-        payload = self._extract_payload(payload_json)
-        normalized_event = self._coerce_string(payload.get("event_type")) or event_type
-
-        if normalized_event == "knowledge.created":
-            knowledge_id = self._event_knowledge_id(payload, aggregate_id)
-            if knowledge_id is None:
-                return False
-            if not memory_space_id:
-                return False
-            return self._upsert(knowledge_id, memory_space_id)
-
-        if normalized_event == "knowledge.superseded":
-            previous_id = self._coerce_string(payload.get("previous_knowledge_id"))
-            next_id = self._coerce_string(payload.get("next_knowledge_id"))
-            changed = False
-            if previous_id is not None:
-                changed = self._remove(previous_id, memory_space_id) or changed
-            if next_id is not None:
-                changed = self._upsert(next_id, memory_space_id) or changed
-            return changed
-
-        if normalized_event == "knowledge.deleted":
-            knowledge_id = self._coerce_string(payload.get("knowledge_id")) or aggregate_id
-            if knowledge_id is None:
-                return False
-            return self._remove(knowledge_id, memory_space_id)
-
-        return False
-
-    def _safe_match_query(self, query: str) -> str:
-        tokens = _SafeTokenizer.tokenize(query)
-        if not tokens:
-            return ""
-        return " ".join(tokens)
+    def _safe_match_query(query: str) -> str:
+        return " ".join(_SafeTokenizer.tokenize(query))
 
     def search(self, memory_space_id: str, query: str, limit: int) -> list[SearchHit]:
-        if not self._table_exists("knowledge_fts"):
-            return []
+        return self.search_core(memory_space_id, query, limit)
 
+    def search_core(
+        self, memory_space_id: str, query: str, limit: int
+    ) -> list[SearchHit]:
+        if not self._table_exists():
+            return []
         safe_query = self._safe_match_query(query)
         if not safe_query or limit <= 0:
             return []
-
         try:
             rows = self._connection.execute(
-                """
-                SELECT
-                    knowledge_id,
-                    bm25(knowledge_fts) AS lexical_score
-                FROM knowledge_fts
-                WHERE knowledge_fts MATCH ?
-                  AND memory_space_id = ?
+                f"""
+                SELECT knowledge_id, bm25({_FTS_TABLE}) AS lexical_score
+                FROM {_FTS_TABLE}
+                WHERE {_FTS_TABLE} MATCH ? AND memory_space_id = ?
                 ORDER BY lexical_score ASC
                 LIMIT ?
                 """,
@@ -262,11 +158,10 @@ class KnowledgeFTSProjection:
 
     def _projection_checksum(self) -> str:
         rows = self._connection.execute(
-            """
-            SELECT knowledge_id, memory_space_id
-            FROM knowledge_fts
+            f"""
+            SELECT knowledge_id, memory_space_id FROM {_FTS_TABLE}
             ORDER BY memory_space_id ASC, knowledge_id ASC
-            """,
+            """
         ).fetchall()
         digest = hashlib.sha256()
         for row in rows:
@@ -276,18 +171,21 @@ class KnowledgeFTSProjection:
             digest.update(b"\x00")
         return digest.hexdigest()
 
-    def _write_projection_state(self, count: int) -> None:
-        if not self._table_exists("projection_state"):
-            return
+    def write_projection_state(self) -> None:
+        """Record current event-derived projection metadata when the table exists."""
 
+        if not self._table_exists():
+            return
+        row = self._connection.execute(f"SELECT COUNT(*) AS total FROM {_FTS_TABLE}").fetchone()
+        count = int(row["total"]) if row is not None else 0
+        if not self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projection_state'"
+        ).fetchone():
+            return
         self._connection.execute(
             """
             INSERT INTO projection_state (
-                projection_name,
-                projection_version,
-                item_count,
-                checksum,
-                rebuilt_at
+                projection_name, projection_version, item_count, checksum, rebuilt_at
             ) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(projection_name) DO UPDATE SET
                 projection_version = excluded.projection_version,
@@ -304,100 +202,12 @@ class KnowledgeFTSProjection:
             ),
         )
 
-    def rebuild(self, *, memory_space_id: str | None = None) -> int:
-        if not self._table_exists("knowledge_fts"):
-            return 0
-
-        if memory_space_id is None:
-            self._connection.execute("DELETE FROM knowledge_fts")
-            current = self._connection.execute(
-                """
-                SELECT
-                    knowledge_id,
-                    memory_space_id,
-                    title,
-                    target,
-                    statement,
-                    rationale
-                FROM knowledge_items
-                WHERE superseded_by_id IS NULL
-                  AND deleted_at IS NULL
-                ORDER BY memory_space_id ASC, knowledge_id ASC
-                """,
-            ).fetchall()
-            count = len(current)
-        else:
-            self._connection.execute(
-                """
-                DELETE FROM knowledge_fts
-                WHERE memory_space_id = ?
-                """,
-                (memory_space_id,),
-            )
-            current = self._connection.execute(
-                """
-                SELECT
-                    knowledge_id,
-                    memory_space_id,
-                    title,
-                    target,
-                    statement,
-                    rationale
-                FROM knowledge_items
-                WHERE memory_space_id = ?
-                  AND superseded_by_id IS NULL
-                  AND deleted_at IS NULL
-                ORDER BY knowledge_id ASC
-                """,
-                (memory_space_id,),
-            ).fetchall()
-            count = len(current)
-
-        for row in current:
-            self._connection.execute(
-                """
-                INSERT INTO knowledge_fts (
-                    knowledge_id,
-                    memory_space_id,
-                    title,
-                    target,
-                    statement,
-                    rationale
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["knowledge_id"],
-                    row["memory_space_id"],
-                    row["title"],
-                    row["target"],
-                    row["statement"],
-                    row["rationale"],
-                ),
-            )
-
-        if memory_space_id is not None:
-            count = int(
-                self._connection.execute(
-                    "SELECT COUNT(*) AS total FROM knowledge_fts WHERE memory_space_id = ?",
-                    (memory_space_id,),
-                ).fetchone()["total"]
-            )
-        else:
-            count = int(
-                self._connection.execute("SELECT COUNT(*) AS total FROM knowledge_fts").fetchone()[
-                    "total"
-                ]
-            )
-
-        self._write_projection_state(count)
-        return count
-
 
 class SQLiteKnowledgeSearchAdapter(KnowledgeSearch):
-    """Search adapter backed by ``KnowledgeFTSProjection``."""
+    """Search adapter backed by the Local Core projection."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._projection = KnowledgeFTSProjection(connection=connection)
 
     def search(self, memory_space_id: str, query: str, limit: int) -> list[SearchHit]:
-        return self._projection.search(memory_space_id, query, limit)
+        return self._projection.search_core(memory_space_id, query, limit)

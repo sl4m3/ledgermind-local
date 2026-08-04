@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from ledgermind_local.core_gateway.supervisor import CoreSupervisor
+
+
+def test_core_child_receives_restricted_environment_cwd_and_fds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    core_data_dir = tmp_path / "core"
+    core_data_dir.mkdir(mode=0o700)
+    local_data_dir = tmp_path / "local"
+    local_data_dir.mkdir(mode=0o700)
+    rounds_database = local_data_dir / "rounds.db"
+    rounds_database.write_bytes(b"local-owned fixture")
+    report_path = core_data_dir / "report.json"
+    probe_path = core_data_dir / "probe.py"
+    probe_path.write_text(
+        "import json, os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({\n"
+        "  'cwd': os.getcwd(),\n"
+        "  'env': dict(os.environ),\n"
+        "  'inherited_fd': os.path.exists('/proc/self/fd/' + sys.argv[2]),\n"
+        "  'rounds_visible': pathlib.Path(sys.argv[3]).exists(),\n"
+        "}), encoding='utf-8')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    monkeypatch.setenv("LEDGERMIND_TEST_SECRET", "[REDACTED]")
+    monkeypatch.setenv("LEDGERMIND_ROUNDS_DB", str(tmp_path / "rounds.db"))
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid")
+    inherited_fd = os.open(os.devnull, os.O_RDONLY)
+    os.set_inheritable(inherited_fd, True)
+
+    supervisor = CoreSupervisor(
+        [
+            sys.executable,
+            str(probe_path),
+            str(report_path),
+            str(inherited_fd),
+            str(rounds_database),
+        ],
+        core_data_dir=core_data_dir,
+        blocked_data_dirs=(local_data_dir,),
+    )
+    try:
+        supervisor._spawn_locked()
+        deadline = time.monotonic() + 2.0
+        while not report_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        supervisor._terminate_locked()
+        os.close(inherited_fd)
+
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["cwd"] == str(core_data_dir)
+    assert report["inherited_fd"] is False
+    assert report["rounds_visible"] is False
+    assert report["env"].pop("PWD") == str(core_data_dir)
+    assert report["env"] == {
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "RUST_BACKTRACE": "0",
+        "LEDGERMIND_CORE_DATA_DIR": str(core_data_dir),
+    }
+
+
+def test_full_network_sandbox_cannot_reach_host_loopback(tmp_path: Path) -> None:
+    core_data_dir = tmp_path / "core"
+    core_data_dir.mkdir(mode=0o700)
+    report_path = core_data_dir / "network.json"
+    probe_path = core_data_dir / "network_probe.py"
+    probe_path.write_text(
+        "import json, pathlib, socket, sys\n"
+        "try:\n"
+        "    socket.create_connection(('127.0.0.1', int(sys.argv[2])), timeout=0.5)\n"
+        "except OSError:\n"
+        "    connected = False\n"
+        "else:\n"
+        "    connected = True\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({'connected': connected}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    supervisor = CoreSupervisor(
+        [sys.executable, str(probe_path), str(report_path), str(server.getsockname()[1])],
+        core_data_dir=core_data_dir,
+    )
+    try:
+        supervisor._spawn_locked()
+        if supervisor.sandbox_level != "full":
+            pytest.skip("network namespace is unavailable on this host")
+        deadline = time.monotonic() + 2.0
+        while not report_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        supervisor._terminate_locked()
+        server.close()
+
+    assert report_path.exists()
+    assert json.loads(report_path.read_text(encoding="utf-8"))["connected"] is False

@@ -127,7 +127,9 @@ def _write_uow_script(root: Path) -> Path:
     return script
 
 
-def _run_uow_script(script: Path, db_path: Path, hold: float, payload: str) -> subprocess.CompletedProcess[str]:
+def _run_uow_script(
+    script: Path, db_path: Path, hold: float, payload: str
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             sys.executable,

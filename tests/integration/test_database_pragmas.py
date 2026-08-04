@@ -45,7 +45,9 @@ def test_timestamps_are_read_explicitly_as_strings(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
     conn = open_sqlite_connection(db_path)
     try:
-        conn.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, emitted_at DATETIME)")
+        conn.execute(
+            "CREATE TABLE sample (id INTEGER PRIMARY KEY, emitted_at DATETIME)"
+        )
         stamp = datetime.fromisoformat("2026-08-01T12:34:56")
         conn.execute("INSERT INTO sample (emitted_at) VALUES (?)", (stamp.isoformat(),))
         conn.commit()

@@ -10,15 +10,9 @@ from typing import ClassVar
 
 from typing_extensions import Self
 
-from .atom_repository import SQLiteAtomRepository
 from .database import open_sqlite_connection
-from .evidence_repository import SQLiteEvidenceRepository
-from .idempotency_repository import SQLiteIdempotencyRepository
-from .knowledge_repository import SQLiteKnowledgeRepository
 from .memory_space_repository import SQLiteMemorySpaceRepository
-from .outbox_repository import SQLiteOutboxRepository
 from .raw_round_repository import SQLiteRawRoundRepository
-from .revision_repository import SQLiteRevisionRepository
 
 
 class SQLiteUnitOfWorkError(RuntimeError):
@@ -39,12 +33,6 @@ class SQLiteUnitOfWork:
 
     _connection: sqlite3.Connection | None = None
     _committed: bool = False
-    _atoms: SQLiteAtomRepository | None = None
-    _knowledge: SQLiteKnowledgeRepository | None = None
-    _evidence: SQLiteEvidenceRepository | None = None
-    _revisions: SQLiteRevisionRepository | None = None
-    _idempotency: SQLiteIdempotencyRepository | None = None
-    _outbox: SQLiteOutboxRepository | None = None
     _memory_spaces: SQLiteMemorySpaceRepository | None = None
     _raw_rounds: SQLiteRawRoundRepository | None = None
 
@@ -63,12 +51,6 @@ class SQLiteUnitOfWork:
             self._connection.execute(
                 "BEGIN IMMEDIATE" if self.write_transaction else "BEGIN"
             )
-            self._atoms = SQLiteAtomRepository(self._connection)
-            self._knowledge = SQLiteKnowledgeRepository(self._connection)
-            self._evidence = SQLiteEvidenceRepository(self._connection)
-            self._revisions = SQLiteRevisionRepository(self._connection)
-            self._idempotency = SQLiteIdempotencyRepository(self._connection)
-            self._outbox = SQLiteOutboxRepository(self._connection)
             self._memory_spaces = SQLiteMemorySpaceRepository(self._connection)
             self._raw_rounds = SQLiteRawRoundRepository(self._connection)
             return self
@@ -97,41 +79,7 @@ class SQLiteUnitOfWork:
             raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
         return self._connection
 
-    @property
-    def atoms(self) -> SQLiteAtomRepository:
-        if self._atoms is None:
-            raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
-        return self._atoms
 
-    @property
-    def knowledge(self) -> SQLiteKnowledgeRepository:
-        if self._knowledge is None:
-            raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
-        return self._knowledge
-
-    @property
-    def evidence(self) -> SQLiteEvidenceRepository:
-        if self._evidence is None:
-            raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
-        return self._evidence
-
-    @property
-    def revisions(self) -> SQLiteRevisionRepository:
-        if self._revisions is None:
-            raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
-        return self._revisions
-
-    @property
-    def idempotency(self) -> SQLiteIdempotencyRepository:
-        if self._idempotency is None:
-            raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
-        return self._idempotency
-
-    @property
-    def outbox(self) -> SQLiteOutboxRepository:
-        if self._outbox is None:
-            raise SQLiteUnitOfWorkInactiveError(self._closed_error_message)
-        return self._outbox
 
     @property
     def memory_spaces(self) -> SQLiteMemorySpaceRepository:
@@ -169,11 +117,5 @@ class SQLiteUnitOfWork:
         finally:
             self._connection = None
             self._committed = False
-            self._atoms = None
-            self._knowledge = None
-            self._evidence = None
-            self._revisions = None
-            self._idempotency = None
-            self._outbox = None
             self._memory_spaces = None
             self._raw_rounds = None

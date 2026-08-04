@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ledgermind_local.persistence import open_sqlite_connection
-from ledgermind_local.persistence.migrations import (
+from ledgermind_local.persistence.rounds_migrations import (
     MigrationError,
     apply_migrations,
 )
@@ -17,7 +17,9 @@ from ledgermind_local.persistence.migrations import (
 _DATABASE_ERROR = "database unavailable"
 
 
-def _record(checks: dict[str, dict[str, Any]], name: str, ok: bool, reason: str) -> bool:
+def _record(
+    checks: dict[str, dict[str, Any]], name: str, ok: bool, reason: str
+) -> bool:
     checks[name] = {"ok": ok, "detail": reason}
     return ok
 

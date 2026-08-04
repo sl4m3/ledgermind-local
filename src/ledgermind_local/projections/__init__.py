@@ -1,6 +1,5 @@
 """Projection implementations for the local LedgerMind service."""
 
-from .dispatcher import ProjectionDispatcher, _ProjectionHandler
 from .fts import KnowledgeFTSProjection
 from .gguf_vectorizer import GGUFVectorizer
 from .git_audit import KnowledgeMarkdownGitAuditProjection, MarkdownGitAuditProjection
@@ -16,8 +15,6 @@ __all__ = [
     "KnowledgeMarkdownProjection",
     "KnowledgeVectorProjection",
     "MarkdownGitAuditProjection",
-    "ProjectionDispatcher",
     "VectorProjectionStore",
     "Vectorizer",
-    "_ProjectionHandler",
 ]
