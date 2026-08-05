@@ -31,9 +31,20 @@ class LocalReleaseScriptTests(unittest.TestCase):
         return commit, timestamp
 
     def _manifest(self, directory: Path, commit: str, commit_timestamp: int) -> Path:
-        artifact = directory / "local-test-artifact.whl"
-        artifact.write_bytes(b"release-test")
-        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        artifact_contents = {
+            "local-test-artifact.whl": b"release-test",
+            "local-test-artifact.tar.gz": b"release-source-test",
+        }
+        records: list[dict[str, object]] = []
+        digests: dict[str, str] = {}
+        for name, content in artifact_contents.items():
+            artifact = directory / name
+            artifact.write_bytes(content)
+            digest = hashlib.sha256(content).hexdigest()
+            records.append(
+                {"name": name, "sha256": digest, "size_bytes": artifact.stat().st_size}
+            )
+            digests[name] = digest
         with (ROOT / "pyproject.toml").open("rb") as handle:
             version = tomllib.load(handle)["project"]["version"]
         manifest = directory / "ledgermind-local-manifest.json"
@@ -48,10 +59,8 @@ class LocalReleaseScriptTests(unittest.TestCase):
                     "version": version,
                     "build_time_epoch": commit_timestamp + 1,
                     "install_smoke": {"passed": True},
-                    "artifacts": [
-                        {"name": artifact.name, "sha256": digest, "size_bytes": artifact.stat().st_size}
-                    ],
-                    "sha256": {artifact.name: digest},
+                    "artifacts": records,
+                    "sha256": digests,
                 }
             ),
             encoding="utf-8",
@@ -80,6 +89,43 @@ class LocalReleaseScriptTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 2)
         self.assertIn("manifest is required", result.stderr)
+
+    def test_dev_extra_declares_release_and_quality_tools(self) -> None:
+        with (ROOT / "pyproject.toml").open("rb") as handle:
+            project = tomllib.load(handle)["project"]
+        dev_requirements = project["optional-dependencies"]["dev"]
+        self.assertIn("build>=1.2", dev_requirements)
+        self.assertIn("mypy>=1.10", dev_requirements)
+
+    def test_verify_accepts_manifest_with_matching_artifact(self) -> None:
+        commit, timestamp = self._head()
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self._manifest(Path(temporary), commit, timestamp)
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "verify", "--manifest", str(manifest)],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(manifest))
+
+    def test_verify_rejects_tampered_artifact(self) -> None:
+        commit, timestamp = self._head()
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self._manifest(Path(temporary), commit, timestamp)
+            artifact = manifest.parent / "local-test-artifact.whl"
+            artifact.write_bytes(b"tampered")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "verify", "--manifest", str(manifest)],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("SHA-256 mismatch", result.stderr)
 
     def test_verify_rejects_manifest_from_another_commit(self) -> None:
         commit, timestamp = self._head()

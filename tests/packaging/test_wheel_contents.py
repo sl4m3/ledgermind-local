@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -76,6 +77,42 @@ def _build_wheel_names(source: Path, tmp_path: Path) -> list[str]:
         return archive.namelist()
 
 
+def _build_sdist_names(source: Path, tmp_path: Path) -> list[str]:
+    checkout = tmp_path / "sdist-checkout"
+    shutil.copytree(
+        source,
+        checkout,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".pytest_cache",
+            "__pycache__",
+            "build",
+            "dist",
+            "*.egg-info",
+        ),
+    )
+    sdist_dir = tmp_path / "sdists"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--sdist",
+            "--no-isolation",
+            "--outdir",
+            str(sdist_dir),
+            ".",
+        ],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sdist = next(sdist_dir.glob("*.tar.gz"))
+    with tarfile.open(sdist, "r:gz") as archive:
+        return [member.name for member in archive.getmembers()]
+
+
 def test_clean_local_wheel_contains_only_namespaced_package(tmp_path: Path) -> None:
     names = _build_wheel_names(Path(__file__).resolve().parents[2], tmp_path)
     top_level = {name.split("/", 1)[0] for name in names if "/" in name}
@@ -118,3 +155,40 @@ def test_local_wheel_contains_runtime_data_and_no_release_artifacts(
         for path in paths
     )
     assert not any(re.search(r"(^|/)build-copy(/|$)", name) for name in names)
+
+
+def test_clean_local_sdist_contains_source_without_generated_artifacts(
+    tmp_path: Path,
+) -> None:
+    names = _build_sdist_names(Path(__file__).resolve().parents[2], tmp_path)
+    paths = {Path(name) for name in names}
+
+    assert any(path.name == "pyproject.toml" for path in paths)
+    assert any(
+        path.parts[-3:] == ("src", "ledgermind_local", "__init__.py")
+        for path in paths
+    )
+    assert not any(
+        component in _FORBIDDEN_COMPONENTS or component == ".git"
+        for path in paths
+        for component in path.parts
+    )
+    assert not any(path.suffix.lower() in {".pyc", ".pyo"} for path in paths)
+    assert not any(
+        path.suffix.lower() in _FORBIDDEN_DATABASE_SUFFIXES
+        for path in paths
+    )
+    assert not any(
+        path.name.lower() in {
+            ".env",
+            ".env.example",
+            "credentials",
+            "credentials.json",
+            "private_key",
+            "private_key.json",
+            "secret",
+            "secret.json",
+        }
+        or path.suffix.lower() in _FORBIDDEN_SECRET_SUFFIXES
+        for path in paths
+    )
