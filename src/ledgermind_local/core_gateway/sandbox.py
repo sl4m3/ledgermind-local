@@ -432,7 +432,7 @@ def _build_bwrap_prefix(
     python_home = _python_runtime_home(command)
     if python_home is not None:
         mount_paths.extend(_python_runtime_paths(python_home))
-    mount_paths.extend(_command_file_paths(command, blocked_data_dirs))
+    mount_paths.extend(_command_file_paths(command, blocked_data_dirs, core_data_dir))
     seen: set[str] = set()
     mount_args: list[str] = []
     for path in mount_paths:
@@ -546,7 +546,7 @@ def _allowed_runtime_paths(
 
 
 def _command_file_paths(
-    command: Sequence[str], blocked_data_dirs: Sequence[Path]
+    command: Sequence[str], blocked_data_dirs: Sequence[Path], core_data_dir: Path
 ) -> list[Path]:
     """Mount absolute file arguments needed by script-based Core test shims."""
 
@@ -556,6 +556,7 @@ def _command_file_paths(
         if (
             path.is_absolute()
             and path.is_file()
+            and not _is_path_within(path, core_data_dir)
             and not any(_is_path_within(path, blocked) for blocked in blocked_data_dirs)
         ):
             paths.append(path)

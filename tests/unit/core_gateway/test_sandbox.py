@@ -155,6 +155,42 @@ def test_explicit_runtime_paths_are_added_to_the_read_only_allowlist(
     )
 
 
+def test_core_database_argument_remains_writable_inside_core_data_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "ledgermind_local.core_gateway.sandbox.shutil.which",
+        lambda name: f"/usr/bin/{name}",
+    )
+    monkeypatch.setattr(
+        "ledgermind_local.core_gateway.sandbox._probe_command",
+        lambda command, core_data_dir: _ProbeResult(
+            network_isolated=True,
+            rounds_database_hidden=True,
+            filesystem_allowlisted=True,
+            environment_sanitized=True,
+            file_descriptors_closed=True,
+        ),
+    )
+    core_data_dir = tmp_path / "core"
+    core_data_dir.mkdir()
+    database = core_data_dir / "knowledge.db"
+    database.write_bytes(b"core-owned database")
+
+    plan = build_sandbox_plan(
+        ("/opt/ledgermind-core/bin/ledgermind-core", "--database", str(database)),
+        core_data_dir=core_data_dir,
+        required=True,
+    )
+
+    read_only_destinations = {
+        plan.command[index + 2]
+        for index, value in enumerate(plan.command)
+        if value == "--ro-bind"
+    }
+    assert str(database) not in read_only_destinations
+
+
 def test_unshare_probe_reports_network_only(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "ledgermind_local.core_gateway.sandbox.shutil.which",
