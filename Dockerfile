@@ -10,6 +10,11 @@ RUN cargo build --release --locked -p ledgermind-daemon --bin ledgermind-core
 
 FROM python:3.12-slim
 
+# Experimental/unsupported container artifact; not a secure deployment path.
+LABEL io.ledgermind.deployment.status="experimental-unsupported" \
+      io.ledgermind.secure-deployment="unsupported" \
+      org.opencontainers.image.description="LedgerMind Local experimental/unsupported container; not a secure deployment path"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
