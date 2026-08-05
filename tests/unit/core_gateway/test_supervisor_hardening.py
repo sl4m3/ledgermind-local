@@ -10,6 +10,9 @@ from pathlib import Path
 import pytest
 
 from ledgermind_local.core_gateway.isolation import IsolationRequirements
+from ledgermind_local.core_gateway.security_policy import (
+    CORE_ALLOWED_RUNTIME_INJECTED_ENVIRONMENT_KEYS,
+)
 from ledgermind_local.core_gateway.supervisor import CoreSupervisor, CoreSupervisorError
 
 
@@ -37,6 +40,8 @@ def test_core_child_receives_restricted_environment_cwd_and_fds(
     )
     monkeypatch.setenv("LANG", "C.UTF-8")
     monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    monkeypatch.setenv("LC_CTYPE", "C.UTF-8")
+    monkeypatch.setenv("TZ", "UTC")
     monkeypatch.setenv("LEDGERMIND_TEST_SECRET", "[REDACTED]")
     monkeypatch.setenv("LEDGERMIND_ROUNDS_DB", str(tmp_path / "rounds.db"))
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid")
@@ -73,13 +78,24 @@ def test_core_child_receives_restricted_environment_cwd_and_fds(
     else:
         assert report["rounds_visible"] is True
     assert report["env"].pop("PWD") == str(core_data_dir)
-    assert report["env"] == {
+    expected_environment = {
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "RUST_BACKTRACE": "0",
         "LEDGERMIND_CORE_DATA_DIR": str(core_data_dir),
-        "PYTHONHOME": sys.base_prefix,
     }
+    if supervisor.isolation_capabilities.sandbox_backend == "bwrap":
+        expected_environment.update(
+            {
+                name: os.environ[name]
+                for name in CORE_ALLOWED_RUNTIME_INJECTED_ENVIRONMENT_KEYS
+                if os.environ.get(name)
+            }
+        )
+    # PYTHONHOME is an implementation detail for the Python test/runtime shim;
+    # it is not part of the production Core environment contract.
+    report["env"].pop("PYTHONHOME", None)
+    assert report["env"] == expected_environment
 
 
 def test_full_network_sandbox_cannot_reach_host_loopback(tmp_path: Path) -> None:
