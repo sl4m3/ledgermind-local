@@ -58,6 +58,7 @@ class LocalReleaseScriptTests(unittest.TestCase):
                     "source_commit_timestamp": commit_timestamp,
                     "version": version,
                     "build_time_epoch": commit_timestamp + 1,
+                    "checks": {"license_files": True},
                     "install_smoke": {"passed": True},
                     "artifacts": records,
                     "sha256": digests,

@@ -84,6 +84,7 @@ _FORBIDDEN_SECRET_NAMES = {
 }
 _FORBIDDEN_SECRET_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".token"}
 _FORBIDDEN_DATABASE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+_LICENSE_FILE_NAMES = {"LICENSE", "NOTICE", "COPYING"}
 
 
 class ReleaseError(RuntimeError):
@@ -297,6 +298,18 @@ def _validate_wheel(wheel: Path) -> None:
             raise ReleaseError(f"build copy in wheel: {name}")
 
 
+def _validate_license_files(archive: Path) -> None:
+    if archive.suffix == ".whl":
+        names = _wheel_names(archive)
+    else:
+        with tarfile.open(archive, "r:gz") as source:
+            names = [member.name for member in source.getmembers()]
+    present = {Path(name).name for name in names}
+    missing = sorted(_LICENSE_FILE_NAMES - present)
+    if missing:
+        raise ReleaseError(f"release artifact is missing license files: {missing}")
+
+
 def _build_distribution(source: Path, output: Path, env: dict[str, str]) -> tuple[Path, Path]:
     output.mkdir(parents=True, exist_ok=True)
     _run(
@@ -322,6 +335,8 @@ def _build_distribution(source: Path, output: Path, env: dict[str, str]) -> tupl
         )
     _normalize_sdist(sdists[0], int(env["SOURCE_DATE_EPOCH"]))
     _validate_wheel(wheels[0])
+    _validate_license_files(wheels[0])
+    _validate_license_files(sdists[0])
     return wheels[0], sdists[0]
 
 
@@ -506,6 +521,7 @@ def build(args: argparse.Namespace) -> Path:
         "checks": {
             "clean_tracked_source": True,
             "wheel_contents": True,
+            "license_files": True,
             "install_smoke": True,
             "cli_help": True,
         },
@@ -549,6 +565,9 @@ def verify(args: argparse.Namespace) -> Path:
     smoke = manifest.get("install_smoke")
     if not isinstance(smoke, dict) or smoke.get("passed") is not True:
         raise ReleaseError("manifest does not prove install smoke passed")
+    checks = manifest.get("checks")
+    if not isinstance(checks, dict) or checks.get("license_files") is not True:
+        raise ReleaseError("manifest does not prove license files were packaged")
     records = manifest.get("artifacts")
     digest_map = manifest.get("sha256")
     if not isinstance(records, list) or not records or not isinstance(digest_map, dict):

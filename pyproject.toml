@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "ledgermind-local"
 version = "4.0.0a1"
 description = "LedgerMind local service bootstrap for v4 architecture"
+license = "BUSL-1.1"
+license-files = ["LICENSE", "NOTICE", "COPYING"]
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.7,<3",
