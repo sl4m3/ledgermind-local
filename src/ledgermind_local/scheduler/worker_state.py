@@ -33,6 +33,14 @@ class WorkerStateSnapshot:
     degraded: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerOutcome:
+    """Immutable result and state snapshot published for one iteration."""
+
+    result: object | None
+    snapshot: WorkerStateSnapshot
+
+
 class WorkerState:
     """Mutable worker state whose snapshots are safe across threads."""
 
@@ -41,12 +49,20 @@ class WorkerState:
             raise ValueError("worker state name must not be empty")
         self._lock = RLock()
         self._snapshot = WorkerStateSnapshot(name=name)
+        self._last_outcome: WorkerOutcome | None = None
 
     def snapshot(self) -> WorkerStateSnapshot:
         """Return an immutable copy of the current state."""
 
         with self._lock:
             return replace(self._snapshot)
+
+    @property
+    def last_outcome(self) -> WorkerOutcome | None:
+        """Return the last successful outcome published with this state."""
+
+        with self._lock:
+            return self._last_outcome
 
     @property
     def name(self) -> str:
@@ -159,6 +175,41 @@ class WorkerState:
                 degraded=True,
             )
 
+    def publish_result(
+        self,
+        result: object | None,
+        *,
+        item_id: str | None = None,
+        processed: bool = True,
+        degraded: bool = False,
+    ) -> WorkerOutcome:
+        """Publish one successful iteration and return its immutable outcome.
+
+        The degraded flag is committed with the normal success counters before
+        any result observer can publish its own diagnostic observation. This
+        keeps the health-facing state from briefly reporting healthy for a
+        result that has already been classified as degraded.
+        """
+
+        with self._lock:
+            self._snapshot = replace(
+                self._snapshot,
+                running=True,
+                healthy=not degraded,
+                degraded=bool(degraded),
+                last_success_at=_now(),
+                consecutive_failures=0,
+                last_iteration_failure_count=0,
+                last_progress_at=_now(),
+                processed_count=(
+                    self._snapshot.processed_count + (1 if processed else 0)
+                ),
+                current_item_id=item_id,
+            )
+            outcome = WorkerOutcome(result=result, snapshot=replace(self._snapshot))
+            self._last_outcome = outcome
+            return outcome
+
     def mark_success(
         self,
         *,
@@ -222,4 +273,4 @@ class WorkerState:
         return asdict(self.snapshot())
 
 
-__all__ = ["WorkerState", "WorkerStateSnapshot"]
+__all__ = ["WorkerOutcome", "WorkerState", "WorkerStateSnapshot"]

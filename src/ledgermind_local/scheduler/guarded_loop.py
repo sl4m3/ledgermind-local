@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from .shutdown import WorkerShutdownResult
-from .worker_state import WorkerState
+from .worker_state import WorkerOutcome, WorkerState
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,12 @@ class GuardedWorkerLoop:
             thread = self._thread
         return thread is not None and thread.is_alive()
 
+    @property
+    def last_outcome(self) -> WorkerOutcome | None:
+        """Return the last atomically published successful iteration."""
+
+        return self.state.last_outcome
+
     def shutdown(self, timeout: float | None = None) -> WorkerShutdownResult:
         """Request stop and report whether the worker actually stopped.
 
@@ -179,9 +185,11 @@ class GuardedWorkerLoop:
                     continue
 
                 item_id = _result_item_id(result)
-                self.state.mark_success(
+                self.state.publish_result(
+                    result,
                     item_id=item_id,
                     processed=result is not None,
+                    degraded=_result_degraded(result),
                 )
                 if self._result_observer is not None:
                     try:
@@ -226,4 +234,13 @@ def _result_item_id(result: object | None) -> str | None:
     return None
 
 
-__all__ = ["GuardedWorkerLoop", "WorkerShutdownResult"]
+def _result_degraded(result: object | None) -> bool:
+    if result is None:
+        return False
+    try:
+        return bool(getattr(result, "degraded", False))
+    except Exception:  # noqa: BLE001 - result metadata must not kill the loop
+        return False
+
+
+__all__ = ["GuardedWorkerLoop", "WorkerOutcome", "WorkerShutdownResult"]

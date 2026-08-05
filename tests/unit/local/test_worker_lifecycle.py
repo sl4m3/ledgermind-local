@@ -158,3 +158,49 @@ def test_result_observer_failure_does_not_kill_worker_loop() -> None:
     assert loop.join(timeout=1) is True
     assert calls == 2
     assert loop.state.snapshot().processed_count == 2
+
+
+def test_degraded_result_is_published_before_observer_health_observation() -> None:
+    observation_published = threading.Event()
+    release_observer = threading.Event()
+    loop: GuardedWorkerLoop
+
+    class Result:
+        degraded = True
+
+    class Worker:
+        def process_once(self):
+            return Result()
+
+    observation: dict[str, object] = {}
+
+    def observe(result: object | None, state: WorkerState) -> None:
+        assert isinstance(result, Result)
+        observation["degraded"] = True
+        observation_published.set()
+        assert release_observer.wait(timeout=1)
+        state.mark_degraded()
+        loop.request_stop()
+
+    loop = GuardedWorkerLoop(
+        Worker(),
+        name="atomic-publication-worker",
+        poll_interval_seconds=0,
+        result_observer=observe,
+    )
+    loop.start()
+    try:
+        assert observation_published.wait(timeout=1)
+        snapshot = loop.state.snapshot()
+        health_view = {
+            "healthy": snapshot.healthy,
+            "degraded": observation["degraded"],
+        }
+        assert health_view == {"healthy": False, "degraded": True}
+        outcome = loop.last_outcome
+        assert outcome is not None
+        assert outcome.snapshot == snapshot
+    finally:
+        loop.request_stop()
+        release_observer.set()
+        assert loop.join(timeout=1) is True
