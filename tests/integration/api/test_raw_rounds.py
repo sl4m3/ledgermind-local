@@ -79,7 +79,7 @@ def _client(path) -> TestClient:
     )
 
 
-def test_post_round_persists_raw_round_and_job_without_model(tmp_path) -> None:
+def test_post_round_queues_raw_round_for_core_without_processing_job(tmp_path) -> None:
     database = tmp_path / "state.db"
     _bootstrap(database)
 
@@ -92,14 +92,16 @@ def test_post_round_persists_raw_round_and_job_without_model(tmp_path) -> None:
     assert response.status_code == 202
     payload = response.json()
     assert payload["duplicate"] is False
-    assert payload["status"] == "received"
+    assert payload["status"] == "queued_for_core"
+    assert payload["core_command_id"]
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM raw_rounds").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM round_processing_jobs").fetchone()[0] == 0
         assert (
-            connection.execute("SELECT COUNT(*) FROM round_processing_jobs").fetchone()[
-                0
-            ]
-            == 1
+            connection.execute(
+                "SELECT transport_status FROM raw_round_core_deliveries"
+            ).fetchone()[0]
+            == "queued"
         )
         stored = connection.execute("SELECT payload_json FROM raw_rounds").fetchone()[0]
         assert "statement" not in stored

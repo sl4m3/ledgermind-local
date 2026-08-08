@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from pathlib import Path
 
 from .profile_store import InferenceProfileStore
 from .profiles import InferenceProfile, MemorySpaceInferenceProfiles
@@ -75,13 +76,15 @@ class StoreBackedProfileResolver(ProfileResolver):
         self, memory_space_id: str, slot: ProfileSlot
     ) -> InferenceProfile:
         binding = self._profile_store.get_binding(memory_space_id)
-        if binding is None:
+        profile_id = self._profile_store.get_slot(memory_space_id, slot.value)
+        if profile_id is None and binding is None:
             raise MissingProfileError(
                 slot=slot,
                 memory_space_id=memory_space_id,
                 reason="binding_missing",
             )
-        profile_id = self._profile_id_for_slot(binding, slot)
+        if profile_id is None and binding is not None:
+            profile_id = self._profile_id_for_slot(binding, slot)
         if profile_id is None:
             raise MissingProfileError(
                 slot=slot,
@@ -108,6 +111,11 @@ class StoreBackedProfileResolver(ProfileResolver):
     def _profile_id_for_slot(
         self, binding: MemorySpaceInferenceProfiles, slot: ProfileSlot
     ) -> str | None:
+        slot_profile_id = self._profile_store.get_slot(
+            binding.memory_space_id, slot.value
+        )
+        if slot_profile_id is not None:
+            return slot_profile_id
         if slot is ProfileSlot.OPERATIONAL:
             return binding.hypothesis_profile_id
         if slot is ProfileSlot.BACKGROUND:
@@ -117,7 +125,35 @@ class StoreBackedProfileResolver(ProfileResolver):
         return None
 
 
+class DatabaseBackedProfileResolver(ProfileResolver):
+    """Resolve a slot using a fresh Local SQLite connection per lookup."""
+
+    def __init__(
+        self, database_path: str | Path, *, embedding_profile_id: str | None = None
+    ) -> None:
+        self._database_path = database_path
+        self._embedding_profile_id = embedding_profile_id
+
+    def resolve_profile(
+        self, memory_space_id: str, slot: ProfileSlot
+    ) -> InferenceProfile:
+        from ..persistence import open_sqlite_connection
+        from ..persistence import rounds_migrations as migrations
+
+        connection = open_sqlite_connection(self._database_path)
+        try:
+            migrations.apply_migrations(connection)
+            resolver = StoreBackedProfileResolver(
+                InferenceProfileStore(connection),
+                embedding_profile_id=self._embedding_profile_id,
+            )
+            return resolver.resolve_profile(memory_space_id, slot)
+        finally:
+            connection.close()
+
+
 __all__ = [
+    "DatabaseBackedProfileResolver",
     "MissingProfileError",
     "ProfileResolver",
     "ProfileSlot",

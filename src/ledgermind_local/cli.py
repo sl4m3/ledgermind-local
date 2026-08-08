@@ -27,7 +27,6 @@ from ledgermind_local.core_gateway import CoreGateway
 from ledgermind_local.core_gateway.doctor import build_core_doctor_report
 from ledgermind_local.diagnostics.integrity import run_database_integrity_checks
 from ledgermind_local.inference import (
-    InferenceBroker,
     InferenceProfile,
     InferenceProfileStore,
     SecretStore,
@@ -41,7 +40,6 @@ from ledgermind_local.paths import ServicePaths
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
 from ledgermind_local.scheduler import (
-    CoreModelTaskWorker,
     CoreProjectionWorker,
     RawRoundRetentionWorker,
     WorkerState,
@@ -220,12 +218,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
     profiles_bind_parser = profiles_subparsers.add_parser(
         "bind",
-        help="Bind inference profiles to a memory space",
+        help="Bind inference profiles (deprecated; use inference bind)",
     )
     profiles_bind_parser.add_argument("--memory-space-id", required=True)
     profiles_bind_parser.add_argument("--hypothesis-profile")
     profiles_bind_parser.add_argument("--merge-profile")
     profiles_bind_parser.set_defaults(func=_command_profiles_bind)
+
+    inference_parser = subparsers.add_parser(
+        "inference",
+        help="Manage generic Core model profile slots",
+    )
+    inference_subparsers = inference_parser.add_subparsers(
+        dest="inference_command",
+        required=True,
+    )
+    inference_bind_parser = inference_subparsers.add_parser(
+        "bind",
+        help="Bind one model profile slot to a memory space",
+    )
+    inference_bind_parser.add_argument("--memory-space-id", required=True)
+    inference_bind_parser.add_argument(
+        "--slot", choices=("operational", "background", "embedding"), required=True
+    )
+    inference_bind_parser.add_argument("--profile-id", required=True)
+    inference_bind_parser.set_defaults(func=_command_inference_bind)
 
     secrets_parser = subparsers.add_parser(
         "secrets",
@@ -393,6 +410,28 @@ def _command_profiles_bind(args: argparse.Namespace) -> int:
             print("invalid memory space or profile binding")
             return 2
         print(f"profiles bound: {args.memory_space_id}")
+        return 0
+    finally:
+        connection.close()
+
+
+def _command_inference_bind(args: argparse.Namespace) -> int:
+    _, connection, store = _open_profile_store(args)
+    try:
+        try:
+            store.bind_slot(
+                args.memory_space_id,
+                slot=args.slot,
+                profile_id=args.profile_id,
+            )
+            connection.commit()
+        except (sqlite3.IntegrityError, ValueError) as exc:
+            connection.rollback()
+            print(f"invalid profile slot binding: {exc}")
+            return 2
+        print(
+            f"profile slot bound: {args.memory_space_id} {args.slot} -> {args.profile_id}"
+        )
         return 0
     finally:
         connection.close()
@@ -662,24 +701,6 @@ def _command_serve(args: argparse.Namespace) -> int:
             state=WorkerState("core_projections"),
         )
 
-    def model_task_factory(runtime: LocalRuntime) -> object:
-        gateway = runtime.core_gateway
-        if gateway is None:
-            raise RuntimeError("Core gateway is unavailable")
-        broker = InferenceBroker(
-            database_path=runtime.database_path,
-            secret_store=SecretStore(
-                runtime.paths.resolve_home_path(runtime.config.inference_secrets_path)
-            ),
-        )
-        return CoreModelTaskWorker(
-            database_path=runtime.database_path,
-            gateway=gateway,
-            broker=broker,
-            worker_id="local-model-tasks",
-            lease_seconds=int(runtime.config.processing_lease_seconds),
-        )
-
     runtime = LocalRuntime(
         paths=paths,
         config=config,
@@ -692,7 +713,6 @@ def _command_serve(args: argparse.Namespace) -> int:
         pid_remover=_remove_pid_file,
         worker_factories={
             "core_projections": projection_factory,
-            "core_model_tasks": model_task_factory,
         },
     )
     try:

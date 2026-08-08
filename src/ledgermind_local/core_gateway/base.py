@@ -9,8 +9,19 @@ from .contracts import (
     AcceptHypothesisResult,
     ContextViewResult,
     CoreHealth,
+    FailExecutionTaskCommand,
+    FailExecutionTaskResult,
+    IngestRawRoundCommand,
+    IngestRawRoundResult,
+    PollExecutionTasksCommand,
+    PollExecutionTasksResult,
     RecordContextUsageCommand,
+    RecordRetrievalOutcomeV2Command,
     RetrieveContextCommand,
+    RetrieveContextV2Command,
+    RetrieveContextV2Result,
+    SubmitExecutionResult,
+    SubmitExecutionResultCommand,
 )
 from .maintenance import (
     BackupManifest,
@@ -49,12 +60,36 @@ class CoreGateway(Protocol):
         command: AcceptHypothesisCommand,
     ) -> AcceptHypothesisResult: ...
 
+    def ingest_raw_round(
+        self, command: IngestRawRoundCommand
+    ) -> IngestRawRoundResult: ...
+
     def retrieve_context(
         self,
         request: RetrieveContextCommand,
     ) -> ContextViewResult: ...
 
     def record_context_usage(self, command: RecordContextUsageCommand) -> None: ...
+
+    def retrieve_context_v2(
+        self, request: RetrieveContextV2Command
+    ) -> RetrieveContextV2Result: ...
+
+    def record_retrieval_outcome_v2(
+        self, command: RecordRetrievalOutcomeV2Command
+    ) -> None: ...
+
+    def poll_execution_tasks(
+        self, command: PollExecutionTasksCommand
+    ) -> PollExecutionTasksResult: ...
+
+    def submit_execution_result(
+        self, command: SubmitExecutionResultCommand
+    ) -> SubmitExecutionResult: ...
+
+    def fail_execution_task(
+        self, command: FailExecutionTaskCommand
+    ) -> FailExecutionTaskResult: ...
 
     def poll_projection_events(
         self, command: PollProjectionEventsCommand

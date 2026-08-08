@@ -41,7 +41,7 @@ class FakeCoreGateway:
             relative_path="exchange/outgoing/core.bin",
             sha256=sha256_file(source),
             size_bytes=source.stat().st_size,
-            schema_version=6,
+            schema_version=9,
         )
 
     def validate_backup(self, command: object) -> BackupManifest:
@@ -50,7 +50,7 @@ class FakeCoreGateway:
             relative_path=command.relative_path,  # type: ignore[attr-defined]
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=6,
+            schema_version=9,
         )
 
     def prepare_restore(self, command: object) -> PrepareRestoreResult:
@@ -60,7 +60,7 @@ class FakeCoreGateway:
             relative_path=command.relative_path,  # type: ignore[attr-defined]
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=6,
+            schema_version=9,
             restore_token="restore-token-1",
             requires_restart=True,
         )
@@ -72,7 +72,7 @@ class FakeCoreGateway:
             relative_path=command.relative_path,  # type: ignore[attr-defined]
             sha256=command.sha256,  # type: ignore[attr-defined]
             size_bytes=20,
-            schema_version=6,
+            schema_version=9,
             state="applied_pending_commit",
         )
 

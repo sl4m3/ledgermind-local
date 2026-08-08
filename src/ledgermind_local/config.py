@@ -65,7 +65,9 @@ class WorkerSetConfig(BaseModel):
         default_factory=lambda: WorkerConfig(enabled=True, interval_seconds=300.0)
     )
     processing: WorkerConfig = Field(default_factory=WorkerConfig)
-    core_commands: WorkerConfig = Field(default_factory=WorkerConfig)
+    core_commands: WorkerConfig = Field(
+        default_factory=lambda: WorkerConfig(enabled=True)
+    )
     core_projections: WorkerConfig = Field(
         default_factory=lambda: WorkerConfig(enabled=True)
     )

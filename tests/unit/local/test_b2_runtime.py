@@ -326,6 +326,7 @@ def test_worker_config_exposes_all_b2_worker_names() -> None:
         "core_projections",
         "core_model_tasks",
     }
+    assert config.workers.core_commands.enabled is True
 
 
 def test_programmatic_worker_config_is_preserved() -> None:

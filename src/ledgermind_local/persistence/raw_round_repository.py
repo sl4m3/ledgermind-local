@@ -80,6 +80,20 @@ class CoreCommandRecord:
     created_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class CoreRawRoundDeliveryRecord:
+    raw_round_id: str
+    memory_space_id: str
+    command_id: str
+    idempotency_key: str
+    transport_status: str
+    core_raw_round_id: str | None
+    core_job_id: str | None
+    last_error_code: str | None
+    created_at: str
+    updated_at: str
+
+
 class SQLiteRawRoundRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
@@ -648,6 +662,79 @@ class SQLiteRawRoundRepository:
         ).fetchone()
         return self._core_command_from_row(row) if row is not None else None
 
+    def create_core_raw_round_delivery(
+        self,
+        *,
+        raw_round_id: str,
+        memory_space_id: str,
+        command_id: str,
+        idempotency_key: str,
+    ) -> CoreRawRoundDeliveryRecord:
+        now = _now()
+        self._connection.execute(
+            """
+            INSERT INTO raw_round_core_deliveries (
+                raw_round_id, memory_space_id, command_id, idempotency_key,
+                transport_status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'queued', ?, ?)
+            ON CONFLICT(raw_round_id) DO UPDATE SET updated_at = excluded.updated_at
+            """,
+            (raw_round_id, memory_space_id, command_id, idempotency_key, now, now),
+        )
+        result = self.get_core_raw_round_delivery(raw_round_id)
+        if result is None:
+            raise RuntimeError("raw round delivery insert did not produce a row")
+        return result
+
+    def get_core_raw_round_delivery(
+        self, raw_round_id: str
+    ) -> CoreRawRoundDeliveryRecord | None:
+        row = self._connection.execute(
+            "SELECT * FROM raw_round_core_deliveries WHERE raw_round_id = ?",
+            (raw_round_id,),
+        ).fetchone()
+        return self._core_raw_round_delivery_from_row(row) if row is not None else None
+
+    def update_core_raw_round_delivery(
+        self,
+        raw_round_id: str,
+        *,
+        transport_status: str,
+        core_raw_round_id: str | None = None,
+        core_job_id: str | None = None,
+        error_code: str | None = None,
+    ) -> bool:
+        if transport_status not in {"queued", "accepted", "rejected", "retry_wait"}:
+            raise ValueError(f"unsupported raw round delivery status: {transport_status}")
+        updated = self._connection.execute(
+            """
+            UPDATE raw_round_core_deliveries
+            SET transport_status = ?, core_raw_round_id = COALESCE(?, core_raw_round_id),
+                core_job_id = COALESCE(?, core_job_id), last_error_code = ?, updated_at = ?
+            WHERE raw_round_id = ?
+            """,
+            (
+                transport_status,
+                core_raw_round_id,
+                core_job_id,
+                error_code,
+                _now(),
+                raw_round_id,
+            ),
+        )
+        return updated.rowcount == 1
+
+    def clear_raw_round_payload(self, raw_round_id: str) -> bool:
+        updated = self._connection.execute(
+            """
+            UPDATE raw_round_payloads
+            SET payload_json = '{}', payload_bytes = 0, deleted_at = ?
+            WHERE raw_round_id = ? AND deleted_at IS NULL
+            """,
+            (_now(), raw_round_id),
+        )
+        return updated.rowcount == 1
+
     def get_core_command(self, command_id: str) -> CoreCommandRecord | None:
         row = self._connection.execute(
             "SELECT * FROM core_commands WHERE command_id = ?", (command_id,)
@@ -858,4 +945,31 @@ class SQLiteRawRoundRepository:
             last_error_code=row["last_error_code"],
             last_error_detail=row["last_error_detail"],
             created_at=str(row["created_at"]),
+        )
+
+    @staticmethod
+    def _core_raw_round_delivery_from_row(
+        row: sqlite3.Row,
+    ) -> CoreRawRoundDeliveryRecord:
+        return CoreRawRoundDeliveryRecord(
+            raw_round_id=str(row["raw_round_id"]),
+            memory_space_id=str(row["memory_space_id"]),
+            command_id=str(row["command_id"]),
+            idempotency_key=str(row["idempotency_key"]),
+            transport_status=str(row["transport_status"]),
+            core_raw_round_id=(
+                str(row["core_raw_round_id"])
+                if row["core_raw_round_id"] is not None
+                else None
+            ),
+            core_job_id=(
+                str(row["core_job_id"]) if row["core_job_id"] is not None else None
+            ),
+            last_error_code=(
+                str(row["last_error_code"])
+                if row["last_error_code"] is not None
+                else None
+            ),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
         )

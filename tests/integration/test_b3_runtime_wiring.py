@@ -214,6 +214,35 @@ def test_runtime_health_exposes_model_task_stats_without_result_payload(tmp_path
         runtime.stop()
 
 
+def test_runtime_builds_generic_execution_worker_for_core_model_tasks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    created: list[dict[str, object]] = []
+
+    class _GenericExecutionWorker:
+        def __init__(self, **kwargs: object) -> None:
+            created.append(kwargs)
+
+        def process_once(self) -> int:
+            return 0
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(bootstrap, "CoreExecutionTaskWorker", _GenericExecutionWorker)
+    runtime = _runtime(
+        tmp_path,
+        config=_minimal_config(core_model_tasks={"enabled": True, "interval_seconds": 0}),
+    )
+
+    runtime.start()
+    try:
+        assert len(created) == 1
+        assert created[0]["worker_id"] == "local-execution-tasks"
+    finally:
+        runtime.stop()
+
+
 def test_runtime_surfaces_pending_restore_journal_and_blocks_full_ready(tmp_path: Path) -> None:
     config = _minimal_config()
     runtime = _runtime(tmp_path, config=config)

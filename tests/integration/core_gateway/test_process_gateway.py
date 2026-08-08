@@ -17,11 +17,17 @@ from ledgermind_local.core_gateway.contracts import (
     AcceptHypothesisCommand,
     CoreCapabilityError,
     DomainRejectedError,
+    FailExecutionTaskCommand,
     HypothesisEvidence,
     HypothesisExtraction,
     HypothesisPayload,
+    IngestRawRoundCommand,
+    PollExecutionTasksCommand,
     RecordContextUsageCommand,
+    RecordRetrievalOutcomeV2Command,
     RetrieveContextCommand,
+    RetrieveContextV2Command,
+    SubmitExecutionResultCommand,
 )
 from ledgermind_local.core_gateway.maintenance import (
     CreateBackupCommand,
@@ -348,6 +354,77 @@ def test_local_runtime_graph_imports_without_python_core() -> None:
     )
 
     assert result.stdout.strip() == "False"
+
+
+def test_process_gateway_handles_object_facet_v2_boundary() -> None:
+    supervisor = _test_supervisor(_command(), startup_timeout_seconds=2.0)
+    gateway = ProcessCoreGateway(
+        supervisor,
+        required_capabilities=("object_facet_v2",),
+    )
+
+    try:
+        ingest = gateway.ingest_raw_round(
+            IngestRawRoundCommand(
+                command_id="ingest-1",
+                idempotency_key="sha256:" + "a" * 64,
+                memory_space_id="space-1",
+                raw_round_id="raw-1",
+                raw_round={},
+            )
+        )
+        tasks = gateway.poll_execution_tasks(
+            PollExecutionTasksCommand(
+                request_id="poll-1",
+                memory_space_id="space-1",
+                worker_id="worker-1",
+            )
+        )
+        submitted = gateway.submit_execution_result(
+            SubmitExecutionResultCommand(
+                request_id="submit-1",
+                task_id="task-1",
+                memory_space_id="space-1",
+                worker_id="worker-1",
+                result={"status": "completed"},
+            )
+        )
+        failed = gateway.fail_execution_task(
+            FailExecutionTaskCommand(
+                request_id="fail-1",
+                task_id="task-1",
+                memory_space_id="space-1",
+                worker_id="worker-1",
+                error_code="provider_timeout",
+                retryable=True,
+                retry_after_seconds=30,
+            )
+        )
+        retrieval = gateway.retrieve_context_v2(
+            RetrieveContextV2Command(
+                request_id="retrieve-v2-1",
+                memory_space_id="space-1",
+                query_text="query",
+                query_embedding=(0.1,),
+            )
+        )
+        gateway.record_retrieval_outcome_v2(
+            RecordRetrievalOutcomeV2Command(
+                request_id="outcome-v2-1",
+                retrieval_request_id="retrieve-v2-1",
+                candidate_value_ids=("value-1",),
+                delivered_value_ids=(),
+            )
+        )
+    finally:
+        gateway.close()
+
+    assert ingest.accepted is True
+    assert ingest.core_raw_round_id == "ingest-1"
+    assert tasks.tasks == ()
+    assert submitted.accepted is True
+    assert failed.released is True
+    assert retrieval.payload["retrieval_request_id"] == "retrieve-v2-1"
 
 
 def test_process_gateway_rejects_mismatched_response_id() -> None:

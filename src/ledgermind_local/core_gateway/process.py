@@ -15,8 +15,19 @@ from .contracts import (
     CoreGatewayError,
     CoreHealth,
     DomainRejectedError,
+    FailExecutionTaskCommand,
+    FailExecutionTaskResult,
+    IngestRawRoundCommand,
+    IngestRawRoundResult,
+    PollExecutionTasksCommand,
+    PollExecutionTasksResult,
     RecordContextUsageCommand,
+    RecordRetrievalOutcomeV2Command,
     RetrieveContextCommand,
+    RetrieveContextV2Command,
+    RetrieveContextV2Result,
+    SubmitExecutionResult,
+    SubmitExecutionResultCommand,
     TransientCoreError,
 )
 from .maintenance import (
@@ -73,6 +84,36 @@ _CAPABILITY_REQUIREMENTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "model_tasks": (
         frozenset({"poll_model_tasks", "submit_model_result", "fail_model_task"}),
         frozenset({"model_task_failure_reporting"}),
+    ),
+    "execution_tasks": (
+        frozenset(
+            {
+                "poll_execution_tasks_v2",
+                "submit_execution_result_v2",
+                "fail_execution_task_v2",
+            }
+        ),
+        frozenset(),
+    ),
+    "object_facet_v2": (
+        frozenset(
+            {
+                "ingest_raw_round_v2",
+                "poll_execution_tasks_v2",
+                "submit_execution_result_v2",
+                "fail_execution_task_v2",
+                "retrieve_context_v2",
+                "record_retrieval_outcome_v2",
+            }
+        ),
+        frozenset(
+            {
+                "object_facet_memory_v1",
+                "generic_execution_tasks_v1",
+                "raw_round_ingest_v2",
+                "context_retrieval_v2",
+            }
+        ),
     ),
     "maintenance": (
         frozenset(
@@ -257,6 +298,44 @@ class ProcessCoreGateway(CoreGateway):
             ),
         )
 
+    def ingest_raw_round(
+        self, command: IngestRawRoundCommand
+    ) -> IngestRawRoundResult:
+        try:
+            from ledgermind_protocol.object_facet_v1 import IngestRawRoundRequest
+
+            request_payload: dict[str, object] = {
+                "command_id": command.command_id,
+                "idempotency_key": command.idempotency_key,
+                "memory_space_id": command.memory_space_id,
+                "raw_round": command.raw_round,
+            }
+            if command.resolution_context is not None:
+                request_payload["resolution_context"] = command.resolution_context
+            request = IngestRawRoundRequest.model_validate(request_payload)
+        except (ImportError, TypeError, ValueError) as exc:
+            raise DomainRejectedError("invalid_raw_round", str(exc)) from exc
+        result = self._request(
+            "ingest_raw_round_v2",
+            request.model_dump(mode="json"),
+            request_id=command.command_id,
+        )
+        return IngestRawRoundResult(
+            accepted=True,
+            duplicate=bool(result.get("duplicate", False)),
+            core_raw_round_id=(
+                str(result["raw_round_id"])
+                if result.get("raw_round_id") is not None
+                else None
+            ),
+            operational_job_id=(
+                str(result["operational_job_id"])
+                if result.get("operational_job_id") is not None
+                else None
+            ),
+            result_json=json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+        )
+
     def retrieve_context(self, request: RetrieveContextCommand) -> ContextViewResult:
         payload: dict[str, object] = {
             "memory_space_id": request.memory_space_id,
@@ -286,6 +365,96 @@ class ProcessCoreGateway(CoreGateway):
                 "item_ids": list(command.item_ids),
             },
             request_id=command.request_id,
+        )
+
+    def retrieve_context_v2(
+        self, request: RetrieveContextV2Command
+    ) -> RetrieveContextV2Result:
+        payload = request.to_payload()
+        try:
+            from ledgermind_protocol.object_facet_v1 import RetrievalRequest
+
+            validated = RetrievalRequest.model_validate(payload)
+        except (ImportError, TypeError, ValueError) as exc:
+            raise DomainRejectedError("invalid_retrieval_request", str(exc)) from exc
+        result = self._request(
+            "retrieve_context_v2",
+            validated.model_dump(mode="json"),
+            request_id=request.request_id,
+        )
+        try:
+            from ledgermind_protocol.object_facet_v1 import RetrievalResponse
+
+            validated_result = RetrievalResponse.model_validate(result)
+        except (ImportError, TypeError, ValueError) as exc:
+            raise TransientCoreError("Core retrieval result is malformed") from exc
+        return RetrieveContextV2Result(validated_result.model_dump(mode="json"))
+
+    def record_retrieval_outcome_v2(
+        self, command: RecordRetrievalOutcomeV2Command
+    ) -> None:
+        payload = command.to_payload()
+        try:
+            from datetime import datetime, timezone
+
+            from ledgermind_protocol.object_facet_v1 import RecordRetrievalOutcome
+
+            validated = RecordRetrievalOutcome.model_validate(
+                {**payload, "created_at": datetime.now(timezone.utc).isoformat()}
+            )
+        except (ImportError, TypeError, ValueError) as exc:
+            raise DomainRejectedError("invalid_retrieval_outcome", str(exc)) from exc
+        self._request(
+            "record_retrieval_outcome_v2",
+            validated.model_dump(mode="json"),
+            request_id=command.request_id,
+        )
+
+    def poll_execution_tasks(
+        self, command: PollExecutionTasksCommand
+    ) -> PollExecutionTasksResult:
+        result = self._request(
+            "poll_execution_tasks_v2",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        raw_tasks = result.get("tasks", [])
+        if not isinstance(raw_tasks, list) or any(
+            not isinstance(task, dict) for task in raw_tasks
+        ):
+            raise TransientCoreError("Core execution task result is malformed")
+        return PollExecutionTasksResult(
+            tasks=tuple(raw_tasks), has_more=bool(result.get("has_more", False))
+        )
+
+    def submit_execution_result(
+        self, command: SubmitExecutionResultCommand
+    ) -> SubmitExecutionResult:
+        result = self._request(
+            "submit_execution_result_v2",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        accepted = result.get("accepted")
+        duplicate = result.get("duplicate", False)
+        status = result.get("status", "accepted")
+        if not isinstance(accepted, bool) or not isinstance(duplicate, bool) or not isinstance(status, str):
+            raise TransientCoreError("Core execution result acknowledgement is malformed")
+        return SubmitExecutionResult(accepted=accepted, duplicate=duplicate, status=status)
+
+    def fail_execution_task(
+        self, command: FailExecutionTaskCommand
+    ) -> FailExecutionTaskResult:
+        result = self._request(
+            "fail_execution_task_v2",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        return FailExecutionTaskResult(
+            released=bool(result.get("released", result.get("accepted", False))),
+            retry_scheduled=bool(result.get("retry_scheduled", False)),
+            terminal=bool(result.get("terminal", False)),
+            status=str(result.get("status", "failed")),
         )
 
     def poll_projection_events(

@@ -9,11 +9,18 @@ from .broker import (
     InferenceResponseValidationError,
     ModelTask,
 )
+from .profile_slots import (
+    DatabaseBackedProfileResolver,
+    MissingProfileError,
+    ProfileSlot,
+    StoreBackedProfileResolver,
+)
 from .profile_store import InferenceProfileStore
 from .profiles import InferenceProfile, MemorySpaceInferenceProfiles, ProviderKind
 from .secrets import SecretNotFoundError, SecretStore
 
 __all__ = [
+    "DatabaseBackedProfileResolver",
     "InferenceBroker",
     "InferenceBrokerError",
     "InferenceInputTooLargeError",
@@ -23,8 +30,11 @@ __all__ = [
     "InferenceProfileStore",
     "InferenceResponseValidationError",
     "MemorySpaceInferenceProfiles",
+    "MissingProfileError",
     "ModelTask",
+    "ProfileSlot",
     "ProviderKind",
     "SecretNotFoundError",
     "SecretStore",
+    "StoreBackedProfileResolver",
 ]

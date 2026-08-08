@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -37,9 +38,10 @@ class RawRoundTooLarge(RawRoundError):
 @dataclass(frozen=True, slots=True)
 class RawRoundIngestResult:
     raw_round_id: str
-    job_id: str
+    job_id: str | None
     duplicate: bool
     status: str
+    core_command_id: str | None = None
 
 
 def _now() -> str:
@@ -77,6 +79,7 @@ class RawRoundIngestHandler:
         pipeline_version: int = 1,
         normalizer_version: int = 1,
         prompt_version: int = 1,
+        core_pipeline: bool = False,
     ) -> None:
         self.database_path = database_path
         self.max_raw_round_bytes = max(int(max_raw_round_bytes), 1)
@@ -84,6 +87,7 @@ class RawRoundIngestHandler:
         self.pipeline_version = max(int(pipeline_version), 1)
         self.normalizer_version = max(int(normalizer_version), 1)
         self.prompt_version = max(int(prompt_version), 1)
+        self.core_pipeline = bool(core_pipeline)
 
     def handle(self, request: RawRoundRequest) -> RawRoundIngestResult:
         if calculate_payload_digest(request) != request.payload_digest:
@@ -113,6 +117,14 @@ class RawRoundIngestHandler:
                 if existing.payload_digest != request.payload_digest:
                     raise RawRoundConflict(
                         "same source round identity already contains a different payload"
+                    )
+                if self.core_pipeline:
+                    return self._queue_core_delivery(
+                        uow,
+                        raw_round_id=existing.raw_round_id,
+                        memory_space_id=request.memory_space_id,
+                        request=request,
+                        duplicate=True,
                     )
                 job = uow.raw_rounds.get_job_for_round(
                     existing.raw_round_id,
@@ -153,6 +165,14 @@ class RawRoundIngestHandler:
                     datetime.now(timezone.utc) + timedelta(days=self.retention_days)
                 ).isoformat(timespec="seconds"),
             )
+            if self.core_pipeline:
+                return self._queue_core_delivery(
+                    uow,
+                    raw_round_id=raw_round.raw_round_id,
+                    memory_space_id=request.memory_space_id,
+                    request=request,
+                    duplicate=False,
+                )
             job = uow.raw_rounds.create_job(
                 job_id=str(uuid.uuid4()),
                 raw_round_id=raw_round.raw_round_id,
@@ -164,6 +184,48 @@ class RawRoundIngestHandler:
             return RawRoundIngestResult(
                 raw_round.raw_round_id, job.job_id, False, job.status
             )
+
+    @staticmethod
+    def _queue_core_delivery(
+        uow: SQLiteUnitOfWork,
+        *,
+        raw_round_id: str,
+        memory_space_id: str,
+        request: RawRoundRequest,
+        duplicate: bool,
+    ) -> RawRoundIngestResult:
+        idempotency_key = request.payload_digest
+        command_payload = json.dumps(
+            {"raw_round_id": raw_round_id},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        payload_digest = "sha256:" + hashlib.sha256(
+            command_payload.encode("utf-8")
+        ).hexdigest()
+        command = uow.raw_rounds.create_core_command(
+            command_id=str(uuid.uuid4()),
+            command_type="ingest_raw_round_v2",
+            memory_space_id=memory_space_id,
+            idempotency_key=idempotency_key,
+            payload_json=command_payload,
+            payload_digest=payload_digest,
+        )
+        delivery = uow.raw_rounds.create_core_raw_round_delivery(
+            raw_round_id=raw_round_id,
+            memory_space_id=memory_space_id,
+            command_id=command.command_id,
+            idempotency_key=idempotency_key,
+        )
+        uow.commit()
+        return RawRoundIngestResult(
+            raw_round_id=raw_round_id,
+            job_id=None,
+            duplicate=duplicate,
+            status="queued_for_core" if delivery.transport_status == "queued" else delivery.transport_status,
+            core_command_id=command.command_id,
+        )
 
     @staticmethod
     def _ensure_memory_space(

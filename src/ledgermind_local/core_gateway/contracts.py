@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -239,6 +240,191 @@ class AcceptHypothesisResult:
 
 
 @dataclass(frozen=True, slots=True)
+class IngestRawRoundCommand:
+    """RawRound delivery envelope; the payload is loaded by the worker."""
+
+    command_id: str
+    idempotency_key: str
+    memory_space_id: str
+    raw_round_id: str
+    raw_round: dict[str, Any]
+    resolution_context: dict[str, Any] | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "command_id": self.command_id,
+            "idempotency_key": self.idempotency_key,
+            "memory_space_id": self.memory_space_id,
+            "raw_round_id": self.raw_round_id,
+            "raw_round": self.raw_round,
+        }
+        if self.resolution_context is not None:
+            payload["resolution_context"] = self.resolution_context
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class IngestRawRoundResult:
+    accepted: bool
+    duplicate: bool
+    core_raw_round_id: str | None = None
+    operational_job_id: str | None = None
+    result_json: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PollExecutionTasksCommand:
+    request_id: str
+    memory_space_id: str
+    worker_id: str
+    limit: int = 10
+    lease_seconds: int = 300
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "memory_space_id": self.memory_space_id,
+            "worker_id": self.worker_id,
+            "limit": self.limit,
+            "lease_seconds": self.lease_seconds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PollExecutionTasksResult:
+    tasks: tuple[dict[str, Any], ...]
+    has_more: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitExecutionResultCommand:
+    request_id: str
+    task_id: str
+    memory_space_id: str
+    worker_id: str
+    result: dict[str, Any]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "memory_space_id": self.memory_space_id,
+            "worker_id": self.worker_id,
+            "result": self.result,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitExecutionResult:
+    accepted: bool
+    duplicate: bool = False
+    status: str = "accepted"
+
+
+@dataclass(frozen=True, slots=True)
+class FailExecutionTaskCommand:
+    request_id: str
+    task_id: str
+    memory_space_id: str
+    worker_id: str
+    error_code: str
+    retryable: bool
+    retry_after_seconds: int = 0
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "memory_space_id": self.memory_space_id,
+            "worker_id": self.worker_id,
+            "error_code": self.error_code,
+            "retryable": self.retryable,
+            "retry_after_seconds": self.retry_after_seconds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FailExecutionTaskResult:
+    released: bool
+    retry_scheduled: bool = False
+    terminal: bool = False
+    status: str = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class RetrieveContextV2Command:
+    request_id: str
+    memory_space_id: str
+    query_text: str
+    query_embedding: tuple[float, ...]
+    embedding_model_id: str = "retrieval-embedder"
+    embedding_model_version: str = "1"
+    limit: int = 5
+    project_id: str | None = None
+    repository_id: str | None = None
+    task_id: str | None = None
+    conversation_id: str | None = None
+    related_object_ids: tuple[str, ...] = ()
+    requested_facets: tuple[str, ...] = ()
+    explanation_level: str = "compact"
+
+    def __post_init__(self) -> None:
+        _required(self.request_id, "request_id")
+        _required(self.memory_space_id, "memory_space_id")
+        _required(self.query_text, "query_text")
+        if not self.query_embedding:
+            raise ValueError("query_embedding must not be empty")
+        if any(not math.isfinite(float(component)) for component in self.query_embedding):
+            raise ValueError("query_embedding must contain finite values")
+        _required(self.embedding_model_id, "embedding_model_id")
+        _required(self.embedding_model_version, "embedding_model_version")
+        if not 1 <= self.limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if self.repository_id is not None and self.project_id is None:
+            raise ValueError("repository_id requires project_id")
+        if self.explanation_level not in {"compact", "none"}:
+            raise ValueError("explanation_level must be compact or none")
+        if len(set(self.related_object_ids)) != len(self.related_object_ids):
+            raise ValueError("related_object_ids must be unique")
+        if len(set(self.requested_facets)) != len(self.requested_facets):
+            raise ValueError("requested_facets must be unique")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "memory_space_id": self.memory_space_id,
+            "query_text": self.query_text,
+            "query_embedding": list(self.query_embedding),
+            "embedding_model_id": self.embedding_model_id,
+            "embedding_model_version": self.embedding_model_version,
+            "limit": self.limit,
+            "project_id": self.project_id,
+            "repository_id": self.repository_id,
+            "task_id": self.task_id,
+            "conversation_id": self.conversation_id,
+            "related_object_ids": list(self.related_object_ids),
+            "requested_facets": list(self.requested_facets),
+            "explanation_level": self.explanation_level,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RetrieveContextV2Result:
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RecordRetrievalOutcomeV2Command:
+    request_id: str
+    retrieval_request_id: str
+    candidate_value_ids: tuple[str, ...]
+    delivered_value_ids: tuple[str, ...]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "retrieval_request_id": self.retrieval_request_id,
+            "candidate_value_ids": list(self.candidate_value_ids),
+            "delivered_value_ids": list(self.delivered_value_ids),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RetrieveContextCommand:
     request_id: str
     memory_space_id: str
@@ -353,10 +539,21 @@ __all__ = [
     "CoreGatewayError",
     "CoreHealth",
     "DomainRejectedError",
+    "FailExecutionTaskCommand",
+    "FailExecutionTaskResult",
     "HypothesisEvidence",
     "HypothesisExtraction",
     "HypothesisPayload",
+    "IngestRawRoundCommand",
+    "IngestRawRoundResult",
+    "PollExecutionTasksCommand",
+    "PollExecutionTasksResult",
     "RecordContextUsageCommand",
+    "RecordRetrievalOutcomeV2Command",
     "RetrieveContextCommand",
+    "RetrieveContextV2Command",
+    "RetrieveContextV2Result",
+    "SubmitExecutionResult",
+    "SubmitExecutionResultCommand",
     "TransientCoreError",
 ]

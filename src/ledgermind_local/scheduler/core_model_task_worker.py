@@ -15,6 +15,9 @@ from typing import Protocol
 from ledgermind_local.core_gateway.base import CoreGateway
 from ledgermind_local.core_gateway.contracts import (
     DomainRejectedError,
+    FailExecutionTaskCommand,
+    PollExecutionTasksCommand,
+    SubmitExecutionResultCommand,
     TransientCoreError,
 )
 from ledgermind_local.core_gateway.model_task_contracts import (
@@ -24,7 +27,15 @@ from ledgermind_local.core_gateway.model_task_contracts import (
     PollModelTasksCommand,
     SubmitModelResultCommand,
 )
+from ledgermind_local.inference.core_task_executor import (
+    CoreTaskExecutor,
+    EmbeddingRequestSpec,
+    GenericExecutionTask,
+    ModelRequestSpec,
+)
+from ledgermind_local.inference.profile_slots import ProfileSlot
 from ledgermind_local.inference.providers.base import (
+    ChatMessage,
     ProviderAuthenticationError,
     ProviderConfigurationError,
     ProviderError,
@@ -403,6 +414,161 @@ class CoreModelTaskWorker:
         return f"{self._worker_id}:{operation}:{uuid.uuid4()}"
 
 
+class CoreExecutionTaskWorker:
+    """Execute generic Core tasks without interpreting their operation field."""
+
+    def __init__(
+        self,
+        *,
+        database_path: str | Path,
+        gateway: CoreGateway,
+        executor: CoreTaskExecutor,
+        worker_id: str,
+        poll_limit: int = 10,
+        lease_seconds: int = 300,
+    ) -> None:
+        if not worker_id.strip():
+            raise ValueError("worker_id must not be empty")
+        if not 1 <= poll_limit <= 100:
+            raise ValueError("poll_limit must be between 1 and 100")
+        self._database_path = str(database_path)
+        self._gateway = gateway
+        self._executor = executor
+        self._worker_id = worker_id
+        self._poll_limit = poll_limit
+        self._lease_seconds = lease_seconds
+        self._closed = False
+        require_capabilities = getattr(gateway, "require_capabilities", None)
+        if callable(require_capabilities):
+            require_capabilities("execution_tasks")
+
+    def process_once(self) -> int:
+        if self._closed:
+            raise RuntimeError("Core execution task worker is closed")
+        connection = open_sqlite_connection(self._database_path)
+        processed = 0
+        try:
+            migrations.apply_migrations(connection)
+            spaces = connection.execute(
+                "SELECT memory_space_id FROM memory_spaces ORDER BY memory_space_id"
+            ).fetchall()
+            for row in spaces:
+                memory_space_id = str(row[0])
+                try:
+                    polled = self._gateway.poll_execution_tasks(
+                        PollExecutionTasksCommand(
+                            request_id=self._request_id("poll"),
+                            memory_space_id=memory_space_id,
+                            worker_id=self._worker_id,
+                            limit=self._poll_limit,
+                            lease_seconds=self._lease_seconds,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - isolate one space's backlog
+                    logger.warning(
+                        "Core execution task poll failed",
+                        extra={"worker": self._worker_id, "memory_space_id": memory_space_id},
+                    )
+                    continue
+                for raw_task in polled.tasks:
+                    processed += 1
+                    self._process_task(raw_task, memory_space_id)
+        finally:
+            connection.close()
+        return processed
+
+    def close(self) -> None:
+        self._closed = True
+
+    def _process_task(self, raw_task: dict[str, object], memory_space_id: str) -> None:
+        task_id = str(raw_task.get("task_id", "unknown"))
+        try:
+            task = _local_execution_task(raw_task, memory_space_id)
+            result = self._executor.execute(task)
+            if result.status == "completed":
+                submitted = self._gateway.submit_execution_result(
+                    SubmitExecutionResultCommand(
+                        request_id=self._request_id("submit"),
+                        task_id=task.task_id,
+                        memory_space_id=memory_space_id,
+                        worker_id=self._worker_id,
+                        result=result.model_dump(mode="json"),
+                    )
+                )
+                if not submitted.accepted:
+                    raise TransientCoreError("Core did not accept execution result")
+                return
+            self._gateway.fail_execution_task(
+                FailExecutionTaskCommand(
+                    request_id=self._request_id("fail"),
+                    task_id=task.task_id,
+                    memory_space_id=memory_space_id,
+                    worker_id=self._worker_id,
+                    error_code=result.error_code or result.status,
+                    retryable=result.status in {"timeout", "cancelled"},
+                    retry_after_seconds=60 if result.status in {"timeout", "cancelled"} else 0,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - release every leased task
+            classification = classify_model_task_error(exc)
+            logger.warning(
+                "Core execution task failed",
+                extra={"worker": self._worker_id, "task_id": task_id, "error_type": type(exc).__name__},
+            )
+            self._gateway.fail_execution_task(
+                FailExecutionTaskCommand(
+                    request_id=self._request_id("fail"),
+                    task_id=task_id,
+                    memory_space_id=memory_space_id,
+                    worker_id=self._worker_id,
+                    error_code=classification.error_code,
+                    retryable=classification.retryable,
+                    retry_after_seconds=classification.retry_after_seconds,
+                )
+            )
+
+    def _request_id(self, operation: str) -> str:
+        return f"{self._worker_id}:{operation}:{uuid.uuid4()}"
+
+
+def _local_execution_task(
+    raw_task: dict[str, object], memory_space_id: str
+) -> GenericExecutionTask:
+    """Convert the language-neutral wire task to the A3 executor model."""
+
+    from ledgermind_protocol.object_facet_v1 import GenericExecutionTask as WireTask
+
+    wire = WireTask.model_validate(raw_task)
+    model_request = None
+    if wire.model_request is not None:
+        model_request = ModelRequestSpec(
+            messages=tuple(
+                ChatMessage.model_validate(message) for message in wire.model_request.messages
+            ),
+            max_output_tokens=wire.model_request.max_output_tokens,
+            response_format={"type": wire.model_request.response_format}
+            if wire.model_request.response_format == "json_object"
+            else None,
+        )
+    embedding_request = None
+    if wire.embedding_request is not None:
+        embedding_request = EmbeddingRequestSpec(
+            texts=tuple(wire.embedding_request.texts),
+            purpose=wire.embedding_request.purpose,
+            dimensions=wire.embedding_request.dimensions,
+        )
+    return GenericExecutionTask(
+        task_id=wire.task_id,
+        task_kind=wire.task_kind,
+        operation=wire.operation,
+        profile_slot=ProfileSlot(wire.profile_slot),
+        model_request=model_request,
+        embedding_request=embedding_request,
+        expires_at=wire.expires_at,
+        lease={"memory_space_id": memory_space_id, "value": wire.lease},
+    )
+
+
 def _worker_classification(
     exc: BaseException, retry_after_seconds: int
 ) -> ModelTaskFailureClassification:
@@ -536,6 +702,7 @@ def _add_stats(
 
 
 __all__ = [
+    "CoreExecutionTaskWorker",
     "CoreModelTaskWorker",
     "CoreModelTaskWorkerStats",
     "ModelTaskFailureClassification",

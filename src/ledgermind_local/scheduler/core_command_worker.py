@@ -13,6 +13,8 @@ from ledgermind_local.core_gateway.contracts import (
     AcceptHypothesisCommand,
     AcceptHypothesisResult,
     DomainRejectedError,
+    IngestRawRoundCommand,
+    IngestRawRoundResult,
     TransientCoreError,
 )
 from ledgermind_local.persistence import CoreCommandRecord, SQLiteUnitOfWork
@@ -59,6 +61,28 @@ class CoreCommandWorker:
         if command is None:
             return None
         try:
+            if command.command_type == "ingest_raw_round_v2":
+                raw_result = self._deliver_raw_round(command)
+                if not raw_result.accepted:
+                    raise DomainRejectedError(
+                        "core_rejected", "Core did not accept RawRound"
+                    )
+                result_json = raw_result.result_json or json.dumps(
+                    {
+                        "accepted": raw_result.accepted,
+                        "duplicate": raw_result.duplicate,
+                        "raw_round_id": raw_result.core_raw_round_id,
+                        "operational_job_id": raw_result.operational_job_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                return self._finish(
+                    command.command_id,
+                    status="completed",
+                    result_json=result_json,
+                )
             if command.command_type != "accept_hypothesis":
                 raise DomainRejectedError(
                     "unsupported_command_type",
@@ -168,6 +192,38 @@ class CoreCommandWorker:
             uow.commit()
             return command
 
+    def _deliver_raw_round(self, command: CoreCommandRecord) -> IngestRawRoundResult:
+        try:
+            metadata = json.loads(command.payload_json)
+            raw_round_id = str(metadata["raw_round_id"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise DomainRejectedError(
+                "invalid_raw_round_command", "RawRound command metadata is invalid"
+            ) from exc
+        with SQLiteUnitOfWork(self.database_path, write_transaction=False) as uow:
+            raw_round = uow.raw_rounds.get(raw_round_id)
+            if raw_round is None:
+                raise DomainRejectedError("raw_round_not_found", raw_round_id)
+            try:
+                raw_payload = json.loads(raw_round.payload_json)
+            except json.JSONDecodeError as exc:
+                raise DomainRejectedError(
+                    "invalid_raw_round_payload", "RawRound payload is not valid JSON"
+                ) from exc
+        if not isinstance(raw_payload, dict):
+            raise DomainRejectedError(
+                "invalid_raw_round_payload", "RawRound payload must be an object"
+            )
+        return self.gateway.ingest_raw_round(
+            IngestRawRoundCommand(
+                command_id=command.command_id,
+                idempotency_key=command.idempotency_key,
+                memory_space_id=command.memory_space_id,
+                raw_round_id=raw_round_id,
+                raw_round=raw_payload,
+            )
+        )
+
     def _finish_retry_or_failure(
         self,
         command_id: str,
@@ -210,6 +266,45 @@ class CoreCommandWorker:
             if not updated:
                 uow.rollback()
                 return CoreCommandProcessResult(command_id, "lease_lost")
+            if command.command_type == "ingest_raw_round_v2":
+                try:
+                    raw_round_id = str(json.loads(command.payload_json)["raw_round_id"])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    raw_round_id = ""
+                if raw_round_id:
+                    delivery_status = {
+                        "completed": "accepted",
+                        "rejected": "rejected",
+                        "retry_wait": "retry_wait",
+                        "failed": "rejected",
+                    }.get(status, "retry_wait")
+                    core_raw_round_id: str | None = None
+                    core_job_id: str | None = None
+                    if result_json:
+                        try:
+                            result_payload = json.loads(result_json)
+                            if isinstance(result_payload, dict):
+                                core_raw_round_id = (
+                                    str(result_payload["raw_round_id"])
+                                    if result_payload.get("raw_round_id") is not None
+                                    else None
+                                )
+                                core_job_id = (
+                                    str(result_payload["operational_job_id"])
+                                    if result_payload.get("operational_job_id") is not None
+                                    else None
+                                )
+                        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                            pass
+                    uow.raw_rounds.update_core_raw_round_delivery(
+                        raw_round_id,
+                        transport_status=delivery_status,
+                        core_raw_round_id=core_raw_round_id,
+                        core_job_id=core_job_id,
+                        error_code=error_code,
+                    )
+                    if status == "completed":
+                        uow.raw_rounds.clear_raw_round_payload(raw_round_id)
             if hypothesis_status is not None:
                 payload = AcceptHypothesisCommand.from_json(command.payload_json)
                 uow.raw_rounds.update_hypothesis_core_status(

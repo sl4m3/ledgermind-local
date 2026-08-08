@@ -30,7 +30,7 @@ class _Gateway:
             relative_path="exchange/outgoing/core-snapshot.bin",
             sha256=sha256_file(source),
             size_bytes=source.stat().st_size,
-            schema_version=6,
+            schema_version=9,
         )
 
     def validate_backup(self, command):
@@ -40,7 +40,7 @@ class _Gateway:
             relative_path=command.relative_path,
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=6,
+            schema_version=9,
         )
 
     def prepare_restore(self, command):
@@ -50,7 +50,7 @@ class _Gateway:
             relative_path=command.relative_path,
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=6,
+            schema_version=9,
             restore_token="restore-token",
             requires_restart=True,
         )

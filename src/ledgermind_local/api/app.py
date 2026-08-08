@@ -85,6 +85,7 @@ def create_app(
     app.state.raw_round_handler = raw_round_handler
     app.state.core_gateway = core_gateway
     app.state.runtime = runtime
+    query_embedder = runtime if callable(getattr(runtime, "embed_query", None)) else None
 
     require_token = build_bearer_token_dependency(settings=settings)
     maybe_token = build_optional_bearer_token_dependency(settings=settings)
@@ -112,6 +113,7 @@ def create_app(
             require_token,
             context_search,
             max_body_bytes=settings.max_raw_round_bytes,
+            query_embedder=query_embedder,
         )
     )
 

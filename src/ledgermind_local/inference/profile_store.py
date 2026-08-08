@@ -173,6 +173,45 @@ class InferenceProfileStore:
             merge_profile_id=row["merge_profile_id"],
         )
 
+    def bind_slot(
+        self, memory_space_id: str, *, slot: str, profile_id: str
+    ) -> str:
+        if slot not in {"operational", "background", "embedding"}:
+            raise ValueError("slot must be operational, background, or embedding")
+        if not profile_id.strip():
+            raise ValueError("profile_id must not be empty")
+        self._connection.execute(
+            """
+            INSERT INTO memory_space_model_profiles (
+                memory_space_id, profile_slot, profile_id, updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(memory_space_id, profile_slot) DO UPDATE SET
+                profile_id = excluded.profile_id, updated_at = excluded.updated_at
+            """,
+            (memory_space_id, slot, profile_id, _now()),
+        )
+        return profile_id
+
+    def get_slot(self, memory_space_id: str, slot: str) -> str | None:
+        row = self._connection.execute(
+            """
+            SELECT profile_id FROM memory_space_model_profiles
+            WHERE memory_space_id = ? AND profile_slot = ?
+            """,
+            (memory_space_id, slot),
+        ).fetchone()
+        return str(row["profile_id"]) if row is not None else None
+
+    def list_slots(self, memory_space_id: str) -> dict[str, str]:
+        rows = self._connection.execute(
+            """
+            SELECT profile_slot, profile_id FROM memory_space_model_profiles
+            WHERE memory_space_id = ? ORDER BY profile_slot
+            """,
+            (memory_space_id,),
+        ).fetchall()
+        return {str(row["profile_slot"]): str(row["profile_id"]) for row in rows}
+
     def record_egress_audit(
         self,
         *,

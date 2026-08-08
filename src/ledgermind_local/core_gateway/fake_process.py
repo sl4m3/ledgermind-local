@@ -126,7 +126,7 @@ def main() -> int:
                     {
                         "protocol_version": 1,
                         "core_version": "fake-core-1",
-                        "knowledge_schema_version": 6,
+                        "knowledge_schema_version": 9,
                         "supported_operations": operations,
                         "capabilities": capabilities,
                     },
@@ -204,6 +204,53 @@ def main() -> int:
             )
         elif request.operation == "record_context_usage":
             _write(CoreResponseEnvelope.ok(request.request_id, {"recorded": True}))
+        elif request.operation == "ingest_raw_round_v2":
+            command_id = str(request.payload.get("command_id", request.request_id))
+            _write(
+                CoreResponseEnvelope.ok(
+                    request.request_id,
+                    {
+                        "raw_round_id": command_id,
+                        "duplicate": False,
+                        "operational_job_id": f"{command_id}:operational",
+                        "status": "queued",
+                    },
+                )
+            )
+        elif request.operation == "poll_execution_tasks_v2":
+            _write(
+                CoreResponseEnvelope.ok(
+                    request.request_id, {"tasks": [], "has_more": False}
+                )
+            )
+        elif request.operation == "submit_execution_result_v2":
+            _write(
+                CoreResponseEnvelope.ok(
+                    request.request_id,
+                    {"accepted": True, "duplicate": False, "status": "accepted"},
+                )
+            )
+        elif request.operation == "fail_execution_task_v2":
+            _write(
+                CoreResponseEnvelope.ok(
+                    request.request_id,
+                    {
+                        "released": True,
+                        "retry_scheduled": False,
+                        "terminal": True,
+                        "status": "failed",
+                    },
+                )
+            )
+        elif request.operation == "retrieve_context_v2":
+            _write(
+                CoreResponseEnvelope.ok(
+                    request.request_id,
+                    {"retrieval_request_id": request.request_id, "items": []},
+                )
+            )
+        elif request.operation == "record_retrieval_outcome_v2":
+            _write(CoreResponseEnvelope.ok(request.request_id, {"recorded": True}))
         elif request.operation == "fail_model_task":
             payload = request.payload
             retryable = bool(payload.get("retryable", False))
@@ -234,7 +281,7 @@ def main() -> int:
                         "relative_path": relative_path,
                         "sha256": _digest(snapshot),
                         "size_bytes": len(snapshot),
-                        "schema_version": 6,
+                        "schema_version": 9,
                     },
                 )
             )
@@ -264,7 +311,7 @@ def main() -> int:
                 "relative_path": relative_path,
                 "sha256": actual_sha,
                 "size_bytes": len(content),
-                "schema_version": 6,
+                    "schema_version": 9,
             }
             if request.operation == "begin_restore":
                 if request.payload.get("restore_token") != "fake-restore-token-1":

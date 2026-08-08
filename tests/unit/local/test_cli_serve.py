@@ -12,6 +12,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import ledgermind_local.bootstrap as bootstrap_module
 import ledgermind_local.cli as cli_module
 from ledgermind_local.bootstrap import initialize_local_layout
 from ledgermind_local.cli import (
@@ -49,7 +50,7 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
         lambda **kwargs: DummyGateway(),
     )
     monkeypatch.setattr(cli_module, "CoreProjectionWorker", DummyWorker)
-    monkeypatch.setattr(cli_module, "CoreModelTaskWorker", DummyWorker)
+    monkeypatch.setattr(bootstrap_module, "CoreExecutionTaskWorker", DummyWorker)
 
 
 def test_coalesce_optional_returns_fallback() -> None:

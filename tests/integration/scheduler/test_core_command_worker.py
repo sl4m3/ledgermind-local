@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from ledgermind_local.core_gateway.contracts import (
     HypothesisEvidence,
     HypothesisExtraction,
     HypothesisPayload,
+    IngestRawRoundResult,
     TransientCoreError,
 )
 from ledgermind_local.persistence import open_sqlite_connection
@@ -301,3 +303,54 @@ def test_core_command_worker_request_stop_stops_created_loop(tmp_path: Path) -> 
     worker.request_stop()
 
     assert loop.join(timeout=1) is True
+
+
+class _RawRoundGateway(_Gateway):
+    def ingest_raw_round(self, command) -> IngestRawRoundResult:
+        self.calls.append(command.raw_round_id)
+        return IngestRawRoundResult(
+            accepted=True,
+            duplicate=False,
+            core_raw_round_id="core-raw-1",
+            operational_job_id="core-job-1",
+        )
+
+
+def test_core_command_worker_delivers_raw_round_and_clears_payload(tmp_path: Path) -> None:
+    connection, repository = _bootstrap(tmp_path / "rounds.db")
+    connection.execute("DELETE FROM core_commands WHERE command_id = 'command-1'")
+    command_payload = json.dumps({"raw_round_id": "raw-round-1"})
+    repository.create_core_command(
+        command_id="raw-command-1",
+        command_type="ingest_raw_round_v2",
+        memory_space_id="space-1",
+        idempotency_key="sha256:" + "f" * 64,
+        payload_json=command_payload,
+        payload_digest="sha256:" + "c" * 64,
+    )
+    repository.create_core_raw_round_delivery(
+        raw_round_id="raw-round-1",
+        memory_space_id="space-1",
+        command_id="raw-command-1",
+        idempotency_key="sha256:" + "f" * 64,
+    )
+    connection.commit()
+    connection.close()
+
+    worker = CoreCommandWorker(
+        database_path=tmp_path / "rounds.db",
+        gateway=_RawRoundGateway(),
+        worker_id="core-worker-1",
+    )
+    result = worker.process_once()
+
+    assert result is not None
+    assert result.status == "completed"
+    with sqlite3.connect(tmp_path / "rounds.db") as check:
+        assert check.execute(
+            "SELECT transport_status, core_raw_round_id, core_job_id "
+            "FROM raw_round_core_deliveries"
+        ).fetchone() == ("accepted", "core-raw-1", "core-job-1")
+        assert check.execute(
+            "SELECT payload_json, payload_bytes FROM raw_round_payloads"
+        ).fetchone() == ("{}", 0)

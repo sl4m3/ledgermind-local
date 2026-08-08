@@ -17,7 +17,10 @@ from ledgermind_local.core_gateway import (
     ContextViewResult,
     CoreGateway,
     ProcessCoreGateway,
+    RecordRetrievalOutcomeV2Command,
     RetrieveContextCommand,
+    RetrieveContextV2Command,
+    RetrieveContextV2Result,
 )
 from ledgermind_local.core_gateway.security_policy import (
     build_core_isolation_requirements,
@@ -25,6 +28,13 @@ from ledgermind_local.core_gateway.security_policy import (
 from ledgermind_local.core_gateway.signing import verify_core_binary
 from ledgermind_local.core_gateway.supervisor import CoreSupervisor
 from ledgermind_local.inference import InferenceBroker, SecretStore
+from ledgermind_local.inference.core_task_executor import CoreTaskExecutor
+from ledgermind_local.inference.embedding_provider import EmbeddingProvider
+from ledgermind_local.inference.profile_slots import (
+    DatabaseBackedProfileResolver,
+    ProfileSlot,
+)
+from ledgermind_local.inference.structured_json_provider import StructuredJsonProvider
 from ledgermind_local.maintenance.coordinated_restore import (
     CoordinatedRestoreError,
     CoordinatedRestoreService,
@@ -41,7 +51,7 @@ from ledgermind_local.processing import (
 from ledgermind_local.raw_rounds import RawRoundIngestHandler
 from ledgermind_local.scheduler import (
     CoreCommandWorker,
-    CoreModelTaskWorker,
+    CoreExecutionTaskWorker,
     CoreModelTaskWorkerStats,
     CoreProjectionWorker,
     GuardedWorkerLoop,
@@ -124,6 +134,24 @@ def _build_vectorizer_factory() -> Callable[[], Any] | None:
     return lambda: GGUFVectorizer(model_path=model_path)
 
 
+def _build_runtime_vectorizer_factory(config: LocalConfig) -> Callable[[], Any]:
+    """Build the technical embedding backend used by generic Core tasks."""
+
+    if not config.vector.enabled:
+        def unavailable_vectorizer() -> Any:
+            raise RuntimeError("local embedding backend is disabled")
+
+        return unavailable_vectorizer
+
+    from ledgermind_local.projections import GGUFVectorizer
+
+    model_path = Path(config.vector.model_path).expanduser()
+    return lambda: GGUFVectorizer(
+        model_path=model_path,
+        gpu_layers=config.vector.gpu_layers,
+    )
+
+
 def build_ingest_raw_round_handler(
     *,
     database_path: str | Path,
@@ -142,6 +170,7 @@ def build_ingest_raw_round_handler(
         pipeline_version=pipeline_version,
         normalizer_version=normalizer_version,
         prompt_version=prompt_version,
+        core_pipeline=True,
     )
 
 
@@ -292,6 +321,16 @@ class _RuntimeCoreBackedSearch(CoreBackedSearch):
         super()._mark_degraded()
         if not self._fallback_to_core_fts:
             raise RuntimeError("local candidate search is unavailable")
+
+    def retrieve_context_v2(
+        self, request: RetrieveContextV2Command
+    ) -> RetrieveContextV2Result:
+        return self._core_gateway.retrieve_context_v2(request)
+
+    def record_retrieval_outcome_v2(
+        self, command: RecordRetrievalOutcomeV2Command
+    ) -> None:
+        self._core_gateway.record_retrieval_outcome_v2(command)
 
 
 def build_process_core_gateway(*, paths: ServicePaths, config: LocalConfig) -> ProcessCoreGateway:
@@ -539,6 +578,24 @@ class LocalRuntime:
         self._stop_requested = True
         for handle in reversed(tuple(self._workers.values())):
             handle.loop.request_stop()
+
+    def embed_query(self, memory_space_id: str, query: str) -> tuple[float, ...]:
+        """Compute a retrieval embedding through the Local technical backend."""
+
+        return self.embed_query_with_metadata(memory_space_id, query)[0]
+
+    def embed_query_with_metadata(
+        self, memory_space_id: str, query: str
+    ) -> tuple[tuple[float, ...], str, str]:
+        """Compute a retrieval embedding and preserve its model identity."""
+
+        resolver = DatabaseBackedProfileResolver(self.database_path)
+        profile = resolver.resolve_profile(memory_space_id, ProfileSlot.EMBEDDING)
+        provider = EmbeddingProvider(
+            vectorizer_factory=_build_runtime_vectorizer_factory(self.config)
+        )
+        batch = provider.embed((query,), profile, "retrieval_query")
+        return batch.vectors[0], batch.model, batch.model_version
 
     def stop(self) -> None:
         """Stop workers before Core and preserve incomplete shutdown state."""
@@ -869,12 +926,12 @@ class LocalRuntime:
                 self.core_gateway = self.core_gateway_factory()
             if self.core_gateway is None:
                 raise RuntimeError("Core gateway is unavailable")
-            required = ["base", "maintenance"]
+            required = ["base", "maintenance", "object_facet_v2"]
             workers = self.config.workers
             if workers.core_projections.enabled:
                 required.append("projections")
             if workers.core_model_tasks.enabled:
-                required.append("model_tasks")
+                required.append("execution_tasks")
             self._required_core_capabilities = tuple(required)
             start = getattr(self.core_gateway, "start", None)
             if callable(start):
@@ -975,17 +1032,26 @@ class LocalRuntime:
                 state=WorkerState(name),
             )
         if name == "core_model_tasks":
-            broker = InferenceBroker(
-                database_path=self.database_path,
-                secret_store=SecretStore(
-                    self.paths.resolve_home_path(self.config.inference_secrets_path)
-                ),
+            secret_store = SecretStore(
+                self.paths.resolve_home_path(self.config.inference_secrets_path)
             )
-            return CoreModelTaskWorker(
+            profile_resolver = DatabaseBackedProfileResolver(self.database_path)
+            return CoreExecutionTaskWorker(
                 database_path=self.database_path,
                 gateway=self.core_gateway,
-                broker=broker,
-                worker_id="local-model-tasks",
+                executor=CoreTaskExecutor(
+                    json_provider=StructuredJsonProvider(
+                        profile_resolver=profile_resolver,
+                        secret_store=secret_store,
+                    ),
+                    embedding_provider=EmbeddingProvider(
+                        vectorizer_factory=_build_runtime_vectorizer_factory(self.config)
+                    ),
+                    profile_resolver=profile_resolver,
+                    generate_json_timeout_seconds=300,
+                    embed_texts_timeout_seconds=300,
+                ),
+                worker_id="local-execution-tasks",
                 lease_seconds=int(self.config.processing_lease_seconds),
             )
         raise ValueError(f"unknown Local worker: {name}")

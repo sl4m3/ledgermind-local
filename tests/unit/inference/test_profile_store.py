@@ -86,3 +86,15 @@ def test_profile_store_rejects_binding_to_missing_profile(tmp_path) -> None:
             )
     finally:
         connection.close()
+
+
+def test_profile_store_binds_generic_model_slots(tmp_path) -> None:
+    connection = _connection(tmp_path / "local.db")
+    try:
+        store = InferenceProfileStore(connection)
+        store.upsert(_profile("operational"))
+        store.bind_slot("space", slot="operational", profile_id="operational")
+        assert store.get_slot("space", "operational") == "operational"
+        assert store.list_slots("space") == {"operational": "operational"}
+    finally:
+        connection.close()
