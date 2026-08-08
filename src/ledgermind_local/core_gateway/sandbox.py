@@ -428,6 +428,9 @@ def _build_bwrap_prefix(
     for path in declared_paths:
         if path.is_file():
             mount_paths.extend(_ldd_dependencies(path))
+        elif path.is_dir():
+            for extension in path.rglob("*.so"):
+                mount_paths.extend(_ldd_dependencies(extension))
     mount_paths.extend(extra_runtime_paths)
     python_home = _python_runtime_home(command)
     if python_home is not None:
@@ -602,7 +605,7 @@ def _python_runtime_home(command: Sequence[str]) -> Path | None:
 
 def _python_runtime_paths(python_home: Path) -> tuple[Path, ...]:
     version = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    return tuple(
+    paths = list(
         path
         for path in (
             python_home / "lib" / version,
@@ -610,6 +613,10 @@ def _python_runtime_paths(python_home: Path) -> tuple[Path, ...]:
         )
         if path.is_dir()
     )
+    for path in paths:
+        for extension in path.rglob("*.so"):
+            paths.extend(_ldd_dependencies(extension))
+    return tuple(paths)
 
 
 def _probe_runtime_paths() -> tuple[Path, ...]:
