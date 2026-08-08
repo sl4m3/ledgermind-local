@@ -605,14 +605,14 @@ def _python_runtime_home(command: Sequence[str]) -> Path | None:
 
 def _python_runtime_paths(python_home: Path) -> tuple[Path, ...]:
     version = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    paths = list(
+    paths = [
         path
         for path in (
             python_home / "lib" / version,
             python_home / "lib64" / version,
         )
         if path.is_dir()
-    )
+    ]
     for path in paths:
         for extension in path.rglob("*.so"):
             paths.extend(_ldd_dependencies(extension))
