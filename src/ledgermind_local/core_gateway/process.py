@@ -334,7 +334,7 @@ class ProcessCoreGateway(CoreGateway):
         self, command: IngestRawRoundCommand
     ) -> IngestRawRoundResult:
         try:
-            from ledgermind_protocol.object_facet_v1 import IngestRawRoundRequest
+            from ledgermind_protocol.object_facet_v2 import IngestRawRoundRequest
 
             request_payload: dict[str, object] = {
                 "command_id": command.command_id,
