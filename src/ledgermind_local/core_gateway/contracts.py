@@ -417,7 +417,6 @@ class PollExecutionTasksCommand:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 2,
             "memory_space_id": self.memory_space_id,
             "worker_id": self.worker_id,
             "limit": self.limit,
@@ -529,6 +528,7 @@ class RetrieveContextCommand:
 
     def to_payload(self) -> dict[str, object]:
         return {
+            "schema_version": 2,
             "memory_space_id": self.memory_space_id,
             "query_text": self.query_text,
             "query_embedding": list(self.query_embedding),
