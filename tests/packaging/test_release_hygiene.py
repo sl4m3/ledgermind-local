@@ -51,7 +51,8 @@ class LocalReleaseScriptTests(unittest.TestCase):
         manifest.write_text(
             json.dumps(
                 {
-                    "format": "ledgermind-release-manifest-v1",
+                    "format": "ledgermind-release-manifest",
+                    "schema_version": 1,
                     "component": "ledgermind-local",
                     "source_commit": commit,
                     "commit_sha": commit,
@@ -98,6 +99,12 @@ class LocalReleaseScriptTests(unittest.TestCase):
         self.assertIn("build>=1.2", dev_requirements)
         self.assertIn("mypy>=1.10", dev_requirements)
 
+    def test_package_metadata_has_one_stable_cli_entrypoint(self) -> None:
+        with (ROOT / "pyproject.toml").open("rb") as handle:
+            project = tomllib.load(handle)["project"]
+        self.assertNotIn("v" + "4", project["description"])
+        self.assertEqual(project["scripts"], {"ledgermind": "ledgermind_local.cli:main"})
+
     def test_verify_accepts_manifest_with_matching_artifact(self) -> None:
         commit, timestamp = self._head()
         with tempfile.TemporaryDirectory() as temporary:
@@ -141,6 +148,23 @@ class LocalReleaseScriptTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 2)
         self.assertIn("source commit does not match", result.stderr)
+
+    def test_verify_rejects_manifest_with_wrong_schema_version(self) -> None:
+        commit, timestamp = self._head()
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self._manifest(Path(temporary), commit, timestamp)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            payload["schema_version"] = 2
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "verify", "--manifest", str(manifest)],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("schema version", result.stderr)
 
 
 if __name__ == "__main__":

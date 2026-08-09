@@ -22,7 +22,7 @@ def _load_gate():
 
 
 class LocalVersionlessNamesTests(unittest.TestCase):
-    def test_current_checkout_is_diagnosed_without_rewriting_product_code(self) -> None:
+    def test_current_checkout_passes_without_versioned_surface(self) -> None:
         result = subprocess.run(
             [sys.executable, str(SCRIPT)],
             cwd=ROOT,
@@ -30,10 +30,8 @@ class LocalVersionlessNamesTests(unittest.TestCase):
             text=True,
             check=False,
         )
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("versionless-name gate:", result.stdout)
-        self.assertIn("pyproject.toml", result.stdout)
-        self.assertIn("versioned-route", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "versionless-name gate: clean")
 
     def test_scan_uses_tracked_paths_and_narrow_allowlists(self) -> None:
         gate = _load_gate()

@@ -80,6 +80,6 @@ def test_vectorizer_rejects_partial_results() -> None:
 
 
 def test_fingerprint_is_stable() -> None:
-    vectorizer = _TestVectorizer(dimension=2, fingerprint="stable:v1")
-    assert vectorizer.fingerprint == "stable:v1"
-    assert vectorizer.fingerprint == "stable:v1"
+    vectorizer = _TestVectorizer(dimension=2, fingerprint="stable")
+    assert vectorizer.fingerprint == "stable"
+    assert vectorizer.fingerprint == "stable"
