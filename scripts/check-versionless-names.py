@@ -194,6 +194,8 @@ def _allowed(
 ) -> bool:
     if source == "path":
         return _is_sql_migration_path(path) or _is_migration_compatibility_module(path)
+    if _is_sql_migration_path(path):
+        return True
     if _is_migration_compatibility_module(path):
         return True
     if _is_metadata_version_line(path, line, section):
