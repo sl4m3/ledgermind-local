@@ -41,6 +41,7 @@ from ledgermind_local.maintenance.core_backup import CoreBackupService
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
+from ledgermind_local.persistence.contract_migration import migrate_contract_payloads
 from ledgermind_local.raw_rounds import RawRoundIngestHandler
 from ledgermind_local.scheduler import (
     CoreCommandWorker,
@@ -162,6 +163,7 @@ class LocalRuntime:
         core_gateway: CoreGateway | None = None,
         core_gateway_factory: Callable[[], CoreGateway] | None = None,
         migration_runner: Callable[[sqlite3.Connection], object] | None = None,
+        contract_migration_runner: Callable[..., object] | None = None,
         connection_factory: Callable[[str | Path], sqlite3.Connection] = open_sqlite_connection,
         lock_factory: Callable[[Path], ServiceLock] = ServiceLock,
         pid_writer: Callable[[Path, int], None] | None = None,
@@ -179,6 +181,7 @@ class LocalRuntime:
             lambda: build_process_core_gateway(paths=self.paths, config=self.config)
         )
         self.migration_runner = migration_runner or migrations.apply_migrations
+        self.contract_migration_runner = contract_migration_runner
         self.connection_factory = connection_factory
         self.lock_factory = lock_factory
         self.pid_writer = pid_writer or _write_runtime_pid
@@ -507,7 +510,7 @@ class LocalRuntime:
         restore = dict(self._restore_status or {"ready": True, "state": "clean"})
         restore_ready = bool(restore.get("ready", False))
         capabilities_ready = bool(capabilities.get("ready", False))
-        schema_ready = self._core_schema_version == 11
+        schema_ready = self._core_schema_version == 12
         control_ready = not bool(self._component_errors.get("control"))
         statistics_ready = not bool(self._component_errors.get("statistics"))
         terminal_worker_failure = any(
@@ -629,6 +632,14 @@ class LocalRuntime:
                 connection = enter()
                 entered = True
             self.migration_runner(connection)
+            if self.contract_migration_runner is None:
+                migrate_contract_payloads(
+                    database_path=self.database_path,
+                    connection=connection,
+                    stop_delivery=self._stop_delivery_integration,
+                )
+            else:
+                self.contract_migration_runner(connection)
             if getattr(connection, "in_transaction", False):
                 connection.commit()
             execute = getattr(connection, "execute", None)
@@ -646,6 +657,17 @@ class LocalRuntime:
                 close = getattr(connection, "close", None)
                 if callable(close):
                     close()
+
+    def _stop_delivery_integration(self) -> None:
+        """Ensure no already-created delivery loop can write during cutover."""
+
+        handle = self._workers.get("core_commands")
+        if handle is None or not handle.loop.is_alive():
+            return
+        handle.loop.request_stop()
+        result = handle.loop.shutdown(handle.config.shutdown_timeout_seconds)
+        if not bool(getattr(result, "stopped", False)):
+            raise RuntimeError("Core delivery worker did not stop for contract migration")
 
     def _build_restore_service(self) -> CoordinatedRestoreService | None:
         backup_service = self._backup_service
@@ -720,7 +742,7 @@ class LocalRuntime:
                 self.core_gateway = self.core_gateway_factory()
             if self.core_gateway is None:
                 raise RuntimeError("Core gateway is unavailable")
-            required = ["base", "maintenance", "object_facet_v2"]
+            required = ["base", "maintenance", "object_facet"]
             workers = self.config.workers
             if workers.core_model_tasks.enabled:
                 required.append("execution_tasks")

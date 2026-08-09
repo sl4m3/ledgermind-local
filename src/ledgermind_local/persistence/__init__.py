@@ -1,5 +1,13 @@
 """Persistence package for Local-owned SQLite storage."""
 
+from .contract_migration import (
+    CONTRACT_MIGRATION_MARKER,
+    ContractMigrationBackupError,
+    ContractMigrationError,
+    ContractMigrationPreconditionError,
+    ContractMigrationResult,
+    migrate_contract_payloads,
+)
 from .database import managed_connection, open_sqlite_connection
 from .memory_space_repository import (
     MemorySpace,
@@ -19,6 +27,11 @@ from .sqlite_uow import (
 )
 
 __all__ = [
+    "CONTRACT_MIGRATION_MARKER",
+    "ContractMigrationBackupError",
+    "ContractMigrationError",
+    "ContractMigrationPreconditionError",
+    "ContractMigrationResult",
     "CoreCommandRecord",
     "CoreRawRoundDeliveryRecord",
     "MemorySpace",
@@ -30,5 +43,6 @@ __all__ = [
     "SQLiteUnitOfWorkError",
     "SQLiteUnitOfWorkInactiveError",
     "managed_connection",
+    "migrate_contract_payloads",
     "open_sqlite_connection",
 ]
