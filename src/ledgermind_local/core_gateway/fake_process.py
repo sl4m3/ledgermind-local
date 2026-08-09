@@ -1,4 +1,4 @@
-"""Small deterministic Core IPC v2 process used by Local acceptance tests."""
+"""Small deterministic Core IPC process used by Local acceptance tests."""
 
 from __future__ import annotations
 
@@ -31,14 +31,14 @@ _CURRENT_OPERATIONS = {
     "handshake",
     "health",
     "shutdown",
-    "ingest_raw_round_v2",
-    "poll_execution_tasks_v2",
-    "submit_execution_result_v2",
-    "fail_execution_task_v2",
-    "retrieve_context_v2",
-    "record_retrieval_outcome_v2",
-    "run_control_maintenance_v1",
-    "get_object_facet_statistics_v1",
+    "ingest_raw_round",
+    "poll_execution_tasks",
+    "submit_execution_result",
+    "fail_execution_task",
+    "retrieve_context",
+    "record_retrieval_outcome",
+    "run_control_maintenance",
+    "get_object_facet_statistics",
     "create_backup",
     "validate_backup",
     "prepare_restore",
@@ -47,17 +47,17 @@ _CURRENT_OPERATIONS = {
     "rollback_restore",
 }
 _CURRENT_CAPABILITIES = {
-    "object_facet_memory_v1",
-    "operational_pipeline_v1",
-    "strict_candidate_binding_v2",
-    "generic_execution_tasks_v1",
-    "raw_round_ingest_v2",
-    "context_retrieval_v2",
-    "context_provenance_v1",
-    "stable_sha256_digests_v1",
-    "object_resolution_v1",
-    "explainable_context_v1",
-    "control_contour_v1",
+    "object_facet_memory",
+    "operational_pipeline",
+    "strict_candidate_binding",
+    "generic_execution_tasks",
+    "raw_round_ingest",
+    "context_retrieval",
+    "context_provenance",
+    "stable_sha256_digests",
+    "object_resolution",
+    "explainable_context",
+    "control_contour",
     "core_owned_backup",
     "coordinated_restore",
 }
@@ -126,7 +126,7 @@ def main() -> int:
     malformed_health_response = "--malformed-health-response" in sys.argv
     missing_capabilities = _argument_values("--missing-capability")
     missing_operations = _argument_values("--missing-operation")
-    schema_version = 11
+    schema_version = 12
     if "--schema-version" in sys.argv:
         schema_version = int(sys.argv[sys.argv.index("--schema-version") + 1])
     core_data_dir = Path(os.environ.get("LEDGERMIND_CORE_DATA_DIR", "."))
@@ -197,7 +197,7 @@ def main() -> int:
         elif request.operation == "shutdown":
             _write(CoreResponseEnvelope.ok(request.request_id, {"stopped": True}))
             return 0
-        elif request.operation == "ingest_raw_round_v2":
+        elif request.operation == "ingest_raw_round":
             command_id = str(request.payload.get("command_id", request.request_id))
             _write(
                 CoreResponseEnvelope.ok(
@@ -209,20 +209,20 @@ def main() -> int:
                     },
                 )
             )
-        elif request.operation == "poll_execution_tasks_v2":
+        elif request.operation == "poll_execution_tasks":
             _write(
                 CoreResponseEnvelope.ok(
                     request.request_id, {"tasks": [], "has_more": False}
                 )
             )
-        elif request.operation == "submit_execution_result_v2":
+        elif request.operation == "submit_execution_result":
             _write(
                 CoreResponseEnvelope.ok(
                     request.request_id,
                     {"accepted": True, "duplicate": False, "status": "accepted"},
                 )
             )
-        elif request.operation == "fail_execution_task_v2":
+        elif request.operation == "fail_execution_task":
             _write(
                 CoreResponseEnvelope.ok(
                     request.request_id,
@@ -234,7 +234,7 @@ def main() -> int:
                     },
                 )
             )
-        elif request.operation == "retrieve_context_v2":
+        elif request.operation == "retrieve_context":
             _write(
                 CoreResponseEnvelope.ok(
                     request.request_id,
@@ -268,9 +268,9 @@ def main() -> int:
                     },
                 )
             )
-        elif request.operation == "record_retrieval_outcome_v2":
+        elif request.operation == "record_retrieval_outcome":
             _write(CoreResponseEnvelope.ok(request.request_id, {"recorded": True}))
-        elif request.operation == "run_control_maintenance_v1":
+        elif request.operation == "run_control_maintenance":
             _write(
                 CoreResponseEnvelope.ok(
                     request.request_id,
@@ -286,7 +286,7 @@ def main() -> int:
                     },
                 )
             )
-        elif request.operation == "get_object_facet_statistics_v1":
+        elif request.operation == "get_object_facet_statistics":
             _write(
                 CoreResponseEnvelope.ok(
                     request.request_id,
@@ -306,7 +306,7 @@ def main() -> int:
             )
         elif request.operation == "create_backup":
             relative_path = "exchange/outgoing/fake-core-backup.bin"
-            snapshot = b"fake-core-snapshot-v1"
+            snapshot = b"fake-core-snapshot"
             destination = _exchange_file(core_data_dir, relative_path)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(snapshot)

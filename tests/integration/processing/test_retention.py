@@ -16,7 +16,7 @@ from ledgermind_local.raw_rounds import RawRoundIngestHandler
 from ledgermind_local.scheduler.retention_worker import RawRoundRetentionWorker
 
 _FIXTURE = {
-    "api_version": "2",
+    "schema_version": 2,
     "idempotency_key": "sha256:" + "a" * 64,
     "memory_space_id": "retention-space",
     "source": {

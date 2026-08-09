@@ -51,7 +51,7 @@ def _bootstrap(path: Path) -> tuple[sqlite3.Connection, SQLiteRawRoundRepository
 def _queue_command(repository: SQLiteRawRoundRepository, command_id: str = "command-1") -> None:
     repository.create_core_command(
         command_id=command_id,
-        command_type="ingest_raw_round_v2",
+        command_type="ingest_raw_round",
         memory_space_id="space-1",
         idempotency_key="sha256:" + command_id[-1] * 64,
         payload_json=json.dumps(

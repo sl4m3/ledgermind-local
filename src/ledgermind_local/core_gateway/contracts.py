@@ -1,4 +1,4 @@
-"""Versioned Local-to-Core command contracts."""
+"""Stable Local-to-Core command contracts."""
 
 from __future__ import annotations
 
@@ -122,7 +122,7 @@ class IngestRawRoundResult:
 
 
 @dataclass(frozen=True, slots=True)
-class CoreExecutionTaskV2:
+class CoreExecutionTask:
     """Strict technical execution envelope owned by the Local boundary.
 
     ``operation`` and ``operation_input`` are deliberately opaque.  Local only
@@ -216,7 +216,7 @@ class CoreExecutionTaskV2:
                 raise TypeError("embedding_request.dimensions must be a positive integer")
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> CoreExecutionTaskV2:
+    def from_payload(cls, payload: Mapping[str, Any]) -> CoreExecutionTask:
         _strict_mapping(
             payload,
             {
@@ -231,7 +231,7 @@ class CoreExecutionTaskV2:
                 "embedding_request",
                 "operation_input",
             },
-            "object-facet v2 execution task",
+            "object-facet execution task",
         )
         task_kind = payload.get("task_kind")
         if task_kind not in {"generate_json", "embed_texts"}:
@@ -290,7 +290,7 @@ class CoreExecutionTaskV2:
 
 
 @dataclass(frozen=True, slots=True)
-class CoreExecutionResultV2:
+class CoreExecutionResult:
     """Strict generic result envelope sent back to Core."""
 
     task_id: str
@@ -340,7 +340,7 @@ class CoreExecutionResultV2:
         }
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> CoreExecutionResultV2:
+    def from_payload(cls, payload: Mapping[str, Any]) -> CoreExecutionResult:
         _strict_mapping(
             payload,
             {
@@ -354,7 +354,7 @@ class CoreExecutionResultV2:
                 "egress_audit",
                 "error_code",
             },
-            "object-facet v2 execution result",
+            "object-facet execution result",
         )
         task_kind = payload.get("task_kind")
         if task_kind not in {"generate_json", "embed_texts"}:
@@ -399,12 +399,6 @@ class CoreExecutionResultV2:
                 else None
             ),
         )
-
-
-# Names used by callers that want the protocol vocabulary rather than the
-# transport-specific ``Core*`` prefix.
-GenericExecutionTaskV2 = CoreExecutionTaskV2
-GenericExecutionResultV2 = CoreExecutionResultV2
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,7 +478,7 @@ class FailExecutionTaskResult:
 
 
 @dataclass(frozen=True, slots=True)
-class RetrieveContextV2Command:
+class RetrieveContextCommand:
     request_id: str
     memory_space_id: str
     query_text: str
@@ -545,12 +539,12 @@ class RetrieveContextV2Command:
 
 
 @dataclass(frozen=True, slots=True)
-class RetrieveContextV2Result:
+class RetrieveContextResult:
     payload: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
-class RecordRetrievalOutcomeV2Command:
+class RecordRetrievalOutcomeCommand:
     request_id: str
     retrieval_request_id: str
     candidate_value_ids: tuple[str, ...]
@@ -735,23 +729,21 @@ class ObjectFacetStatistics:
 __all__ = [
     "ControlMaintenanceResult",
     "CoreCapabilityError",
-    "CoreExecutionResultV2",
-    "CoreExecutionTaskV2",
+    "CoreExecutionResult",
+    "CoreExecutionTask",
     "CoreGatewayError",
     "CoreHealth",
     "DomainRejectedError",
     "FailExecutionTaskCommand",
     "FailExecutionTaskResult",
-    "GenericExecutionResultV2",
-    "GenericExecutionTaskV2",
     "IngestRawRoundCommand",
     "IngestRawRoundResult",
     "ObjectFacetStatistics",
     "PollExecutionTasksCommand",
     "PollExecutionTasksResult",
-    "RecordRetrievalOutcomeV2Command",
-    "RetrieveContextV2Command",
-    "RetrieveContextV2Result",
+    "RecordRetrievalOutcomeCommand",
+    "RetrieveContextCommand",
+    "RetrieveContextResult",
     "RunControlMaintenanceCommand",
     "SubmitExecutionResult",
     "SubmitExecutionResultCommand",

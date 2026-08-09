@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 
 from ledgermind_local.core_gateway.contracts import (
-    CoreExecutionResultV2,
-    CoreExecutionTaskV2,
-    RecordRetrievalOutcomeV2Command,
+    CoreExecutionResult,
+    CoreExecutionTask,
+    RecordRetrievalOutcomeCommand,
 )
 
 _EXPIRES_AT = "2026-08-08T12:00:00Z"
@@ -13,11 +13,11 @@ _EXPIRES_AT = "2026-08-08T12:00:00Z"
 
 def _task_payload() -> dict[str, object]:
     return {
-        "task_id": "task-v2",
+        "task_id": "task-1",
         "task_kind": "generate_json",
         "operation": "core_owned_operation",
         "profile_slot": "operational",
-        "memory_space_id": "space-v2",
+        "memory_space_id": "space-1",
         "expires_at": _EXPIRES_AT,
         "lease": "2026-08-08T11:05:00Z",
         "model_request": {
@@ -31,7 +31,7 @@ def _task_payload() -> dict[str, object]:
 
 
 def test_execution_task_round_trip_preserves_opaque_operation_metadata() -> None:
-    task = CoreExecutionTaskV2.from_payload(_task_payload())
+    task = CoreExecutionTask.from_payload(_task_payload())
 
     assert task.task_kind == "generate_json"
     assert task.operation == "core_owned_operation"
@@ -43,7 +43,7 @@ def test_execution_task_round_trip_preserves_opaque_operation_metadata() -> None
 
 def test_execution_result_rejects_unknown_fields_and_invalid_shape() -> None:
     payload = {
-        "task_id": "task-v2",
+        "task_id": "task-1",
         "task_kind": "generate_json",
         "status": "completed",
         "operation": "core_owned_operation",
@@ -54,18 +54,18 @@ def test_execution_result_rejects_unknown_fields_and_invalid_shape() -> None:
         "error_code": None,
     }
 
-    result = CoreExecutionResultV2.from_payload(payload)
+    result = CoreExecutionResult.from_payload(payload)
     assert result.to_payload() == payload
 
     with pytest.raises(ValueError, match="unknown fields"):
-        CoreExecutionResultV2.from_payload({**payload, "unexpected": True})
+        CoreExecutionResult.from_payload({**payload, "unexpected": True})
     with pytest.raises(ValueError, match="invalid output shape"):
-        CoreExecutionResultV2.from_payload({**payload, "output": None})
+        CoreExecutionResult.from_payload({**payload, "output": None})
 
 
 def test_retrieval_outcome_requires_candidate_bound_delivery() -> None:
     with pytest.raises(ValueError, match="subset"):
-        RecordRetrievalOutcomeV2Command(
+        RecordRetrievalOutcomeCommand(
             request_id="outcome-request",
             retrieval_request_id="retrieval-request",
             candidate_value_ids=("candidate-1",),

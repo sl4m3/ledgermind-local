@@ -13,7 +13,7 @@ from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
 
 _FIXTURE = {
-    "api_version": "2",
+    "schema_version": 2,
     "idempotency_key": "sha256:19dd0368d25bd5888fffe1f5d0a1e7ace48337459dcbd27d325c1030243e7b08",
     "memory_space_id": "workspace_01",
     "source": {
@@ -84,7 +84,7 @@ def test_post_round_queues_raw_round_for_core(tmp_path) -> None:
     _bootstrap(database)
 
     response = _client(database).post(
-        "/v1/rounds",
+        "/rounds",
         headers={"Authorization": "Bearer token"},
         json=_FIXTURE,
     )
@@ -112,10 +112,10 @@ def test_post_round_duplicate_returns_existing_ids(tmp_path) -> None:
     client = _client(database)
 
     first = client.post(
-        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
+        "/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
     )
     second = client.post(
-        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
+        "/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
     )
 
     assert first.status_code == 202
@@ -130,7 +130,7 @@ def test_post_round_same_source_different_payload_is_conflict(tmp_path) -> None:
     client = _client(database)
     assert (
         client.post(
-            "/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
+            "/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
         ).status_code
         == 202
     )
@@ -140,7 +140,7 @@ def test_post_round_same_source_different_payload_is_conflict(tmp_path) -> None:
     changed["payload_digest"] = calculate_raw_round_digest(changed)
     changed["idempotency_key"] = changed["payload_digest"]
     response = client.post(
-        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=changed
+        "/rounds", headers={"Authorization": "Bearer token"}, json=changed
     )
 
     assert response.status_code == 409
@@ -155,10 +155,10 @@ def test_post_round_same_source_isolated_by_memory_space(tmp_path) -> None:
     second["memory_space_id"] = "workspace_02"
 
     first_response = client.post(
-        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
+        "/rounds", headers={"Authorization": "Bearer token"}, json=_FIXTURE
     )
     second_response = client.post(
-        "/v1/rounds", headers={"Authorization": "Bearer token"}, json=second
+        "/rounds", headers={"Authorization": "Bearer token"}, json=second
     )
 
     assert first_response.status_code == 202

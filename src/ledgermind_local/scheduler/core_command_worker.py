@@ -69,7 +69,7 @@ class CoreCommandWorker:
         if command is None:
             return None
         try:
-            if command.command_type == "ingest_raw_round_v2":
+            if command.command_type == "ingest_raw_round":
                 raw_result = self._deliver_raw_round(command)
                 if not raw_result.accepted:
                     raise DomainRejectedError(
@@ -90,7 +90,7 @@ class CoreCommandWorker:
                     status="completed",
                     result_json=result_json,
                 )
-            if command.command_type != "ingest_raw_round_v2":
+            if command.command_type != "ingest_raw_round":
                 raise DomainRejectedError(
                     "unsupported_command_type",
                     command.command_type,
@@ -242,7 +242,7 @@ class CoreCommandWorker:
             if not updated:
                 uow.rollback()
                 return CoreCommandProcessResult(command_id, "lease_lost")
-            if command.command_type == "ingest_raw_round_v2":
+            if command.command_type == "ingest_raw_round":
                 try:
                     raw_round_id = str(json.loads(command.payload_json)["raw_round_id"])
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError):

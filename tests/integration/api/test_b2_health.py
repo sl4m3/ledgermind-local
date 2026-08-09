@@ -50,10 +50,10 @@ def test_capture_ready_is_independent_from_full_ready(tmp_path: Path) -> None:
                 ),
             )
         )
-        capture = client.get("/v1/health/capture-ready", headers=_auth())
-        full = client.get("/v1/health/full-ready", headers=_auth())
-        alias = client.get("/v1/health/ready", headers=_auth())
-        details = client.get("/v1/health/details", headers=_auth())
+        capture = client.get("/health/capture-ready", headers=_auth())
+        full = client.get("/health/full-ready", headers=_auth())
+        ready = client.get("/health/ready", headers=_auth())
+        details = client.get("/health/details", headers=_auth())
 
         assert capture.status_code == 200
         assert capture.json()["ready"] is True
@@ -61,7 +61,7 @@ def test_capture_ready_is_independent_from_full_ready(tmp_path: Path) -> None:
         assert capture.json()["full_ready"] is False
         assert full.status_code == 503
         assert full.json()["ready"] is False
-        assert alias.status_code == 503
+        assert ready.status_code == 503
         assert details.status_code == 200
         assert details.json()["capture_ready"] is True
         assert details.json()["full_ready"] is False

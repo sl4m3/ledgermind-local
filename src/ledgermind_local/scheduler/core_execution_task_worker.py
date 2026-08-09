@@ -11,7 +11,7 @@ from pathlib import Path
 
 from ledgermind_local.core_gateway.base import CoreGateway
 from ledgermind_local.core_gateway.contracts import (
-    CoreExecutionTaskV2,
+    CoreExecutionTask,
     DomainRejectedError,
     FailExecutionTaskCommand,
     PollExecutionTasksCommand,
@@ -286,7 +286,7 @@ def _local_execution_task(
 ) -> GenericExecutionTask:
     """Convert the language-neutral wire task to the Local executor model."""
 
-    wire = CoreExecutionTaskV2.from_payload(raw_task)
+    wire = CoreExecutionTask.from_payload(raw_task)
     if wire.memory_space_id != memory_space_id:
         raise ValueError("execution task memory space does not match poll scope")
     model_request = None
