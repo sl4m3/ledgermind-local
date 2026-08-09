@@ -58,6 +58,7 @@ REQUIRED_WHEEL_FILES = {
     "ledgermind_local/persistence/rounds_migrations/0005_worker_leases.sql",
     "ledgermind_local/persistence/rounds_migrations/0006_object_facet_core_delivery.sql",
     "ledgermind_local/persistence/rounds_migrations/0007_contract_naming.sql",
+    "ledgermind_local/persistence/contract_migration.py",
     "ledgermind_local/persistence/rounds_migrations/0002_projection_state_compat.sql",
     "ledgermind_local/persistence/rounds_migrations/0003_core_projection_inbox.sql",
     "ledgermind_local/persistence/rounds_migrations/0004_core_projection_fts.sql",
