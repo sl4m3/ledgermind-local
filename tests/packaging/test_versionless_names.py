@@ -51,7 +51,10 @@ class LocalVersionlessNamesTests(unittest.TestCase):
                     "uuid.uuid4();\n"
                 ),
                 "migrations/0001_historical-v2.sql": "SELECT 1;\n",
-                "src/ledgermind_local/persistence/migrations.py": 'NAME = "legacy_v1"\n',
+                "src/ledgermind_local/persistence/contract_migration.py": (
+                    'legacy = "ledgermind_context_v1"\n'
+                    'operation = "retrieve_context_v2"\n'
+                ),
                 "scripts/release-local.py": 'status = "--porcelain=v1"\n',
             }
             for relative, contents in files.items():
@@ -68,12 +71,14 @@ class LocalVersionlessNamesTests(unittest.TestCase):
         self.assertIn("pyproject.toml:3:", rendered)
         self.assertIn("src/contracts.py:1:", rendered)
         self.assertIn("src/contracts.py:3:", rendered)
+        self.assertIn("contract_migration.py:2:", rendered)
         self.assertNotIn("untracked_v9.py", rendered)
         self.assertNotIn("provider.example/v1", rendered)
         self.assertNotIn("new_v4", rendered)
         self.assertNotIn("porcelain=v1", rendered)
         self.assertNotIn("0001_historical-v2.sql:0:", rendered)
-        self.assertNotIn("legacy_v1", rendered)
+        self.assertNotIn("contract_migration.py:1:", rendered)
+        self.assertNotIn("ledgermind_context_v1", rendered)
 
 
 if __name__ == "__main__":
