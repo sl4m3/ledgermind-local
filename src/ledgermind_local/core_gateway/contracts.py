@@ -130,6 +130,7 @@ class CoreExecutionTask:
     semantics such as extraction and consolidation.
     """
 
+    schema_version: int
     task_id: str
     task_kind: Literal["generate_json", "embed_texts"]
     operation: str
@@ -142,6 +143,8 @@ class CoreExecutionTask:
     operation_input: dict[str, Any] | None
 
     def __post_init__(self) -> None:
+        if self.schema_version != 2:
+            raise ValueError("schema_version must be 2")
         _required(self.task_id, "task_id")
         _required(self.operation, "operation")
         _required(self.memory_space_id, "memory_space_id")
@@ -220,6 +223,7 @@ class CoreExecutionTask:
         _strict_mapping(
             payload,
             {
+                "schema_version",
                 "task_id",
                 "task_kind",
                 "operation",
@@ -250,6 +254,7 @@ class CoreExecutionTask:
             if value is not None and not isinstance(value, dict):
                 raise TypeError(f"{name} must be an object")
         return cls(
+            schema_version=_non_negative_int(payload.get("schema_version"), "schema_version"),
             task_id=_required(payload.get("task_id"), "task_id"),
             task_kind=task_kind,
             operation=_required(payload.get("operation"), "operation"),
@@ -274,6 +279,7 @@ class CoreExecutionTask:
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
+            "schema_version": self.schema_version,
             "task_id": self.task_id,
             "task_kind": self.task_kind,
             "operation": self.operation,
@@ -599,13 +605,14 @@ class RunControlMaintenanceCommand:
 @dataclass(frozen=True, slots=True)
 class ControlMaintenanceResult:
     status: str
-    object_count: int
-    active_value_count: int
-    superseded_value_count: int
-    operational_backlog: int
-    background_backlog: int
-    embedding_backlog: int
-    integrity_finding_count: int
+    memory_echoes_reconciled: int
+    stats_rebuilt: int
+    stale_jobs_recovered: int
+    findings_created: int
+    duplicate_object_findings: int
+    missing_card_embeddings: int
+    missing_facet_embeddings: int
+    integrity_errors: int
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> ControlMaintenanceResult:
@@ -613,13 +620,14 @@ class ControlMaintenanceResult:
             payload,
             {
                 "status",
-                "object_count",
-                "active_value_count",
-                "superseded_value_count",
-                "operational_backlog",
-                "background_backlog",
-                "embedding_backlog",
-                "integrity_finding_count",
+                "memory_echoes_reconciled",
+                "stats_rebuilt",
+                "stale_jobs_recovered",
+                "findings_created",
+                "duplicate_object_findings",
+                "missing_card_embeddings",
+                "missing_facet_embeddings",
+                "integrity_errors",
             },
             "control maintenance result",
         )
@@ -627,37 +635,39 @@ class ControlMaintenanceResult:
             raise ValueError("control maintenance status must be completed")
         return cls(
             status="completed",
-            object_count=_non_negative_int(payload.get("object_count"), "object_count"),
-            active_value_count=_non_negative_int(
-                payload.get("active_value_count"), "active_value_count"
+            memory_echoes_reconciled=_non_negative_int(
+                payload.get("memory_echoes_reconciled"), "memory_echoes_reconciled"
             ),
-            superseded_value_count=_non_negative_int(
-                payload.get("superseded_value_count"), "superseded_value_count"
+            stats_rebuilt=_non_negative_int(payload.get("stats_rebuilt"), "stats_rebuilt"),
+            stale_jobs_recovered=_non_negative_int(
+                payload.get("stale_jobs_recovered"), "stale_jobs_recovered"
             ),
-            operational_backlog=_non_negative_int(
-                payload.get("operational_backlog"), "operational_backlog"
+            findings_created=_non_negative_int(
+                payload.get("findings_created"), "findings_created"
             ),
-            background_backlog=_non_negative_int(
-                payload.get("background_backlog"), "background_backlog"
+            duplicate_object_findings=_non_negative_int(
+                payload.get("duplicate_object_findings"), "duplicate_object_findings"
             ),
-            embedding_backlog=_non_negative_int(
-                payload.get("embedding_backlog"), "embedding_backlog"
+            missing_card_embeddings=_non_negative_int(
+                payload.get("missing_card_embeddings"), "missing_card_embeddings"
             ),
-            integrity_finding_count=_non_negative_int(
-                payload.get("integrity_finding_count"), "integrity_finding_count"
+            missing_facet_embeddings=_non_negative_int(
+                payload.get("missing_facet_embeddings"), "missing_facet_embeddings"
             ),
+            integrity_errors=_non_negative_int(payload.get("integrity_errors"), "integrity_errors"),
         )
 
     def to_payload(self) -> dict[str, object]:
         return {
             "status": self.status,
-            "object_count": self.object_count,
-            "active_value_count": self.active_value_count,
-            "superseded_value_count": self.superseded_value_count,
-            "operational_backlog": self.operational_backlog,
-            "background_backlog": self.background_backlog,
-            "embedding_backlog": self.embedding_backlog,
-            "integrity_finding_count": self.integrity_finding_count,
+            "memory_echoes_reconciled": self.memory_echoes_reconciled,
+            "stats_rebuilt": self.stats_rebuilt,
+            "stale_jobs_recovered": self.stale_jobs_recovered,
+            "findings_created": self.findings_created,
+            "duplicate_object_findings": self.duplicate_object_findings,
+            "missing_card_embeddings": self.missing_card_embeddings,
+            "missing_facet_embeddings": self.missing_facet_embeddings,
+            "integrity_errors": self.integrity_errors,
         }
 
 

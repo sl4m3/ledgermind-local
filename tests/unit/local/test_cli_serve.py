@@ -92,13 +92,14 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
             del command
             return ControlMaintenanceResult(
                 status="completed",
-                object_count=0,
-                active_value_count=0,
-                superseded_value_count=0,
-                operational_backlog=0,
-                background_backlog=0,
-                embedding_backlog=0,
-                integrity_finding_count=0,
+                memory_echoes_reconciled=0,
+                stats_rebuilt=0,
+                stale_jobs_recovered=0,
+                findings_created=0,
+                duplicate_object_findings=0,
+                missing_card_embeddings=0,
+                missing_facet_embeddings=0,
+                integrity_errors=0,
             )
 
         def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics:

@@ -13,6 +13,7 @@ _EXPIRES_AT = "2026-08-08T12:00:00Z"
 
 def _task_payload() -> dict[str, object]:
     return {
+        "schema_version": 2,
         "task_id": "task-1",
         "task_kind": "generate_json",
         "operation": "core_owned_operation",
