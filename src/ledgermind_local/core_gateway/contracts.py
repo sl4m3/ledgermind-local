@@ -417,6 +417,7 @@ class PollExecutionTasksCommand:
 
     def to_payload(self) -> dict[str, object]:
         return {
+            "schema_version": 2,
             "memory_space_id": self.memory_space_id,
             "worker_id": self.worker_id,
             "limit": self.limit,
@@ -576,6 +577,7 @@ class RecordRetrievalOutcomeCommand:
 
     def to_payload(self) -> dict[str, object]:
         return {
+            "schema_version": 2,
             "retrieval_request_id": self.retrieval_request_id,
             "candidate_value_ids": list(self.candidate_value_ids),
             "delivered_value_ids": list(self.delivered_value_ids),
