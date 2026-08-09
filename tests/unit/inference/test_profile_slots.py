@@ -53,6 +53,7 @@ def _setup() -> tuple[InferenceProfileStore, sqlite3.Connection]:
         hypothesis_profile_id="operational-default",
         merge_profile_id="background-default",
     )
+    store.bind_slot("space", slot="embedding", profile_id="embedding-default")
     connection.commit()
     return store, connection
 
@@ -76,9 +77,9 @@ def test_resolve_background_slot_uses_merge_profile_binding() -> None:
     assert profile.profile_id == "background-default"
 
 
-def test_resolve_embedding_slot_uses_configured_embedding_profile() -> None:
+def test_resolve_embedding_slot_uses_persisted_slot() -> None:
     store, _ = _setup()
-    resolver = StoreBackedProfileResolver(store, embedding_profile_id="embedding-default")
+    resolver = StoreBackedProfileResolver(store)
 
     profile = resolver.resolve_profile("space", ProfileSlot.EMBEDDING)
 
@@ -114,7 +115,13 @@ def test_unbound_slot_raises_structured_error() -> None:
 
 
 def test_embedding_slot_without_configured_profile_raises() -> None:
-    store, _ = _setup()
+    store, connection = _setup()
+    connection.execute(
+        "DELETE FROM memory_space_model_profiles "
+        "WHERE memory_space_id = ? AND profile_slot = ?",
+        ("space", "embedding"),
+    )
+    connection.commit()
     resolver = StoreBackedProfileResolver(store)
 
     with pytest.raises(MissingProfileError) as error:

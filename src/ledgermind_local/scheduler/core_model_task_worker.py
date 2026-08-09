@@ -10,10 +10,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from ledgermind_local.core_gateway.base import CoreGateway
 from ledgermind_local.core_gateway.contracts import (
+    CoreExecutionTaskV2,
     DomainRejectedError,
     FailExecutionTaskCommand,
     PollExecutionTasksCommand,
@@ -44,7 +45,6 @@ from ledgermind_local.inference.providers.base import (
     ProviderTransportError,
     TransientProviderError,
 )
-from ledgermind_local.inference.schemas import MergeProposal
 from ledgermind_local.inference.secrets import SecretNotFoundError
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
@@ -95,7 +95,7 @@ class MergeProposalBroker(Protocol):
         memory_space_id: str,
         model_input: dict[str, object],
         profile_id: str,
-    ) -> MergeProposal: ...
+    ) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,26 +536,31 @@ def _local_execution_task(
 ) -> GenericExecutionTask:
     """Convert the language-neutral wire task to the A3 executor model."""
 
-    from ledgermind_protocol.object_facet_v1 import GenericExecutionTask as WireTask
-
-    wire = WireTask.model_validate(raw_task)
+    wire = CoreExecutionTaskV2.from_payload(raw_task)
+    if wire.memory_space_id != memory_space_id:
+        raise ValueError("execution task memory space does not match poll scope")
     model_request = None
     if wire.model_request is not None:
         model_request = ModelRequestSpec(
             messages=tuple(
-                ChatMessage.model_validate(message) for message in wire.model_request.messages
+                ChatMessage.model_validate(message)
+                for message in wire.model_request.get("messages", [])
             ),
-            max_output_tokens=wire.model_request.max_output_tokens,
-            response_format={"type": wire.model_request.response_format}
-            if wire.model_request.response_format == "json_object"
+            max_output_tokens=int(wire.model_request["max_output_tokens"]),
+            response_format={"type": wire.model_request["response_format"]}
+            if wire.model_request.get("response_format") == "json_object"
             else None,
         )
     embedding_request = None
     if wire.embedding_request is not None:
         embedding_request = EmbeddingRequestSpec(
-            texts=tuple(wire.embedding_request.texts),
-            purpose=wire.embedding_request.purpose,
-            dimensions=wire.embedding_request.dimensions,
+            texts=tuple(str(text) for text in wire.embedding_request.get("texts", [])),
+            purpose=str(wire.embedding_request["purpose"]),
+            dimensions=(
+                int(wire.embedding_request["dimensions"])
+                if wire.embedding_request.get("dimensions") is not None
+                else None
+            ),
         )
     return GenericExecutionTask(
         task_id=wire.task_id,
@@ -566,6 +571,7 @@ def _local_execution_task(
         embedding_request=embedding_request,
         expires_at=wire.expires_at,
         lease={"memory_space_id": memory_space_id, "value": wire.lease},
+        operation_input=wire.operation_input,
     )
 
 

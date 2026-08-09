@@ -139,6 +139,11 @@ def _memory_store() -> sqlite3.Connection:
         hypothesis_profile_id="operational-default",
         merge_profile_id="background-default",
     )
+    store.bind_slot(
+        "space",
+        slot="embedding",
+        profile_id="embedding-default",
+    )
     connection.commit()
     return connection
 

@@ -73,6 +73,7 @@ def create_rounds_router(
             "core_command_id": result.core_command_id,
             "duplicate": result.duplicate,
             "status": result.status,
+            "core_raw_round_id": result.core_raw_round_id,
         }
 
     return router

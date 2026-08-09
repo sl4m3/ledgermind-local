@@ -9,10 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from ledgermind_local.core_gateway import (
-    ContextViewResult,
     DomainRejectedError,
     RecordRetrievalOutcomeV2Command,
-    RetrieveContextCommand,
     RetrieveContextV2Command,
     RetrieveContextV2Result,
     TransientCoreError,
@@ -22,9 +20,7 @@ from .http import build_request_id, error_payload, validate_json_request_headers
 
 
 class ContextSearch(Protocol):
-    """Boundary used by HTTP context routes for Core or Core-backed search."""
-
-    def retrieve_context(self, request: RetrieveContextCommand) -> ContextViewResult: ...
+    """Core v2 context boundary used by the public retrieval route."""
 
     def retrieve_context_v2(
         self, request: RetrieveContextV2Command
@@ -61,25 +57,22 @@ class ContextRetrieveRequest(BaseModel):
 class ContextItemResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    knowledge_id: str
-    title: str
-    target: str
-    statement: str
+    value_id: str
+    primary_object_id: str
+    object_name: str
+    facet: str
+    content: str
     relevance: float = Field(ge=0.0, le=1.0)
-    selection_explanation: dict[str, object] | None = None
-    value_id: str | None = None
-    primary_object_id: str | None = None
-    object_name: str | None = None
-    facet: str | None = None
-    content: str | None = None
+    explanation: dict[str, object]
 
 
 class ContextViewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    api_version: Literal["1", "2"] = "1"
+    api_version: Literal["2"] = "2"
     items: list[ContextItemResponse]
-    retrieval_request_id: str | None = None
+    retrieval_request_id: str
+    delivered_value_ids: list[str] = Field(default_factory=list)
 
 
 def create_context_router(
@@ -108,10 +101,10 @@ def create_context_router(
         request_id = build_request_id(request.headers)
         response.headers["X-Request-ID"] = request_id
         try:
-            query_embedding = payload.query_embedding
             embedding_model_id = payload.embedding_model_id or "retrieval-embedder"
             embedding_model_version = payload.embedding_model_version or "1"
-            if query_embedding is None and query_embedder is not None:
+            query_embedding: list[float]
+            if query_embedder is not None:
                 embed_with_metadata = getattr(query_embedder, "embed_query_with_metadata", None)
                 if callable(embed_with_metadata):
                     embedded, embedding_model_id, embedding_model_version = embed_with_metadata(
@@ -125,64 +118,50 @@ def create_context_router(
                             payload.memory_space_id, payload.query
                         )
                     ]
-            if query_embedding is not None:
-                retrieve_v2 = getattr(context_search, "retrieve_context_v2", None)
-                if not callable(retrieve_v2):
-                    raise TransientCoreError("Core retrieval v2 is unavailable")
-                result = retrieve_v2(
-                    RetrieveContextV2Command(
-                        request_id=request_id,
-                        memory_space_id=payload.memory_space_id,
-                        query_text=payload.query,
-                        query_embedding=tuple(query_embedding),
-                        embedding_model_id=embedding_model_id,
-                        embedding_model_version=embedding_model_version,
-                        limit=payload.limit,
-                        project_id=payload.project_id,
-                        repository_id=payload.repository_id,
-                        task_id=payload.task_id,
-                        conversation_id=payload.conversation_id,
-                        related_object_ids=tuple(payload.related_object_ids or ()),
-                        requested_facets=tuple(payload.requested_facets or ()),
-                        explanation_level=payload.explanation_level,
-                    )
-                )
-                response_payload = _context_v2_response(result.payload)
-                record_outcome = getattr(
-                    context_search, "record_retrieval_outcome_v2", None
-                )
-                retrieval_request_id = response_payload.get("retrieval_request_id")
-                response_items = response_payload.get("items", [])
-                if (
-                    callable(record_outcome)
-                    and isinstance(retrieval_request_id, str)
-                    and isinstance(response_items, list)
-                    and response_items
-                ):
-                    candidate_ids = tuple(
-                        str(item["knowledge_id"])
-                        for item in response_items
-                        if isinstance(item, dict)
-                        and isinstance(item.get("knowledge_id"), str)
-                    )
-                    record_outcome(
-                        RecordRetrievalOutcomeV2Command(
-                            request_id=request_id,
-                            retrieval_request_id=retrieval_request_id,
-                            candidate_value_ids=candidate_ids,
-                            delivered_value_ids=candidate_ids,
-                        )
-                    )
-                return ContextViewResponse.model_validate(response_payload)
-            result = context_search.retrieve_context(
-                RetrieveContextCommand(
+            else:
+                if payload.query_embedding is None:
+                    raise TransientCoreError("embedding profile is unavailable")
+                query_embedding = payload.query_embedding
+            retrieve_v2 = getattr(context_search, "retrieve_context_v2", None)
+            if not callable(retrieve_v2):
+                raise TransientCoreError("Core retrieval v2 is unavailable")
+            result = retrieve_v2(
+                RetrieveContextV2Command(
                     request_id=request_id,
                     memory_space_id=payload.memory_space_id,
-                    query=payload.query,
+                    query_text=payload.query,
+                    query_embedding=tuple(query_embedding),
+                    embedding_model_id=embedding_model_id,
+                    embedding_model_version=embedding_model_version,
                     limit=payload.limit,
+                    project_id=payload.project_id,
+                    repository_id=payload.repository_id,
+                    task_id=payload.task_id,
+                    conversation_id=payload.conversation_id,
+                    related_object_ids=tuple(payload.related_object_ids or ()),
+                    requested_facets=tuple(payload.requested_facets or ()),
+                    explanation_level=payload.explanation_level,
                 )
             )
-            return ContextViewResponse.model_validate(result.to_payload())
+            response_payload = _context_v2_response(result.payload)
+            record_outcome = getattr(context_search, "record_retrieval_outcome_v2", None)
+            retrieval_request_id = response_payload["retrieval_request_id"]
+            response_items = response_payload["items"]
+            candidate_ids = tuple(str(item["value_id"]) for item in response_items)
+            if callable(record_outcome) and candidate_ids:
+                # Core returns the authoritative candidate set.  The HTTP
+                # response represents all returned candidates as delivered;
+                # the two lists remain separate in the durable outcome event.
+                record_outcome(
+                    RecordRetrievalOutcomeV2Command(
+                        request_id=request_id,
+                        retrieval_request_id=retrieval_request_id,
+                        candidate_value_ids=candidate_ids,
+                        delivered_value_ids=candidate_ids,
+                    )
+                )
+            response_payload["delivered_value_ids"] = list(candidate_ids)
+            return ContextViewResponse.model_validate(response_payload)
         except DomainRejectedError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -197,6 +176,11 @@ def create_context_router(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=error_payload("validation_failed", str(exc)),
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=error_payload("core_unavailable", str(exc)),
             ) from exc
         except Exception as exc:
             raise HTTPException(
@@ -220,39 +204,15 @@ __all__ = [
 
 
 def _context_v2_response(payload: dict[str, object]) -> dict[str, Any]:
-    raw_items = payload.get("items", [])
-    if not isinstance(raw_items, list):
-        raise TypeError("Core retrieval items must be a list")
-    items: list[dict[str, Any]] = []
-    for raw_item in raw_items:
-        if not isinstance(raw_item, dict):
-            raise TypeError("Core retrieval item must be an object")
-        value_id = raw_item.get("value_id")
-        object_name = raw_item.get("object_name")
-        facet = raw_item.get("facet")
-        content = raw_item.get("content")
-        relevance = raw_item.get("relevance")
-        if not all(isinstance(value, str) and value for value in (value_id, object_name, facet, content)):
-            raise ValueError("Core retrieval item has invalid public fields")
-        if not isinstance(relevance, (int, float)):
-            raise TypeError("Core retrieval item has invalid relevance")
-        items.append(
-            {
-                "knowledge_id": value_id,
-                "title": object_name,
-                "target": facet,
-                "statement": content,
-                "relevance": float(relevance),
-                "selection_explanation": raw_item.get("selection_explanation"),
-                "value_id": value_id,
-                "primary_object_id": raw_item.get("primary_object_id"),
-                "object_name": object_name,
-                "facet": facet,
-                "content": content,
-            }
-        )
+    try:
+        from ledgermind_protocol.object_facet_v2 import RetrievalResponse
+
+        response = RetrievalResponse.model_validate(payload)
+    except (ImportError, TypeError, ValueError) as exc:
+        raise ValueError("Core retrieval response is not strict object-facet v2") from exc
+    items = [item.model_dump(mode="json") for item in response.items]
     return {
         "api_version": "2",
-        "retrieval_request_id": payload.get("retrieval_request_id"),
+        "retrieval_request_id": response.retrieval_request_id,
         "items": items,
     }

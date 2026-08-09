@@ -42,6 +42,7 @@ class RawRoundIngestResult:
     duplicate: bool
     status: str
     core_command_id: str | None = None
+    core_raw_round_id: str | None = None
 
 
 def _now() -> str:
@@ -225,6 +226,7 @@ class RawRoundIngestHandler:
             duplicate=duplicate,
             status="queued_for_core" if delivery.transport_status == "queued" else delivery.transport_status,
             core_command_id=command.command_id,
+            core_raw_round_id=delivery.core_raw_round_id,
         )
 
     @staticmethod

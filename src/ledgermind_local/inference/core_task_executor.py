@@ -61,6 +61,7 @@ class GenericExecutionTask(BaseModel):
     embedding_request: EmbeddingRequestSpec | None = None
     expires_at: str | None = Field(default=None, max_length=64)
     lease: dict[str, object] | None = None
+    operation_input: dict[str, object] | None = None
 
 
 class EgressAuditRecord(BaseModel):
@@ -85,6 +86,8 @@ class GenericExecutionResult(BaseModel):
 
     task_id: str = Field(min_length=1)
     task_kind: str = Field(min_length=1)
+    operation: str | None = Field(default=None, max_length=200)
+    operation_input: dict[str, object] | None = None
     status: ExecutionStatus
     output: dict[str, object] | None = None
     embedding_result: EmbeddingBatch | None = None
@@ -191,6 +194,8 @@ class CoreTaskExecutor:
         return GenericExecutionResult(
             task_id=task.task_id,
             task_kind=task.task_kind,
+            operation=task.operation,
+            operation_input=task.operation_input,
             status="completed",
             output=result.data,
             egress_audit=audit,
@@ -248,6 +253,8 @@ class CoreTaskExecutor:
         return GenericExecutionResult(
             task_id=task.task_id,
             task_kind=task.task_kind,
+            operation=task.operation,
+            operation_input=task.operation_input,
             status="completed",
             embedding_result=batch,
             egress_audit=audit,
@@ -357,6 +364,8 @@ class CoreTaskExecutor:
         return GenericExecutionResult(
             task_id=task.task_id,
             task_kind=task.task_kind,
+            operation=task.operation,
+            operation_input=task.operation_input,
             status=status,
             egress_audit=audit,
             error_code=error_code,
@@ -373,7 +382,8 @@ class CoreTaskExecutor:
 
 
 def _memory_space_id(task: GenericExecutionTask) -> str:
-    return task.lease.get("memory_space_id", "") if task.lease else ""
+    value = task.lease.get("memory_space_id") if task.lease else None
+    return value if isinstance(value, str) else ""
 
 
 def _model_request_bytes(spec: ModelRequestSpec) -> int:

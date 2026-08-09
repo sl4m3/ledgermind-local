@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -18,10 +19,19 @@ from ledgermind_local.core_gateway.contracts import (
     TransientCoreError,
 )
 from ledgermind_local.persistence import CoreCommandRecord, SQLiteUnitOfWork
-from ledgermind_local.processing.normalizer import redact_text
 
 from .guarded_loop import GuardedWorkerLoop
 from .worker_state import WorkerState
+
+_REDACT_INLINE = re.compile(
+    r"(?i)(\b(?:api[_-]?key|secret|password|token|authorization|credential)\b\s*[:=]\s*)[^\s,;]+"
+)
+_REDACT_BEARER = re.compile(r"(?i)(\bbearer\s+)[^\s,;]+")
+
+
+def _redact_text(value: str) -> str:
+    value = _REDACT_INLINE.sub(r"\1[REDACTED]", value)
+    return _REDACT_BEARER.sub(r"\1[REDACTED]", value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +133,7 @@ class CoreCommandWorker:
                 command.command_id,
                 status="rejected",
                 error_code=exc.code,
-                error_detail=redact_text(exc.detail)[:2_000],
+                error_detail=_redact_text(exc.detail)[:2_000],
                 hypothesis_status="rejected_by_core",
             )
         except (TransientCoreError, ValueError) as exc:
@@ -237,7 +247,7 @@ class CoreCommandWorker:
             command_id,
             status=status,
             error_code=error_code,
-            error_detail=redact_text(str(error))[:2_000],
+            error_detail=_redact_text(str(error))[:2_000],
         )
 
     def _finish(

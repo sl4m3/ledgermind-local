@@ -8,7 +8,6 @@ from .core_model_task_worker import (
 )
 from .core_projection_worker import CoreProjectionWorker, CoreProjectionWorkerStats
 from .guarded_loop import GuardedWorkerLoop
-from .processing_worker import ProcessingWorkerLoop
 from .retention_worker import RawRoundRetentionWorker, RetentionResult
 from .worker_state import WorkerState, WorkerStateSnapshot
 
@@ -27,3 +26,13 @@ __all__ = [
     "WorkerState",
     "WorkerStateSnapshot",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Load the D2-owned legacy processing loop only for legacy callers."""
+
+    if name == "ProcessingWorkerLoop":
+        from .processing_worker import ProcessingWorkerLoop
+
+        return ProcessingWorkerLoop
+    raise AttributeError(name)

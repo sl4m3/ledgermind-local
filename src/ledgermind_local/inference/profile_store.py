@@ -129,11 +129,38 @@ class InferenceProfileStore:
         hypothesis_profile_id: str | None = None,
         merge_profile_id: str | None = None,
     ) -> MemorySpaceInferenceProfiles:
+        """Migrate the old two-name binding API into technical slots once.
+
+        New runtime resolution never reads the legacy table columns.  Keeping
+        the columns synchronized here lets an existing CLI/config migration
+        complete without making those columns a runtime fallback.
+        """
+
         binding = MemorySpaceInferenceProfiles(
             memory_space_id=memory_space_id,
             hypothesis_profile_id=hypothesis_profile_id,
             merge_profile_id=merge_profile_id,
         )
+        # The deprecated binding API only owns the two legacy model slots.  Do
+        # not erase a separately configured embedding slot when an old caller
+        # updates operational/background bindings.
+        self._connection.execute(
+            "DELETE FROM memory_space_model_profiles "
+            "WHERE memory_space_id = ? AND profile_slot IN ('operational', 'background')",
+            (memory_space_id,),
+        )
+        if hypothesis_profile_id is not None:
+            self.bind_slot(
+                memory_space_id,
+                slot="operational",
+                profile_id=hypothesis_profile_id,
+            )
+        if merge_profile_id is not None:
+            self.bind_slot(
+                memory_space_id,
+                slot="background",
+                profile_id=merge_profile_id,
+            )
         self._connection.execute(
             """
             INSERT INTO memory_space_inference_profiles (

@@ -8,11 +8,13 @@ from .contracts import (
     AcceptHypothesisCommand,
     AcceptHypothesisResult,
     ContextViewResult,
+    ControlMaintenanceResult,
     CoreHealth,
     FailExecutionTaskCommand,
     FailExecutionTaskResult,
     IngestRawRoundCommand,
     IngestRawRoundResult,
+    ObjectFacetStatistics,
     PollExecutionTasksCommand,
     PollExecutionTasksResult,
     RecordContextUsageCommand,
@@ -20,6 +22,7 @@ from .contracts import (
     RetrieveContextCommand,
     RetrieveContextV2Command,
     RetrieveContextV2Result,
+    RunControlMaintenanceCommand,
     SubmitExecutionResult,
     SubmitExecutionResultCommand,
 )
@@ -78,6 +81,12 @@ class CoreGateway(Protocol):
     def record_retrieval_outcome_v2(
         self, command: RecordRetrievalOutcomeV2Command
     ) -> None: ...
+
+    def run_control_maintenance(
+        self, command: RunControlMaintenanceCommand
+    ) -> ControlMaintenanceResult: ...
+
+    def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics: ...
 
     def poll_execution_tasks(
         self, command: PollExecutionTasksCommand

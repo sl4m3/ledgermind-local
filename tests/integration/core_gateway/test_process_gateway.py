@@ -276,6 +276,20 @@ def test_process_gateway_rejects_missing_core_backup_capability(tmp_path: Path) 
     assert supervisor.pid is None
 
 
+def test_process_gateway_rejects_old_object_facet_schema() -> None:
+    supervisor = _test_supervisor(
+        _command("--schema-version", "10"),
+        startup_timeout_seconds=2.0,
+    )
+
+    with pytest.raises(CoreCapabilityError) as error:
+        ProcessCoreGateway(supervisor, required_capabilities=("object_facet_v2",))
+
+    assert error.value.expected_schema_version == 11
+    assert error.value.advertised_schema_version == 10
+    assert supervisor.pid is None
+
+
 def test_process_stderr_is_captured_without_corrupting_stdout_protocol() -> None:
     supervisor = _test_supervisor(
         _command("--stderr-line", "fake diagnostic"),
@@ -386,7 +400,17 @@ def test_process_gateway_handles_object_facet_v2_boundary() -> None:
                 task_id="task-1",
                 memory_space_id="space-1",
                 worker_id="worker-1",
-                result={"status": "completed"},
+                result={
+                    "task_id": "task-1",
+                    "task_kind": "generate_json",
+                    "status": "completed",
+                    "operation": "extract_values",
+                    "operation_input": {"opaque": True},
+                    "output": {"values": []},
+                    "embedding_result": None,
+                    "egress_audit": {"status": "completed"},
+                    "error_code": None,
+                },
             )
         )
         failed = gateway.fail_execution_task(

@@ -19,7 +19,7 @@ from .isolation import IsolationRequirements
 from .sandbox import SandboxPlan, build_sandbox_plan
 from .signing import CoreBinaryVerification, verify_core_binary
 
-CORE_KNOWLEDGE_SCHEMA_VERSION = 9
+CORE_KNOWLEDGE_SCHEMA_VERSION = 11
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 

@@ -6,7 +6,7 @@ from enum import Enum
 from pathlib import Path
 
 from .profile_store import InferenceProfileStore
-from .profiles import InferenceProfile, MemorySpaceInferenceProfiles
+from .profiles import InferenceProfile
 
 
 class ProfileSlot(str, Enum):
@@ -70,26 +70,21 @@ class StoreBackedProfileResolver(ProfileResolver):
         embedding_profile_id: str | None = None,
     ) -> None:
         self._profile_store = profile_store
-        self._embedding_profile_id = embedding_profile_id
+        # Kept as an input-only compatibility shim for callers from before
+        # slot persistence.  Runtime resolution always reads the embedding
+        # slot from ``memory_space_model_profiles``.
+        del embedding_profile_id
 
     def resolve_profile(
         self, memory_space_id: str, slot: ProfileSlot
     ) -> InferenceProfile:
         binding = self._profile_store.get_binding(memory_space_id)
         profile_id = self._profile_store.get_slot(memory_space_id, slot.value)
-        if profile_id is None and binding is None:
-            raise MissingProfileError(
-                slot=slot,
-                memory_space_id=memory_space_id,
-                reason="binding_missing",
-            )
-        if profile_id is None and binding is not None:
-            profile_id = self._profile_id_for_slot(binding, slot)
         if profile_id is None:
             raise MissingProfileError(
                 slot=slot,
                 memory_space_id=memory_space_id,
-                reason="profile_id_missing",
+                reason="binding_missing" if binding is None else "profile_id_missing",
             )
         profile = self._profile_store.get(profile_id)
         if profile is None:
@@ -108,23 +103,6 @@ class StoreBackedProfileResolver(ProfileResolver):
             )
         return profile
 
-    def _profile_id_for_slot(
-        self, binding: MemorySpaceInferenceProfiles, slot: ProfileSlot
-    ) -> str | None:
-        slot_profile_id = self._profile_store.get_slot(
-            binding.memory_space_id, slot.value
-        )
-        if slot_profile_id is not None:
-            return slot_profile_id
-        if slot is ProfileSlot.OPERATIONAL:
-            return binding.hypothesis_profile_id
-        if slot is ProfileSlot.BACKGROUND:
-            return binding.merge_profile_id
-        if slot is ProfileSlot.EMBEDDING:
-            return self._embedding_profile_id
-        return None
-
-
 class DatabaseBackedProfileResolver(ProfileResolver):
     """Resolve a slot using a fresh Local SQLite connection per lookup."""
 
@@ -132,7 +110,7 @@ class DatabaseBackedProfileResolver(ProfileResolver):
         self, database_path: str | Path, *, embedding_profile_id: str | None = None
     ) -> None:
         self._database_path = database_path
-        self._embedding_profile_id = embedding_profile_id
+        del embedding_profile_id
 
     def resolve_profile(
         self, memory_space_id: str, slot: ProfileSlot
@@ -145,7 +123,6 @@ class DatabaseBackedProfileResolver(ProfileResolver):
             migrations.apply_migrations(connection)
             resolver = StoreBackedProfileResolver(
                 InferenceProfileStore(connection),
-                embedding_profile_id=self._embedding_profile_id,
             )
             return resolver.resolve_profile(memory_space_id, slot)
         finally:

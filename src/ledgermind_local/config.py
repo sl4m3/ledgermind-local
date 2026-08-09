@@ -157,6 +157,26 @@ class SearchConfig(BaseModel):
         return self.fallback_to_core_fts
 
 
+class ProfileSlotsConfig(BaseModel):
+    """Optional persisted defaults for the three technical profile slots."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operational: str | None = None
+    background: str | None = None
+    embedding: str | None = None
+
+    @field_validator("operational", "background", "embedding")
+    @classmethod
+    def _normalize_profile_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("profile slot IDs must not be empty")
+        return normalized
+
+
 class LocalConfig(BaseModel):
     """Strict service configuration for the local LedgerMind process."""
 
@@ -180,6 +200,7 @@ class LocalConfig(BaseModel):
     core_security: CoreSecurityConfig = Field(default_factory=_default_core_security)
     workers: WorkerSetConfig = Field(default_factory=WorkerSetConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    profile_slots: ProfileSlotsConfig = Field(default_factory=ProfileSlotsConfig)
     log_level: str = "INFO"
     projection_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
     processing_enabled: bool = False
@@ -188,7 +209,6 @@ class LocalConfig(BaseModel):
     processing_retry_delay_seconds: float = Field(default=30.0, ge=0.0)
     processing_lease_seconds: float = Field(default=300.0, ge=1.0)
     processing_heartbeat_interval_seconds: float = Field(default=30.0, ge=1.0)
-    hypothesis_profile_id: str | None = None
     inference_secrets_path: str = "secrets.json"
     max_raw_round_bytes: int = Field(default=5_000_000, ge=1)
     raw_round_retention_days: int = Field(default=30, ge=1)
@@ -221,16 +241,6 @@ class LocalConfig(BaseModel):
         if not stripped:
             raise ValueError("bind_host must not be empty")
         return stripped
-
-    @field_validator("hypothesis_profile_id")
-    @classmethod
-    def _normalize_hypothesis_profile_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("hypothesis_profile_id must not be empty when configured")
-        return normalized
 
     @field_validator("inference_secrets_path")
     @classmethod
@@ -329,6 +339,35 @@ class LocalConfig(BaseModel):
         ):
             workers["core_commands"] = {"enabled": True}
         data["workers"] = workers
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_profile_slots(cls, value: object) -> object:
+        """Map one persisted legacy config into the technical slot shape."""
+
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        legacy_operational = data.pop("hypothesis_profile_id", None)
+        legacy_background = data.pop("merge_profile_id", None)
+        if legacy_operational is None and legacy_background is None:
+            return data
+        raw_slots = data.get("profile_slots")
+        if isinstance(raw_slots, ProfileSlotsConfig):
+            slots = raw_slots.model_dump(mode="python")
+        elif isinstance(raw_slots, dict):
+            slots = dict(raw_slots)
+        else:
+            slots = {}
+        if legacy_operational is not None:
+            slots.setdefault("operational", legacy_operational)
+        if legacy_background is not None:
+            slots.setdefault("background", legacy_background)
+        data["profile_slots"] = slots
+        version = data.get("config_version")
+        if not isinstance(version, int) or version < CURRENT_CONFIG_VERSION:
+            data["config_version"] = CURRENT_CONFIG_VERSION
         return data
 
     @model_validator(mode="after")

@@ -18,7 +18,9 @@ from ledgermind_local.config import (
 )
 from ledgermind_local.core_gateway.contracts import (
     ContextViewResult,
+    ControlMaintenanceResult,
     CoreHealth,
+    ObjectFacetStatistics,
     RetrieveContextCommand,
 )
 from ledgermind_local.paths import ServicePaths
@@ -35,7 +37,32 @@ class _Gateway:
 
     def health(self) -> CoreHealth:
         self.events.append("core-health")
-        return CoreHealth(healthy=self.healthy, backend="fake")
+        return CoreHealth(healthy=self.healthy, backend="fake", schema_version=11)
+
+    def run_control_maintenance(self, command: object) -> ControlMaintenanceResult:
+        del command
+        return ControlMaintenanceResult(
+            status="completed",
+            object_count=0,
+            active_value_count=0,
+            superseded_value_count=0,
+            operational_backlog=0,
+            background_backlog=0,
+            embedding_backlog=0,
+            integrity_finding_count=0,
+        )
+
+    def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics:
+        del request_id
+        return ObjectFacetStatistics(
+            object_count=0,
+            active_value_count=0,
+            superseded_value_count=0,
+            operational_backlog=0,
+            background_backlog=0,
+            embedding_backlog=0,
+            integrity_finding_count=0,
+        )
 
     def close(self) -> None:
         self.events.append("core-close")
@@ -83,7 +110,11 @@ def runtime_config() -> LocalConfig:
             },
             "core_commands": {"enabled": False},
             "core_projections": {"enabled": False},
-            "core_model_tasks": {"enabled": False},
+            "core_model_tasks": {
+                "enabled": True,
+                "interval_seconds": 0.01,
+                "shutdown_timeout_seconds": 1.0,
+            },
             "processing": {"enabled": False},
         },
     )
@@ -130,6 +161,7 @@ def test_runtime_runs_migrations_before_any_worker_start(
         migration_runner=apply_migrations,
         worker_factories={
             "retention": lambda _runtime: _Worker(events),
+            "core_model_tasks": lambda _runtime: _Worker(events),
         },
     )
 

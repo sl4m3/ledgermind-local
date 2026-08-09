@@ -1,4 +1,4 @@
-"""Small deterministic Core IPC v1 process used by Local acceptance tests."""
+"""Small deterministic Core IPC v2 process used by Local acceptance tests."""
 
 from __future__ import annotations
 
@@ -29,6 +29,30 @@ from ledgermind_protocol.core_ipc import (
     CoreRequestEnvelope,
     CoreResponseEnvelope,
 )
+
+_V2_OPERATIONS = {
+    "ingest_raw_round_v2",
+    "poll_execution_tasks_v2",
+    "submit_execution_result_v2",
+    "fail_execution_task_v2",
+    "retrieve_context_v2",
+    "record_retrieval_outcome_v2",
+    "run_control_maintenance_v1",
+    "get_object_facet_statistics_v1",
+}
+_V2_CAPABILITIES = {
+    "object_facet_memory_v1",
+    "operational_pipeline_v1",
+    "strict_candidate_binding_v2",
+    "generic_execution_tasks_v1",
+    "raw_round_ingest_v2",
+    "context_retrieval_v2",
+    "context_provenance_v1",
+    "stable_sha256_digests_v1",
+    "object_resolution_v1",
+    "explainable_context_v1",
+    "control_contour_v1",
+}
 
 
 def _read_frame() -> bytes:
@@ -94,6 +118,9 @@ def main() -> int:
     malformed_health_response = "--malformed-health-response" in sys.argv
     missing_capabilities = _argument_values("--missing-capability")
     missing_operations = _argument_values("--missing-operation")
+    schema_version = 11
+    if "--schema-version" in sys.argv:
+        schema_version = int(sys.argv[sys.argv.index("--schema-version") + 1])
     core_data_dir = Path(os.environ.get("LEDGERMIND_CORE_DATA_DIR", "."))
     idempotency: dict[str, str] = {}
     if "--crash-once-file" in sys.argv:
@@ -115,10 +142,12 @@ def main() -> int:
             return 0
         request = CoreRequestEnvelope.from_json(raw.decode("utf-8"))
         if request.operation == "handshake":
-            operations = sorted(set(CORE_IPC_OPERATIONS) - missing_operations)
+            operations = sorted(
+                (set(CORE_IPC_OPERATIONS) | _V2_OPERATIONS) - missing_operations
+            )
             capabilities = {
                 capability: capability not in missing_capabilities
-                for capability in CORE_IPC_CAPABILITIES
+                for capability in (set(CORE_IPC_CAPABILITIES) | _V2_CAPABILITIES)
             }
             _write(
                 CoreResponseEnvelope.ok(
@@ -126,7 +155,7 @@ def main() -> int:
                     {
                         "protocol_version": 1,
                         "core_version": "fake-core-1",
-                        "knowledge_schema_version": 9,
+                        "knowledge_schema_version": schema_version,
                         "supported_operations": operations,
                         "capabilities": capabilities,
                     },
@@ -149,7 +178,17 @@ def main() -> int:
                 if mismatched_health_id
                 else request.request_id
             )
-            _write(CoreResponseEnvelope.ok(response_request_id, {"healthy": True}))
+            _write(
+                CoreResponseEnvelope.ok(
+                    response_request_id,
+                    {
+                        "healthy": True,
+                        "backend": "fake",
+                        "protocol_version": 1,
+                        "schema_version": schema_version,
+                    },
+                )
+            )
         elif request.operation == "shutdown":
             _write(CoreResponseEnvelope.ok(request.request_id, {"stopped": True}))
             return 0
@@ -246,11 +285,72 @@ def main() -> int:
             _write(
                 CoreResponseEnvelope.ok(
                     request.request_id,
-                    {"retrieval_request_id": request.request_id, "items": []},
+                    {
+                        "retrieval_request_id": request.request_id,
+                        "items": [
+                            {
+                                "value_id": "value-1",
+                                "primary_object_id": "object-1",
+                                "object_name": "Fake object",
+                                "facet": "property",
+                                "content": "Fake context",
+                                "relevance": 0.9,
+                                "explanation": {
+                                    "object_reasons": ["direct_value_semantic"],
+                                    "item_facet": "property",
+                                    "activated_facets": [],
+                                    "score_components": {
+                                        "semantic": 0.9,
+                                        "object": 0.0,
+                                        "facet": 0.0,
+                                        "scope_time": 0.0,
+                                        "context": 0.0,
+                                        "recency": 0.0,
+                                        "support": 0.0,
+                                        "usage": 0.0,
+                                    },
+                                },
+                            }
+                        ],
+                    },
                 )
             )
         elif request.operation == "record_retrieval_outcome_v2":
             _write(CoreResponseEnvelope.ok(request.request_id, {"recorded": True}))
+        elif request.operation == "run_control_maintenance_v1":
+            _write(
+                CoreResponseEnvelope.ok(
+                    request.request_id,
+                    {
+                        "status": "completed",
+                        "object_count": 1,
+                        "active_value_count": 1,
+                        "superseded_value_count": 0,
+                        "operational_backlog": 0,
+                        "background_backlog": 0,
+                        "embedding_backlog": 0,
+                        "integrity_finding_count": 0,
+                    },
+                )
+            )
+        elif request.operation == "get_object_facet_statistics_v1":
+            _write(
+                CoreResponseEnvelope.ok(
+                    request.request_id,
+                    {
+                        "object_count": 1,
+                        "active_value_count": 1,
+                        "superseded_value_count": 0,
+                        "operational_backlog": 0,
+                        "background_backlog": 0,
+                        "embedding_backlog": 0,
+                        "integrity_finding_count": 0,
+                        "missing_card_embeddings": 0,
+                        "missing_facet_embeddings": 0,
+                        "legacy_digest_upgrade_required": False,
+                    },
+                )
+            )
         elif request.operation == "fail_model_task":
             payload = request.payload
             retryable = bool(payload.get("retryable", False))
@@ -281,7 +381,7 @@ def main() -> int:
                         "relative_path": relative_path,
                         "sha256": _digest(snapshot),
                         "size_bytes": len(snapshot),
-                        "schema_version": 9,
+                        "schema_version": schema_version,
                     },
                 )
             )
@@ -311,7 +411,7 @@ def main() -> int:
                 "relative_path": relative_path,
                 "sha256": actual_sha,
                 "size_bytes": len(content),
-                    "schema_version": 9,
+                "schema_version": schema_version,
             }
             if request.operation == "begin_restore":
                 if request.payload.get("restore_token") != "fake-restore-token-1":

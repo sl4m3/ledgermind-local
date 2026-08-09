@@ -23,7 +23,12 @@ from ledgermind_local.cli import (
     _restore_signal_handlers,
 )
 from ledgermind_local.config import LocalConfig
-from ledgermind_local.core_gateway import ProcessCoreGateway
+from ledgermind_local.core_gateway import (
+    ControlMaintenanceResult,
+    CoreHealth,
+    ObjectFacetStatistics,
+    ProcessCoreGateway,
+)
 from ledgermind_local.core_gateway.signing import CoreBinaryVerificationError
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.service_lock import ServiceLockError
@@ -31,12 +36,94 @@ from ledgermind_local.service_lock import ServiceLockError
 
 def _patch_noop_core_runtime(monkeypatch) -> None:
     class DummyGateway:
+        advertised_schema_version = 11
+        advertised_operations = frozenset(
+            {
+                "health",
+                "accept_hypothesis",
+                "retrieve_context",
+                "record_context_usage",
+                "poll_projection_events",
+                "ack_projection_events",
+                "ingest_raw_round_v2",
+                "poll_execution_tasks_v2",
+                "submit_execution_result_v2",
+                "fail_execution_task_v2",
+                "retrieve_context_v2",
+                "record_retrieval_outcome_v2",
+                "run_control_maintenance_v1",
+                "get_object_facet_statistics_v1",
+                "create_backup",
+                "validate_backup",
+                "prepare_restore",
+                "begin_restore",
+                "commit_restore",
+                "rollback_restore",
+            }
+        )
+        advertised_capabilities = frozenset(
+            {
+                "projection_events",
+                "core_owned_backup",
+                "coordinated_restore",
+                "object_facet_memory_v1",
+                "operational_pipeline_v1",
+                "strict_candidate_binding_v2",
+                "generic_execution_tasks_v1",
+                "raw_round_ingest_v2",
+                "context_retrieval_v2",
+                "context_provenance_v1",
+                "stable_sha256_digests_v1",
+                "object_resolution_v1",
+                "explainable_context_v1",
+                "control_contour_v1",
+            }
+        )
+
         def close(self) -> None:
             return None
 
+        def require_capabilities(self, *capabilities: str) -> None:
+            del capabilities
+
+        def health(self) -> CoreHealth:
+            return CoreHealth(
+                healthy=True,
+                backend="fake",
+                protocol_version=1,
+                schema_version=11,
+            )
+
+        def run_control_maintenance(self, command: object) -> ControlMaintenanceResult:
+            del command
+            return ControlMaintenanceResult(
+                status="completed",
+                object_count=0,
+                active_value_count=0,
+                superseded_value_count=0,
+                operational_backlog=0,
+                background_backlog=0,
+                embedding_backlog=0,
+                integrity_finding_count=0,
+            )
+
+        def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics:
+            del request_id
+            return ObjectFacetStatistics(
+                object_count=0,
+                active_value_count=0,
+                superseded_value_count=0,
+                operational_backlog=0,
+                background_backlog=0,
+                embedding_backlog=0,
+                integrity_finding_count=0,
+                missing_card_embeddings=0,
+                missing_facet_embeddings=0,
+            )
+
     class DummyWorker:
-        def __init__(self, **kwargs: object) -> None:
-            del kwargs
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
 
         def process_once(self) -> None:
             return None
@@ -49,8 +136,10 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
         "_build_core_gateway",
         lambda **kwargs: DummyGateway(),
     )
+    monkeypatch.setattr(bootstrap_module, "CoreCommandWorker", DummyWorker)
     monkeypatch.setattr(cli_module, "CoreProjectionWorker", DummyWorker)
     monkeypatch.setattr(bootstrap_module, "CoreExecutionTaskWorker", DummyWorker)
+    monkeypatch.setattr(bootstrap_module, "RawRoundRetentionWorker", DummyWorker)
 
 
 def test_coalesce_optional_returns_fallback() -> None:
@@ -349,12 +438,25 @@ def test_command_serve_applies_migrations_before_starting_server(
             events.append(f"lock_exit:{self.path}")
 
     class DummyConnection:
+        row_factory = None
+
         def __enter__(self) -> Self:
             events.append("db_connection_enter")
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:
             events.append("db_connection_exit")
+
+        def execute(self, query: str):
+            class Cursor:
+                def fetchone(self) -> tuple[str]:
+                    return ("ok",)
+
+                def fetchall(self) -> list[object]:
+                    return []
+
+            del query
+            return Cursor()
 
     class DummyServer:
         def __init__(self) -> None:

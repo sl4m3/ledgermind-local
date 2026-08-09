@@ -11,7 +11,10 @@ from .contracts import (
     AcceptHypothesisCommand,
     AcceptHypothesisResult,
     ContextViewResult,
+    ControlMaintenanceResult,
     CoreCapabilityError,
+    CoreExecutionResultV2,
+    CoreExecutionTaskV2,
     CoreGatewayError,
     CoreHealth,
     DomainRejectedError,
@@ -19,6 +22,7 @@ from .contracts import (
     FailExecutionTaskResult,
     IngestRawRoundCommand,
     IngestRawRoundResult,
+    ObjectFacetStatistics,
     PollExecutionTasksCommand,
     PollExecutionTasksResult,
     RecordContextUsageCommand,
@@ -26,6 +30,7 @@ from .contracts import (
     RetrieveContextCommand,
     RetrieveContextV2Command,
     RetrieveContextV2Result,
+    RunControlMaintenanceCommand,
     SubmitExecutionResult,
     SubmitExecutionResultCommand,
     TransientCoreError,
@@ -104,14 +109,23 @@ _CAPABILITY_REQUIREMENTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
                 "fail_execution_task_v2",
                 "retrieve_context_v2",
                 "record_retrieval_outcome_v2",
+                "run_control_maintenance_v1",
+                "get_object_facet_statistics_v1",
             }
         ),
         frozenset(
             {
                 "object_facet_memory_v1",
+                "operational_pipeline_v1",
+                "strict_candidate_binding_v2",
                 "generic_execution_tasks_v1",
                 "raw_round_ingest_v2",
                 "context_retrieval_v2",
+                "context_provenance_v1",
+                "stable_sha256_digests_v1",
+                "object_resolution_v1",
+                "explainable_context_v1",
+                "control_contour_v1",
             }
         ),
     ),
@@ -129,6 +143,46 @@ _CAPABILITY_REQUIREMENTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
         frozenset({"core_owned_backup", "coordinated_restore"}),
     ),
 }
+
+CORE_KNOWLEDGE_SCHEMA_VERSION = 11
+
+
+def _validate_retrieval_outcome_payload(payload: Mapping[str, Any]) -> None:
+    allowed = {
+        "retrieval_request_id",
+        "candidate_value_ids",
+        "delivered_value_ids",
+        "created_at",
+    }
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError(f"retrieval outcome contains unknown fields: {sorted(unknown)}")
+    for name in ("retrieval_request_id", "created_at"):
+        value = payload.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must not be empty")
+    from datetime import datetime
+
+    try:
+        parsed = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("created_at must be RFC3339") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("created_at must include a timezone")
+    candidates = payload.get("candidate_value_ids")
+    delivered = payload.get("delivered_value_ids")
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("candidate_value_ids must be a non-empty array")
+    if not isinstance(delivered, list):
+        raise TypeError("delivered_value_ids must be an array")
+    if any(not isinstance(value, str) or not value.strip() for value in candidates):
+        raise ValueError("candidate_value_ids must contain non-empty strings")
+    if any(not isinstance(value, str) or not value.strip() for value in delivered):
+        raise ValueError("delivered_value_ids must contain non-empty strings")
+    if len(set(candidates)) != len(candidates) or len(set(delivered)) != len(delivered):
+        raise ValueError("retrieval outcome IDs must be unique")
+    if not set(delivered).issubset(set(candidates)):
+        raise ValueError("delivered_value_ids must be a subset of candidates")
 
 
 class ProcessCoreGateway(CoreGateway):
@@ -215,6 +269,21 @@ class ProcessCoreGateway(CoreGateway):
             )
         if not isinstance(raw_flags, Mapping):
             self._fail_closed(TransientCoreError("Core capability flags are malformed"))
+        advertised_schema = handshake.get("knowledge_schema_version")
+        if "object_facet_v2" in getattr(self, "_required_capabilities", ()) and (
+            isinstance(advertised_schema, bool)
+            or not isinstance(advertised_schema, int)
+            or advertised_schema != CORE_KNOWLEDGE_SCHEMA_VERSION
+        ):
+            self._fail_closed(
+                CoreCapabilityError(
+                    requested=requested,
+                    expected_schema_version=CORE_KNOWLEDGE_SCHEMA_VERSION,
+                    advertised_schema_version=(
+                        advertised_schema if isinstance(advertised_schema, int) else None
+                    ),
+                )
+            )
         advertised_operations = {
             operation
             for operation in raw_operations
@@ -264,6 +333,16 @@ class ProcessCoreGateway(CoreGateway):
             if isinstance(capability, str) and supported is True
         )
 
+    @property
+    def advertised_schema_version(self) -> int | None:
+        """Return the knowledge schema version from the validated handshake."""
+
+        handshake = self._supervisor.handshake_result
+        if not isinstance(handshake, Mapping):
+            return None
+        value = handshake.get("knowledge_schema_version")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
     def health(self) -> CoreHealth:
         try:
             result = self._supervisor.request("health", {})
@@ -273,6 +352,18 @@ class ProcessCoreGateway(CoreGateway):
             healthy=bool(result.get("healthy", False)),
             backend="process",
             detail=str(result["detail"]) if result.get("detail") else None,
+            protocol_version=(
+                int(result["protocol_version"])
+                if isinstance(result.get("protocol_version"), int)
+                and not isinstance(result.get("protocol_version"), bool)
+                else None
+            ),
+            schema_version=(
+                int(result["schema_version"])
+                if isinstance(result.get("schema_version"), int)
+                and not isinstance(result.get("schema_version"), bool)
+                else self.advertised_schema_version
+            ),
         )
 
     def accept_hypothesis(
@@ -320,19 +411,25 @@ class ProcessCoreGateway(CoreGateway):
             request.model_dump(mode="json"),
             request_id=command.command_id,
         )
+        raw_round_id = result.get("raw_round_id")
+        operational_job_id = result.get("operational_job_id")
+        duplicate = result.get("duplicate")
+        status = result.get("status")
+        if (
+            not isinstance(raw_round_id, str)
+            or not raw_round_id.strip()
+            or not isinstance(operational_job_id, str)
+            or not operational_job_id.strip()
+            or not isinstance(duplicate, bool)
+            or not isinstance(status, str)
+            or not status.strip()
+        ):
+            raise TransientCoreError("Core RawRound acceptance result is malformed")
         return IngestRawRoundResult(
             accepted=True,
-            duplicate=bool(result.get("duplicate", False)),
-            core_raw_round_id=(
-                str(result["raw_round_id"])
-                if result.get("raw_round_id") is not None
-                else None
-            ),
-            operational_job_id=(
-                str(result["operational_job_id"])
-                if result.get("operational_job_id") is not None
-                else None
-            ),
+            duplicate=duplicate,
+            core_raw_round_id=raw_round_id,
+            operational_job_id=operational_job_id,
             result_json=json.dumps(result, ensure_ascii=False, separators=(",", ":")),
         )
 
@@ -371,19 +468,13 @@ class ProcessCoreGateway(CoreGateway):
         self, request: RetrieveContextV2Command
     ) -> RetrieveContextV2Result:
         payload = request.to_payload()
-        try:
-            from ledgermind_protocol.object_facet_v1 import RetrievalRequest
-
-            validated = RetrievalRequest.model_validate(payload)
-        except (ImportError, TypeError, ValueError) as exc:
-            raise DomainRejectedError("invalid_retrieval_request", str(exc)) from exc
         result = self._request(
             "retrieve_context_v2",
-            validated.model_dump(mode="json"),
+            payload,
             request_id=request.request_id,
         )
         try:
-            from ledgermind_protocol.object_facet_v1 import RetrievalResponse
+            from ledgermind_protocol.object_facet_v2 import RetrievalResponse
 
             validated_result = RetrievalResponse.model_validate(result)
         except (ImportError, TypeError, ValueError) as exc:
@@ -397,18 +488,39 @@ class ProcessCoreGateway(CoreGateway):
         try:
             from datetime import datetime, timezone
 
-            from ledgermind_protocol.object_facet_v1 import RecordRetrievalOutcome
-
-            validated = RecordRetrievalOutcome.model_validate(
-                {**payload, "created_at": datetime.now(timezone.utc).isoformat()}
-            )
-        except (ImportError, TypeError, ValueError) as exc:
+            created_at = datetime.now(timezone.utc).isoformat()
+            _validate_retrieval_outcome_payload({**payload, "created_at": created_at})
+        except (TypeError, ValueError) as exc:
             raise DomainRejectedError("invalid_retrieval_outcome", str(exc)) from exc
         self._request(
             "record_retrieval_outcome_v2",
-            validated.model_dump(mode="json"),
+            {**payload, "created_at": created_at},
             request_id=command.request_id,
         )
+
+    def run_control_maintenance(
+        self, command: RunControlMaintenanceCommand
+    ) -> ControlMaintenanceResult:
+        result = self._request(
+            "run_control_maintenance_v1",
+            command.to_payload(),
+            request_id=command.request_id,
+        )
+        try:
+            return ControlMaintenanceResult.from_payload(result)
+        except (TypeError, ValueError) as exc:
+            raise TransientCoreError("Core control maintenance result is malformed") from exc
+
+    def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics:
+        result = self._request(
+            "get_object_facet_statistics_v1",
+            {},
+            request_id=request_id,
+        )
+        try:
+            return ObjectFacetStatistics.from_payload(result)
+        except (TypeError, ValueError) as exc:
+            raise TransientCoreError("Core object-facet statistics are malformed") from exc
 
     def poll_execution_tasks(
         self, command: PollExecutionTasksCommand
@@ -423,16 +535,38 @@ class ProcessCoreGateway(CoreGateway):
             not isinstance(task, dict) for task in raw_tasks
         ):
             raise TransientCoreError("Core execution task result is malformed")
+        try:
+            tasks = tuple(
+                CoreExecutionTaskV2.from_payload(task).to_payload()
+                for task in raw_tasks
+            )
+        except (TypeError, ValueError) as exc:
+            raise TransientCoreError("Core execution task is malformed") from exc
+        has_more = result.get("has_more", False)
+        if not isinstance(has_more, bool):
+            raise TransientCoreError("Core execution task pagination is malformed")
         return PollExecutionTasksResult(
-            tasks=tuple(raw_tasks), has_more=bool(result.get("has_more", False))
+            tasks=tasks, has_more=has_more
         )
 
     def submit_execution_result(
         self, command: SubmitExecutionResultCommand
     ) -> SubmitExecutionResult:
+        try:
+            strict_result = CoreExecutionResultV2.from_payload(command.result)
+        except (TypeError, ValueError) as exc:
+            raise DomainRejectedError("invalid_execution_result", str(exc)) from exc
+        if strict_result.task_id != command.task_id:
+            raise DomainRejectedError(
+                "invalid_execution_result",
+                "result.task_id does not match the submitted task",
+            )
         result = self._request(
             "submit_execution_result_v2",
-            command.to_payload(),
+            {
+                **command.to_payload(),
+                "result": strict_result.to_payload(),
+            },
             request_id=command.request_id,
         )
         accepted = result.get("accepted")

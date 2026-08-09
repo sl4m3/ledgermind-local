@@ -7,10 +7,11 @@ import os
 import secrets
 import sqlite3
 import tempfile
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ledgermind_local.config import CURRENT_CONFIG_VERSION, LocalConfig, WorkerConfig
 from ledgermind_local.core_gateway import (
@@ -21,19 +22,20 @@ from ledgermind_local.core_gateway import (
     RetrieveContextCommand,
     RetrieveContextV2Command,
     RetrieveContextV2Result,
+    RunControlMaintenanceCommand,
 )
 from ledgermind_local.core_gateway.security_policy import (
     build_core_isolation_requirements,
 )
 from ledgermind_local.core_gateway.signing import verify_core_binary
 from ledgermind_local.core_gateway.supervisor import CoreSupervisor
-from ledgermind_local.inference import InferenceBroker, SecretStore
 from ledgermind_local.inference.core_task_executor import CoreTaskExecutor
 from ledgermind_local.inference.embedding_provider import EmbeddingProvider
 from ledgermind_local.inference.profile_slots import (
     DatabaseBackedProfileResolver,
     ProfileSlot,
 )
+from ledgermind_local.inference.secrets import SecretStore
 from ledgermind_local.inference.structured_json_provider import StructuredJsonProvider
 from ledgermind_local.maintenance.coordinated_restore import (
     CoordinatedRestoreError,
@@ -43,11 +45,6 @@ from ledgermind_local.maintenance.core_backup import CoreBackupService
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
-from ledgermind_local.processing import (
-    BrokerHypothesisGenerator,
-    HypothesisGenerator,
-    RoundProcessingWorker,
-)
 from ledgermind_local.raw_rounds import RawRoundIngestHandler
 from ledgermind_local.scheduler import (
     CoreCommandWorker,
@@ -62,6 +59,11 @@ from ledgermind_local.search import CoreBackedSearch
 from ledgermind_local.search.fts import CoreProjectionSearchAdapter
 from ledgermind_local.search.vector import CoreProjectionVectorSearchAdapter
 from ledgermind_local.service_lock import ServiceLock
+
+if TYPE_CHECKING:
+    from ledgermind_local.inference.broker import InferenceBroker
+    from ledgermind_local.processing.generator import HypothesisGenerator
+    from ledgermind_local.processing.worker import RoundProcessingWorker
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +190,15 @@ def build_round_processing_worker(
     heartbeat_interval_seconds: float = 30,
 ) -> RoundProcessingWorker:
     """Build Local hypothesis generation and durable Core-command worker."""
+
+    # Legacy builder kept until D2 removes the old processing package.  It is
+    # intentionally imported only when an external legacy caller asks for it;
+    # LocalRuntime never constructs this worker.
+    from ledgermind_local.inference.broker import InferenceBroker
+    from ledgermind_local.processing import (
+        BrokerHypothesisGenerator,
+        RoundProcessingWorker,
+    )
 
     if generator is not None:
         selected_generator = generator
@@ -385,7 +396,6 @@ class LocalRuntime:
 
     _WORKER_ORDER = (
         "retention",
-        "processing",
         "core_commands",
         "core_projections",
         "core_model_tasks",
@@ -431,6 +441,7 @@ class LocalRuntime:
         self._stop_requested = False
         self._migrations_applied = False
         self._core_ready = False
+        self._core_schema_version: int | None = None
         self._core_error_code: str | None = None
         self._component_errors: dict[str, str] = {}
         self._workers: dict[str, _RuntimeWorkerHandle] = {}
@@ -445,6 +456,8 @@ class LocalRuntime:
         self._shutdown_incomplete = False
         self._shutdown_timed_out_workers: list[str] = []
         self._degraded_search = False
+        self._control_maintenance: dict[str, object] | None = None
+        self._object_facet_statistics: dict[str, object] | None = None
 
     @property
     def started(self) -> bool:
@@ -530,12 +543,15 @@ class LocalRuntime:
         self._worker_observations.clear()
         self._core_error_code = None
         self._core_ready = False
+        self._core_schema_version = None
         self._required_core_capabilities = ()
         self._restore_status = None
         self._restore_service = None
         self._shutdown_incomplete = False
         self._shutdown_timed_out_workers = []
         self._degraded_search = False
+        self._control_maintenance = None
+        self._object_facet_statistics = None
         self._migrations_applied = False
         self._context_search = None
         self._backup_service = None
@@ -562,6 +578,7 @@ class LocalRuntime:
             # no worker can observe a partially migrated database.
             self._start_core_if_available()
             self._recover_restore_journal()
+            self._refresh_object_facet_health()
             self._build_context_search()
             self._start_workers()
             self._started = True
@@ -666,6 +683,7 @@ class LocalRuntime:
 
         return {
             "ready": self._core_ready,
+            "schema_version": self._core_schema_version,
             "required": list(self._required_core_capabilities),
             "advertised_operations": _safe_strings(advertised_operations),
             "advertised_capabilities": _safe_strings(advertised_capabilities),
@@ -714,21 +732,43 @@ class LocalRuntime:
 
         isolation = self._isolation_report()
         capabilities = self._capabilities_report()
+        profile_slots = self._profile_slots_report()
+        statistics = dict(self._object_facet_statistics or {})
         core_report = {
             "ready": self._core_ready,
             "available": self.core_gateway is not None,
             "error_code": self._core_error_code,
+            "schema_version": self._core_schema_version,
             "isolation": isolation,
             "capabilities": capabilities,
         }
         capture_ready = self.capture_ready
         core_security_ready = bool(isolation.get("ready", True))
-        inference_ready = not bool(self._component_errors.get("processing"))
-        if self.config.workers.processing.enabled:
-            inference_ready = inference_ready and bool(self.config.hypothesis_profile_id)
+        generic_worker = worker_reports.get("core_model_tasks")
+        generic_worker_ready = bool(
+            self.config.workers.core_model_tasks.enabled
+            and isinstance(generic_worker, dict)
+            and generic_worker.get("ready") is True
+        )
+        inference_ready = bool(
+            profile_slots["ready"]
+            and generic_worker_ready
+            and not self._component_errors.get("core_model_tasks")
+        )
         restore = dict(self._restore_status or {"ready": True, "state": "clean"})
         restore_ready = bool(restore.get("ready", False))
         capabilities_ready = bool(capabilities.get("ready", False))
+        schema_ready = self._core_schema_version == 11
+        control_ready = not bool(self._component_errors.get("control"))
+        statistics_ready = not bool(self._component_errors.get("statistics"))
+        terminal_worker_failure = any(
+            isinstance(observation, dict)
+            and _is_positive_int(observation.get("terminal_failures"))
+            for observation in self._worker_observations.values()
+        )
+        legacy_digest_upgrade_required = bool(
+            statistics.get("legacy_digest_upgrade_required", False)
+        )
         shutdown = {
             "incomplete": self._shutdown_incomplete,
             "timed_out_workers": list(self._shutdown_timed_out_workers),
@@ -746,11 +786,16 @@ class LocalRuntime:
         full_ready = bool(
             capture_ready
             and self._core_ready
+            and schema_ready
             and core_security_ready
             and capabilities_ready
             and workers_ready
             and inference_ready
+            and control_ready
+            and statistics_ready
             and restore_ready
+            and not legacy_digest_upgrade_required
+            and not terminal_worker_failure
             and not self._shutdown_incomplete
             and not self._degraded_search
         )
@@ -791,14 +836,30 @@ class LocalRuntime:
                 "restore": restore,
                 "inference": {
                     "ready": inference_ready,
-                    "processing_enabled": self.config.workers.processing.enabled,
+                    "profile_slots": profile_slots,
                 },
+                "control": {
+                    "ready": control_ready,
+                    **dict(self._control_maintenance or {"status": "unavailable"}),
+                },
+                "object_facet": statistics,
                 "workers": worker_reports,
                 "projections": {"ready": projection_ready},
                 "retention": retention_report,
                 "search": {"degraded": self._degraded_search},
             },
             "workers": worker_reports,
+            "missing_profile_slots_by_memory_space": profile_slots[
+                "missing_profile_slots_by_memory_space"
+            ],
+            "operational_backlog": statistics.get("operational_backlog"),
+            "background_backlog": statistics.get("background_backlog"),
+            "embedding_backlog": statistics.get("embedding_backlog"),
+            "control_findings": statistics.get("integrity_finding_count"),
+            "missing_card_embeddings": statistics.get("missing_card_embeddings"),
+            "missing_facet_embeddings": statistics.get("missing_facet_embeddings"),
+            "legacy_digest_upgrade_required": legacy_digest_upgrade_required,
+            "terminal_worker_failure": terminal_worker_failure,
         }
 
     def _acquire_service_lock(self) -> None:
@@ -945,8 +1006,14 @@ class LocalRuntime:
                 self._core_ready = bool(
                     getattr(health_result, "healthy", health_result is True)
                 )
+                health_schema = getattr(health_result, "schema_version", None)
+                if isinstance(health_schema, int) and not isinstance(health_schema, bool):
+                    self._core_schema_version = health_schema
             else:
                 self._core_ready = True
+            advertised_schema = getattr(self.core_gateway, "advertised_schema_version", None)
+            if isinstance(advertised_schema, int) and not isinstance(advertised_schema, bool):
+                self._core_schema_version = advertised_schema
             if not self._core_ready:
                 raise RuntimeError("Core health check failed")
             self._backup_service = CoreBackupService(
@@ -966,6 +1033,58 @@ class LocalRuntime:
                     except Exception:
                         logger.debug("failed to close Core gateway", exc_info=True)
             self.core_gateway = None
+
+    def _refresh_object_facet_health(self) -> None:
+        """Run the Core control pass and cache content-free readiness stats."""
+
+        gateway = self.core_gateway
+        if gateway is None:
+            return
+        run_control = getattr(gateway, "run_control_maintenance", None)
+        if not callable(run_control):
+            self._component_errors["control"] = "unsupported"
+        else:
+            try:
+                result = run_control(
+                    RunControlMaintenanceCommand(
+                        f"local-control:{os.getpid()}:{uuid.uuid4()}"
+                    )
+                )
+                self._control_maintenance = {
+                    "status": getattr(result, "status", "completed"),
+                    "ready": True,
+                }
+            except Exception as exc:  # noqa: BLE001 - readiness remains observable
+                self._control_maintenance = {
+                    "status": "failed",
+                    "ready": False,
+                    "error_code": _safe_error_code(exc),
+                }
+                self._component_errors["control"] = _safe_error_code(exc)
+        get_statistics = getattr(gateway, "get_object_facet_statistics", None)
+        if not callable(get_statistics):
+            self._component_errors["statistics"] = "unsupported"
+        else:
+            try:
+                result = get_statistics(f"local-stats:{os.getpid()}:{uuid.uuid4()}")
+                self._object_facet_statistics = {
+                    name: getattr(result, name)
+                    for name in (
+                        "object_count",
+                        "active_value_count",
+                        "superseded_value_count",
+                        "operational_backlog",
+                        "background_backlog",
+                        "embedding_backlog",
+                        "integrity_finding_count",
+                        "missing_card_embeddings",
+                        "missing_facet_embeddings",
+                        "legacy_digest_upgrade_required",
+                    )
+                    if hasattr(result, name)
+                }
+            except Exception as exc:  # noqa: BLE001 - diagnostics must not crash startup
+                self._component_errors["statistics"] = _safe_error_code(exc)
 
     def _start_workers(self) -> None:
         for name in self._WORKER_ORDER:
@@ -992,21 +1111,6 @@ class LocalRuntime:
             return factory(self)
         if name == "retention":
             return RawRoundRetentionWorker(self.database_path)
-        if name == "processing":
-            if self.config.hypothesis_profile_id is None:
-                raise ValueError("processing_enabled requires hypothesis_profile_id")
-            return build_round_processing_worker(
-                database_path=self.database_path,
-                hypothesis_profile_id=self.config.hypothesis_profile_id,
-                secrets_path=self.paths.resolve_home_path(
-                    self.config.inference_secrets_path
-                ),
-                worker_id=f"processing:{os.getpid()}",
-                max_attempts=self.config.processing_max_attempts,
-                retry_delay_seconds=self.config.processing_retry_delay_seconds,
-                lease_seconds=self.config.processing_lease_seconds,
-                heartbeat_interval_seconds=self.config.processing_heartbeat_interval_seconds,
-            )
         if self.core_gateway is None:
             raise RuntimeError("Core gateway is unavailable")
         if name == "core_commands":
@@ -1129,32 +1233,9 @@ class LocalRuntime:
         if self.core_gateway is None:
             self._context_search = None
             return
-        if not self.config.search.enabled:
-            self._context_search = self.core_gateway
-            return
-        fts = _RuntimeProjectionCandidates(database_path=self.database_path)
-        vector = None
-        if self.config.vector.enabled:
-            from ledgermind_local.projections import GGUFVectorizer
-
-            model_path = Path(self.config.vector.model_path).expanduser()
-            vector = _RuntimeProjectionCandidates(
-                database_path=self.database_path,
-                vector=True,
-                vector_store_root=_build_vector_store_root(self.database_path),
-                vectorizer_factory=lambda: GGUFVectorizer(
-                    model_path=model_path,
-                    gpu_layers=self.config.vector.gpu_layers,
-                ),
-            )
-        self._context_search = _RuntimeCoreBackedSearch(
-            fts_search=fts,
-            vector_search=vector,
-            core_gateway=self.core_gateway,
-            status_callback=self._mark_search_degraded,
-            candidate_multiplier=self.config.search.candidate_multiplier,
-            fallback_to_core_fts=self.config.search.fallback_to_core_fts,
-        )
+        # v2 retrieval is authoritative in Core.  Local no longer builds or
+        # ranks legacy KnowledgeItem candidates for the public context route.
+        self._context_search = self.core_gateway
 
     def _mark_search_degraded(self, status: str) -> None:
         if status == "degraded":
@@ -1164,6 +1245,44 @@ class LocalRuntime:
         return tuple(
             (name, getattr(self.config.workers, name)) for name in self._WORKER_ORDER
         )
+
+    def _profile_slots_report(self) -> dict[str, object]:
+        """Check all three enabled profile slots without legacy fallbacks."""
+
+        slots = tuple(slot.value for slot in ProfileSlot)
+        missing: dict[str, list[str]] = {}
+        connection = self.connection_factory(self.database_path)
+        try:
+            migrations.apply_migrations(connection)
+            connection.row_factory = sqlite3.Row
+            from ledgermind_local.inference.profile_store import InferenceProfileStore
+
+            store = InferenceProfileStore(connection)
+            rows = connection.execute(
+                "SELECT memory_space_id FROM memory_spaces ORDER BY memory_space_id"
+            ).fetchall()
+            for row in rows:
+                memory_space_id = str(row["memory_space_id"])
+                bindings = store.list_slots(memory_space_id)
+                for slot in slots:
+                    profile_id = bindings.get(slot)
+                    profile = store.get(profile_id) if profile_id is not None else None
+                    if profile_id is None or profile is None or not profile.enabled:
+                        missing.setdefault(memory_space_id, []).append(slot)
+        except Exception as exc:  # noqa: BLE001 - readiness must expose the blocker
+            return {
+                "ready": False,
+                "missing_profile_slots_by_memory_space": {},
+                "error_code": _safe_error_code(exc),
+            }
+        finally:
+            close = getattr(connection, "close", None)
+            if callable(close):
+                close()
+        return {
+            "ready": not missing,
+            "missing_profile_slots_by_memory_space": missing,
+        }
 
     def _isolation_report(self) -> dict[str, object]:
         gateway = self.core_gateway
@@ -1224,6 +1343,10 @@ class LocalRuntime:
 
 def _safe_error_code(error: BaseException) -> str:
     return type(error).__name__ or "RuntimeError"
+
+
+def _is_positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _write_runtime_pid(pid_file: Path, pid: int) -> None:

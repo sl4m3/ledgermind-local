@@ -1,14 +1,5 @@
 """Local inference profiles, secrets, providers, and broker."""
 
-from .broker import (
-    InferenceBroker,
-    InferenceBrokerError,
-    InferenceInputTooLargeError,
-    InferenceProfileDisabledError,
-    InferenceProfileNotFoundError,
-    InferenceResponseValidationError,
-    ModelTask,
-)
 from .profile_slots import (
     DatabaseBackedProfileResolver,
     MissingProfileError,
@@ -38,3 +29,21 @@ __all__ = [
     "SecretStore",
     "StoreBackedProfileResolver",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Keep the legacy broker import lazy until D2 removes it."""
+
+    if name in {
+        "InferenceBroker",
+        "InferenceBrokerError",
+        "InferenceInputTooLargeError",
+        "InferenceProfileDisabledError",
+        "InferenceProfileNotFoundError",
+        "InferenceResponseValidationError",
+        "ModelTask",
+    }:
+        from . import broker
+
+        return getattr(broker, name)
+    raise AttributeError(name)
