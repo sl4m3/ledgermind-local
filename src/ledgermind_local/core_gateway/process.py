@@ -113,6 +113,7 @@ CORE_KNOWLEDGE_SCHEMA_VERSION = 12
 
 def _validate_retrieval_outcome_payload(payload: Mapping[str, Any]) -> None:
     allowed = {
+        "schema_version",
         "retrieval_request_id",
         "candidate_value_ids",
         "delivered_value_ids",
@@ -121,6 +122,8 @@ def _validate_retrieval_outcome_payload(payload: Mapping[str, Any]) -> None:
     unknown = set(payload) - allowed
     if unknown:
         raise ValueError(f"retrieval outcome contains unknown fields: {sorted(unknown)}")
+    if payload.get("schema_version") != 2:
+        raise ValueError("schema_version must be 2")
     for name in ("retrieval_request_id", "created_at"):
         value = payload.get(name)
         if not isinstance(value, str) or not value.strip():
