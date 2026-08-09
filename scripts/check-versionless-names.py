@@ -27,6 +27,14 @@ MIGRATION_COMPAT_PATHS = frozenset(
         "tests/unit/persistence/test_contract_migration.py",
     }
 )
+MIGRATION_COMPATIBILITY_VALUES = {
+    "src/ledgermind_local/persistence/contract_migration.py": frozenset(
+        {"ledgermind_context_v1", "ingest_raw_round_v2"}
+    ),
+    "tests/unit/persistence/test_contract_migration.py": frozenset(
+        {"ledgermind_context_v1", "ingest_raw_round_v2"}
+    ),
+}
 PORCELAIN_PATHS = frozenset({"scripts/release-local.py"})
 
 _TOKEN_RE = re.compile(
@@ -126,6 +134,16 @@ def _is_migration_compatibility_module(path: str) -> bool:
     return path in MIGRATION_COMPAT_PATHS
 
 
+def _is_migration_compatibility_value(path: str, line: str, start: int) -> bool:
+    return any(
+        match.start() <= start < match.end()
+        for value in MIGRATION_COMPATIBILITY_VALUES.get(path, ())
+        for match in re.finditer(
+            rf"(?<![A-Za-z0-9_]){re.escape(value)}(?![A-Za-z0-9_])", line
+        )
+    )
+
+
 def _is_explicit_version_value(path: str, line: str, start: int) -> bool:
     if Path(path).suffix not in _VERSION_FIELD_PATH_SUFFIXES:
         return False
@@ -196,7 +214,7 @@ def _allowed(
         return _is_sql_migration_path(path) or _is_migration_compatibility_module(path)
     if _is_sql_migration_path(path):
         return True
-    if _is_migration_compatibility_module(path):
+    if _is_migration_compatibility_value(path, line, start):
         return True
     if _is_metadata_version_line(path, line, section):
         return True
