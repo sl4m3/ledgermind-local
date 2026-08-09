@@ -12,7 +12,7 @@ from ledgermind_local.inference.secrets import SecretNotFoundError, SecretStore
 
 def test_inference_profile_forbids_provider_secret_and_unknown_fields() -> None:
     profile = InferenceProfile(
-        profile_id="hypothesis-default",
+        profile_id="operational-default",
         provider_kind="openai_compatible",
         base_url="https://provider.example/v1",
         model="test-model",
@@ -21,10 +21,6 @@ def test_inference_profile_forbids_provider_secret_and_unknown_fields() -> None:
         max_retries=2,
         max_input_tokens=4_000,
         max_output_tokens=800,
-        hypothesis_prompt_version=1,
-        hypothesis_schema_version=1,
-        merge_prompt_version=1,
-        merge_schema_version=1,
         enabled=True,
     )
 

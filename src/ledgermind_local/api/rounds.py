@@ -69,7 +69,6 @@ def create_rounds_router(
         return {
             "api_version": "2",
             "raw_round_id": result.raw_round_id,
-            "job_id": result.job_id,
             "core_command_id": result.core_command_id,
             "duplicate": result.duplicate,
             "status": result.status,

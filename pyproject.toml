@@ -43,7 +43,6 @@ include = ["ledgermind_local*"]
 
 [tool.setuptools.package-data]
 "ledgermind_local.persistence" = ["rounds_migrations/*.sql"]
-"ledgermind_local.inference" = ["prompts/*.txt", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

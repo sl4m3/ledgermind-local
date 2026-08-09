@@ -11,17 +11,12 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ledgermind_local.config import CURRENT_CONFIG_VERSION, LocalConfig, WorkerConfig
 from ledgermind_local.core_gateway import (
-    ContextViewResult,
     CoreGateway,
     ProcessCoreGateway,
-    RecordRetrievalOutcomeV2Command,
-    RetrieveContextCommand,
-    RetrieveContextV2Command,
-    RetrieveContextV2Result,
     RunControlMaintenanceCommand,
 )
 from ledgermind_local.core_gateway.security_policy import (
@@ -31,6 +26,7 @@ from ledgermind_local.core_gateway.signing import verify_core_binary
 from ledgermind_local.core_gateway.supervisor import CoreSupervisor
 from ledgermind_local.inference.core_task_executor import CoreTaskExecutor
 from ledgermind_local.inference.embedding_provider import EmbeddingProvider
+from ledgermind_local.inference.gguf_vectorizer import GGUFVectorizer
 from ledgermind_local.inference.profile_slots import (
     DatabaseBackedProfileResolver,
     ProfileSlot,
@@ -49,108 +45,28 @@ from ledgermind_local.raw_rounds import RawRoundIngestHandler
 from ledgermind_local.scheduler import (
     CoreCommandWorker,
     CoreExecutionTaskWorker,
-    CoreModelTaskWorkerStats,
-    CoreProjectionWorker,
     GuardedWorkerLoop,
     RawRoundRetentionWorker,
 )
 from ledgermind_local.scheduler.worker_state import WorkerState, WorkerStateSnapshot
-from ledgermind_local.search import CoreBackedSearch
-from ledgermind_local.search.fts import CoreProjectionSearchAdapter
-from ledgermind_local.search.vector import CoreProjectionVectorSearchAdapter
 from ledgermind_local.service_lock import ServiceLock
 
-if TYPE_CHECKING:
-    from ledgermind_local.inference.broker import InferenceBroker
-    from ledgermind_local.processing.generator import HypothesisGenerator
-    from ledgermind_local.processing.worker import RoundProcessingWorker
-
 logger = logging.getLogger(__name__)
-
-DEFAULT_PROJECTIONS: tuple[str, ...] = (
-    "projections.search",
-    "projections.knowledge",
-    "projections.markdown",
-)
-
-
-def build_projection_names(config: LocalConfig) -> tuple[str, ...]:
-    names = list(DEFAULT_PROJECTIONS)
-    if config.markdown_projection.enabled or config.markdown_audit_enabled:
-        names.append("projections.markdown_audit")
-    return tuple(names)
-
-
-def build_core_projection_handlers(
-    *,
-    connection: sqlite3.Connection,
-    database_path: str | Path,
-    config: LocalConfig,
-) -> dict[str, Any]:
-    """Build Local-only handlers for public Rust Core projection events."""
-
-    from ledgermind_local.projections import (
-        KnowledgeFTSProjection,
-        KnowledgeMarkdownProjection,
-        KnowledgeVectorProjection,
-    )
-
-    handlers: dict[str, Any] = {
-        "projections.search": KnowledgeFTSProjection(connection),
-    }
-    if config.vector.enabled:
-        model_path = Path(config.vector.model_path).expanduser()
-        from ledgermind_local.projections import GGUFVectorizer
-
-        handlers["projections.knowledge"] = KnowledgeVectorProjection(
-            connection=connection,
-            vector_store_root=_build_vector_store_root(database_path),
-            vectorizer_factory=lambda: GGUFVectorizer(
-                model_path=model_path,
-                gpu_layers=config.vector.gpu_layers,
-            ),
-        )
-    if config.markdown_projection.enabled:
-        handlers["projections.markdown"] = KnowledgeMarkdownProjection(
-            connection=connection,
-            markdown_root=_build_markdown_root(database_path),
-        )
-    return handlers
-
-
-def _build_vector_store_root(database_path: str | Path) -> Path:
-    return Path(database_path).with_suffix(".vectors")
-
-
-def _build_markdown_root(database_path: str | Path) -> Path:
-    return Path(database_path).with_suffix(".markdown")
-
-
-def _build_vectorizer_factory() -> Callable[[], Any] | None:
-    model_path = os.environ.get("LEDGERMIND_VECTOR_MODEL_PATH")
-    if not model_path:
-        return None
-
-    from ledgermind_local.projections import GGUFVectorizer
-
-    return lambda: GGUFVectorizer(model_path=model_path)
 
 
 def _build_runtime_vectorizer_factory(config: LocalConfig) -> Callable[[], Any]:
     """Build the technical embedding backend used by generic Core tasks."""
 
-    if not config.vector.enabled:
+    if not config.embedding.enabled:
         def unavailable_vectorizer() -> Any:
             raise RuntimeError("local embedding backend is disabled")
 
         return unavailable_vectorizer
 
-    from ledgermind_local.projections import GGUFVectorizer
-
-    model_path = Path(config.vector.model_path).expanduser()
+    model_path = Path(config.embedding.model_path).expanduser()
     return lambda: GGUFVectorizer(
         model_path=model_path,
-        gpu_layers=config.vector.gpu_layers,
+        gpu_layers=config.embedding.gpu_layers,
     )
 
 
@@ -159,9 +75,6 @@ def build_ingest_raw_round_handler(
     database_path: str | Path,
     max_raw_round_bytes: int = 5_000_000,
     retention_days: int = 30,
-    pipeline_version: int = 1,
-    normalizer_version: int = 1,
-    prompt_version: int = 1,
 ) -> RawRoundIngestHandler:
     """Build the Local-owned RawRound capture handler."""
 
@@ -169,72 +82,6 @@ def build_ingest_raw_round_handler(
         database_path=database_path,
         max_raw_round_bytes=max_raw_round_bytes,
         retention_days=retention_days,
-        pipeline_version=pipeline_version,
-        normalizer_version=normalizer_version,
-        prompt_version=prompt_version,
-        core_pipeline=True,
-    )
-
-
-def build_round_processing_worker(
-    *,
-    database_path: str | Path,
-    generator: HypothesisGenerator | None = None,
-    broker: InferenceBroker | None = None,
-    hypothesis_profile_id: str | None = None,
-    secrets_path: str | Path | None = None,
-    worker_id: str | None = None,
-    max_attempts: int = 3,
-    retry_delay_seconds: float = 30,
-    lease_seconds: float = 300,
-    heartbeat_interval_seconds: float = 30,
-) -> RoundProcessingWorker:
-    """Build Local hypothesis generation and durable Core-command worker."""
-
-    # Legacy builder kept until D2 removes the old processing package.  It is
-    # intentionally imported only when an external legacy caller asks for it;
-    # LocalRuntime never constructs this worker.
-    from ledgermind_local.inference.broker import InferenceBroker
-    from ledgermind_local.processing import (
-        BrokerHypothesisGenerator,
-        RoundProcessingWorker,
-    )
-
-    if generator is not None:
-        selected_generator = generator
-    else:
-        if not hypothesis_profile_id:
-            raise ValueError(
-                "hypothesis_profile_id is required when processing uses the inference broker"
-            )
-        selected_broker = broker
-        if selected_broker is None:
-            resolved_secrets_path = (
-                Path(secrets_path)
-                if secrets_path is not None
-                else Path(database_path).parent / "secrets.json"
-            )
-            selected_broker = InferenceBroker(
-                database_path=database_path,
-                secret_store=SecretStore(resolved_secrets_path),
-            )
-        profile = selected_broker.get_profile(hypothesis_profile_id)
-        selected_generator = BrokerHypothesisGenerator(
-            selected_broker,
-            profile_id=hypothesis_profile_id,
-            provider=profile.provider_kind,
-            model=profile.model,
-            prompt_version=profile.hypothesis_prompt_version,
-            schema_version=profile.hypothesis_schema_version,
-        )
-    return RoundProcessingWorker(
-        database_path=database_path,
-        generator=selected_generator,
-        worker_id=worker_id,
-        max_attempts=max_attempts,
-        retry_delay_seconds=retry_delay_seconds,
-        lease_seconds=lease_seconds,
-        heartbeat_interval_seconds=heartbeat_interval_seconds,
     )
 
 
@@ -247,101 +94,6 @@ class _RuntimeWorkerHandle:
     worker: object
     loop: GuardedWorkerLoop
     state: WorkerState
-
-
-class _RuntimeProjectionCandidates:
-    """Open projection connections per request so API threads share no SQLite handle."""
-
-    def __init__(
-        self,
-        *,
-        database_path: Path,
-        vector: bool = False,
-        vector_store_root: Path | None = None,
-        vectorizer_factory: Callable[[], Any] | None = None,
-    ) -> None:
-        self.database_path = database_path
-        self.vector = vector
-        self.vector_store_root = vector_store_root
-        self.vectorizer_factory = vectorizer_factory
-
-    def search(self, memory_space_id: str, query: str, limit: int) -> object:
-        connection = open_sqlite_connection(self.database_path)
-        adapter: Any
-        try:
-            if self.vector:
-                if self.vector_store_root is None or self.vectorizer_factory is None:
-                    raise RuntimeError("vector search is not configured")
-                adapter = CoreProjectionVectorSearchAdapter(
-                    connection=connection,
-                    vector_store_root=self.vector_store_root,
-                    vectorizer_factory=self.vectorizer_factory,
-                )
-            else:
-                adapter = CoreProjectionSearchAdapter(connection)
-            return adapter.search(memory_space_id, query, limit)
-        finally:
-            close = locals().get("adapter")
-            if close is not None:
-                close_method = getattr(close, "close", None)
-                if callable(close_method):
-                    close_method()
-            connection.close()
-
-
-class _RuntimeCoreBackedSearch(CoreBackedSearch):
-    """Apply B2 search settings without changing the accepted A4 search port."""
-
-    def __init__(
-        self,
-        *,
-        candidate_multiplier: int,
-        fallback_to_core_fts: bool,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self._candidate_multiplier = max(int(candidate_multiplier), 1)
-        self._fallback_to_core_fts = fallback_to_core_fts
-
-    def retrieve_context(
-        self,
-        request: RetrieveContextCommand | None = None,
-        *,
-        request_id: str | None = None,
-        memory_space_id: str | None = None,
-        query: str | None = None,
-        limit: int | None = None,
-        candidate_limit: int | None = None,
-    ) -> ContextViewResult:
-        effective_limit = candidate_limit
-        if effective_limit is None:
-            request_limit = request.limit if request is not None else limit
-            if request_limit is not None:
-                effective_limit = max(int(request_limit), 1) * self._candidate_multiplier
-        if request is not None:
-            return super().retrieve_context(request, candidate_limit=effective_limit)
-        return super().retrieve_context(
-            request_id=request_id,
-            memory_space_id=memory_space_id,
-            query=query,
-            limit=limit,
-            candidate_limit=effective_limit,
-        )
-
-    def _mark_degraded(self) -> None:
-        super()._mark_degraded()
-        if not self._fallback_to_core_fts:
-            raise RuntimeError("local candidate search is unavailable")
-
-    def retrieve_context_v2(
-        self, request: RetrieveContextV2Command
-    ) -> RetrieveContextV2Result:
-        return self._core_gateway.retrieve_context_v2(request)
-
-    def record_retrieval_outcome_v2(
-        self, command: RecordRetrievalOutcomeV2Command
-    ) -> None:
-        self._core_gateway.record_retrieval_outcome_v2(command)
 
 
 def build_process_core_gateway(*, paths: ServicePaths, config: LocalConfig) -> ProcessCoreGateway:
@@ -397,7 +149,6 @@ class LocalRuntime:
     _WORKER_ORDER = (
         "retention",
         "core_commands",
-        "core_projections",
         "core_model_tasks",
     )
 
@@ -447,7 +198,7 @@ class LocalRuntime:
         self._workers: dict[str, _RuntimeWorkerHandle] = {}
         self._prepared_workers: dict[str, object] = {}
         self._raw_round_handler: RawRoundIngestHandler | None = None
-        self._context_search: object | None = None
+        self._context_gateway: object | None = None
         self._backup_service: CoreBackupService | None = None
         self._restore_service: CoordinatedRestoreService | None = None
         self._restore_status: dict[str, object] | None = None
@@ -455,7 +206,6 @@ class LocalRuntime:
         self._worker_observations: dict[str, dict[str, object]] = {}
         self._shutdown_incomplete = False
         self._shutdown_timed_out_workers: list[str] = []
-        self._degraded_search = False
         self._control_maintenance: dict[str, object] | None = None
         self._object_facet_statistics: dict[str, object] | None = None
 
@@ -480,8 +230,8 @@ class LocalRuntime:
         return bool(report["full_ready"])
 
     @property
-    def context_search(self) -> object | None:
-        return self._context_search
+    def context_gateway(self) -> object | None:
+        return self._context_gateway
 
     @property
     def ingest_handler(self) -> RawRoundIngestHandler | None:
@@ -549,11 +299,10 @@ class LocalRuntime:
         self._restore_service = None
         self._shutdown_incomplete = False
         self._shutdown_timed_out_workers = []
-        self._degraded_search = False
         self._control_maintenance = None
         self._object_facet_statistics = None
         self._migrations_applied = False
-        self._context_search = None
+        self._context_gateway = None
         self._backup_service = None
         self._raw_round_handler = None
         if self.config.core_security.profile == "permissive":
@@ -579,7 +328,7 @@ class LocalRuntime:
             self._start_core_if_available()
             self._recover_restore_journal()
             self._refresh_object_facet_health()
-            self._build_context_search()
+            self._build_context_gateway()
             self._start_workers()
             self._started = True
             return self
@@ -647,7 +396,7 @@ class LocalRuntime:
         self._shutdown_incomplete = False
         self._shutdown_timed_out_workers = []
         self._workers.clear()
-        self._context_search = None
+        self._context_gateway = None
         self._backup_service = None
         self._restore_service = None
         self._raw_round_handler = None
@@ -774,9 +523,6 @@ class LocalRuntime:
             "timed_out_workers": list(self._shutdown_timed_out_workers),
         }
         retention_report = worker_reports.get("retention", {"enabled": False, "ready": True})
-        projections_report = worker_reports.get(
-            "core_projections", {"enabled": False, "ready": True}
-        )
         isolation_report = dict(isolation)
         capabilities_payload = isolation_report.get("capabilities")
         if isinstance(capabilities_payload, dict):
@@ -797,26 +543,15 @@ class LocalRuntime:
             and not legacy_digest_upgrade_required
             and not terminal_worker_failure
             and not self._shutdown_incomplete
-            and not self._degraded_search
         )
         core_report["isolation"] = isolation_report
-        projection_ready = bool(
-            projections_report.get("ready", True)
-            if isinstance(projections_report, dict)
-            else True
-        )
         degraded_workers = any(
             isinstance(report, dict)
             and isinstance(report.get("state"), dict)
             and bool(report["state"].get("degraded"))
             for report in worker_reports.values()
         )
-        degraded = bool(
-            self._degraded_search
-            or degraded_workers
-            or self._shutdown_incomplete
-            or not restore_ready
-        )
+        degraded = bool(degraded_workers or self._shutdown_incomplete or not restore_ready)
         return {
             "status": "ready" if full_ready else ("capture-ready" if capture_ready else "unavailable"),
             "capture_ready": capture_ready,
@@ -844,9 +579,7 @@ class LocalRuntime:
                 },
                 "object_facet": statistics,
                 "workers": worker_reports,
-                "projections": {"ready": projection_ready},
                 "retention": retention_report,
-                "search": {"degraded": self._degraded_search},
             },
             "workers": worker_reports,
             "missing_profile_slots_by_memory_space": profile_slots[
@@ -989,8 +722,6 @@ class LocalRuntime:
                 raise RuntimeError("Core gateway is unavailable")
             required = ["base", "maintenance", "object_facet_v2"]
             workers = self.config.workers
-            if workers.core_projections.enabled:
-                required.append("projections")
             if workers.core_model_tasks.enabled:
                 required.append("execution_tasks")
             self._required_core_capabilities = tuple(required)
@@ -1091,7 +822,7 @@ class LocalRuntime:
             config_worker = getattr(self.config.workers, name)
             if not config_worker.enabled:
                 continue
-            if name in {"core_commands", "core_projections", "core_model_tasks"} and not self._core_ready:
+            if name in {"core_commands", "core_model_tasks"} and not self._core_ready:
                 self._component_errors[name] = "core_unavailable"
                 continue
             try:
@@ -1118,21 +849,9 @@ class LocalRuntime:
                 database_path=self.database_path,
                 gateway=self.core_gateway,
                 worker_id=f"core-command:{os.getpid()}",
-                max_attempts=self.config.processing_max_attempts,
-                retry_delay_seconds=self.config.processing_retry_delay_seconds,
-                lease_seconds=self.config.processing_lease_seconds,
-                state=WorkerState(name),
-            )
-        if name == "core_projections":
-            return CoreProjectionWorker(
-                database_path=self.database_path,
-                gateway=self.core_gateway,
-                consumer_id="local-projections",
-                handlers_factory=lambda connection: build_core_projection_handlers(
-                    connection=connection,
-                    database_path=self.database_path,
-                    config=self.config,
-                ),
+                max_attempts=self.config.worker_max_attempts,
+                retry_delay_seconds=self.config.worker_retry_delay_seconds,
+                lease_seconds=self.config.worker_lease_seconds,
                 state=WorkerState(name),
             )
         if name == "core_model_tasks":
@@ -1156,7 +875,7 @@ class LocalRuntime:
                     embed_texts_timeout_seconds=300,
                 ),
                 worker_id="local-execution-tasks",
-                lease_seconds=int(self.config.processing_lease_seconds),
+                lease_seconds=int(self.config.worker_lease_seconds),
             )
         raise ValueError(f"unknown Local worker: {name}")
 
@@ -1203,43 +922,15 @@ class LocalRuntime:
         result: object | None,
         state: WorkerState,
     ) -> None:
-        """Record B2 counters through the A5 observer without result payloads."""
+        """Keep result observation content-free at the worker boundary."""
 
-        if not isinstance(result, CoreModelTaskWorkerStats):
-            return
-        observation: dict[str, object] = {
-            "fetched": result.fetched,
-            "completed": result.completed,
-            "duplicates": result.duplicates,
-            "failed": result.failed,
-            "released": result.released,
-            "retryable_failures": result.retryable_failures,
-            "permanent_failures": result.permanent_failures,
-            "retry_scheduled": result.retry_scheduled,
-            "terminal_failures": result.terminal_failures,
-            "provider_failures": result.provider_failures,
-            "core_poll_failures": result.core_poll_failures,
-            "core_delivery_failures": result.core_delivery_failures,
-            "last_error_code": result.last_error_code,
-            "degraded": result.degraded,
-        }
-        self._worker_observations[name] = observation
-        if result.made_progress:
-            state.mark_progress()
-        if result.degraded:
-            state.mark_degraded()
+        del name, result, state
 
-    def _build_context_search(self) -> None:
+    def _build_context_gateway(self) -> None:
         if self.core_gateway is None:
-            self._context_search = None
+            self._context_gateway = None
             return
-        # v2 retrieval is authoritative in Core.  Local no longer builds or
-        # ranks legacy KnowledgeItem candidates for the public context route.
-        self._context_search = self.core_gateway
-
-    def _mark_search_degraded(self, status: str) -> None:
-        if status == "degraded":
-            self._degraded_search = True
+        self._context_gateway = self.core_gateway
 
     def _configured_workers(self) -> tuple[tuple[str, WorkerConfig], ...]:
         return tuple(

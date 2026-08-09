@@ -1,4 +1,4 @@
-"""SQLite repositories for immutable raw rounds and processing jobs."""
+"""SQLite repositories for transport rounds and Core delivery."""
 
 from __future__ import annotations
 
@@ -32,35 +32,6 @@ class RawRoundRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class NormalizedRoundRecord:
-    normalized_round_id: str
-    raw_round_id: str
-    normalizer_version: int
-    payload_json: str
-    payload_digest: str
-    created_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class RoundProcessingJob:
-    job_id: str
-    raw_round_id: str
-    pipeline_version: int
-    normalizer_version: int
-    prompt_version: int
-    status: str
-    attempts: int
-    available_at: str
-    claimed_at: str | None
-    claimed_by: str | None
-    completed_at: str | None
-    last_error: str | None
-    lease_expires_at: str | None
-    heartbeat_at: str | None
-    lease_generation: int
-
-
-@dataclass(frozen=True, slots=True)
 class CoreCommandRecord:
     command_id: str
     command_type: str
@@ -88,7 +59,6 @@ class CoreRawRoundDeliveryRecord:
     idempotency_key: str
     transport_status: str
     core_raw_round_id: str | None
-    core_job_id: str | None
     last_error_code: str | None
     created_at: str
     updated_at: str
@@ -215,381 +185,6 @@ class SQLiteRawRoundRepository:
             raise RuntimeError("raw round insert did not produce a row")
         return result
 
-    def store_normalized_round(
-        self,
-        *,
-        raw_round_id: str,
-        normalizer_version: int,
-        payload_json: str,
-        payload_digest: str,
-    ) -> NormalizedRoundRecord:
-        if normalizer_version < 1:
-            raise ValueError("normalizer_version must be positive")
-        normalized_round_id = f"{raw_round_id}:normalizer:{normalizer_version}"
-        existing = self._connection.execute(
-            """
-            SELECT * FROM normalized_rounds
-            WHERE raw_round_id = ? AND normalizer_version = ?
-            """,
-            (raw_round_id, normalizer_version),
-        ).fetchone()
-        if existing is not None:
-            if (
-                str(existing["payload_digest"]) != payload_digest
-                or str(existing["payload_json"]) != payload_json
-            ):
-                raise ValueError("normalized round digest changed for existing version")
-            return self._normalized_round_from_row(existing)
-
-        self._connection.execute(
-            """
-            INSERT INTO normalized_rounds (
-                normalized_round_id, raw_round_id, normalizer_version,
-                payload_json, payload_digest, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                normalized_round_id,
-                raw_round_id,
-                normalizer_version,
-                payload_json,
-                payload_digest,
-                _now(),
-            ),
-        )
-        row = self._connection.execute(
-            "SELECT * FROM normalized_rounds WHERE normalized_round_id = ?",
-            (normalized_round_id,),
-        ).fetchone()
-        if row is None:
-            raise RuntimeError("normalized round insert did not produce a row")
-        return self._normalized_round_from_row(row)
-
-    def create_job(
-        self,
-        *,
-        job_id: str,
-        raw_round_id: str,
-        pipeline_version: int,
-        normalizer_version: int,
-        prompt_version: int,
-    ) -> RoundProcessingJob:
-        self._connection.execute(
-            """
-            INSERT INTO round_processing_jobs (
-                job_id, raw_round_id, pipeline_version, normalizer_version,
-                prompt_version, status, attempts, available_at
-            ) VALUES (?, ?, ?, ?, ?, 'received', 0, ?)
-            """,
-            (
-                job_id,
-                raw_round_id,
-                pipeline_version,
-                normalizer_version,
-                prompt_version,
-                _now(),
-            ),
-        )
-        row = self._connection.execute(
-            "SELECT * FROM round_processing_jobs WHERE job_id = ?", (job_id,)
-        ).fetchone()
-        if row is None:
-            raise RuntimeError("processing job insert did not produce a row")
-        return self._job_from_row(row)
-
-    def get_job_for_round(
-        self,
-        raw_round_id: str,
-        pipeline_version: int,
-        normalizer_version: int,
-        prompt_version: int,
-    ) -> RoundProcessingJob | None:
-        row = self._connection.execute(
-            """
-            SELECT * FROM round_processing_jobs
-            WHERE raw_round_id = ? AND pipeline_version = ?
-              AND normalizer_version = ? AND prompt_version = ?
-            """,
-            (raw_round_id, pipeline_version, normalizer_version, prompt_version),
-        ).fetchone()
-        return self._job_from_row(row) if row is not None else None
-
-    def claim_ready_job(
-        self,
-        *,
-        worker_id: str,
-        lease_seconds: float = 300,
-    ) -> RoundProcessingJob | None:
-        now_datetime = datetime.now(timezone.utc)
-        now = now_datetime.isoformat(timespec="seconds")
-        lease_expires_at = (
-            now_datetime + timedelta(seconds=max(float(lease_seconds), 1))
-        ).isoformat()
-        row = self._connection.execute(
-            """
-            SELECT * FROM round_processing_jobs
-            WHERE (
-                status IN ('received', 'retry_wait') AND available_at <= ?
-            ) OR (
-                status = 'processing'
-                AND lease_expires_at IS NOT NULL
-                AND lease_expires_at <= ?
-            )
-            ORDER BY available_at, job_id
-            LIMIT 1
-            """,
-            (now, now),
-        ).fetchone()
-        if row is None:
-            return None
-        updated = self._connection.execute(
-            """
-            UPDATE round_processing_jobs
-            SET status = 'processing', claimed_at = ?, claimed_by = ?, attempts = attempts + 1,
-                lease_expires_at = ?, heartbeat_at = ?, lease_generation = lease_generation + 1
-            WHERE job_id = ? AND (
-                (status IN ('received', 'retry_wait') AND available_at <= ?)
-                OR (
-                    status = 'processing'
-                    AND lease_expires_at IS NOT NULL
-                    AND lease_expires_at <= ?
-                )
-            )
-            """,
-            (now, worker_id, lease_expires_at, now, row["job_id"], now, now),
-        )
-        if updated.rowcount != 1:
-            return None
-        claimed = self._connection.execute(
-            "SELECT * FROM round_processing_jobs WHERE job_id = ?", (row["job_id"],)
-        ).fetchone()
-        return self._job_from_row(claimed) if claimed is not None else None
-
-    def heartbeat(
-        self,
-        job_id: str,
-        *,
-        worker_id: str,
-        lease_generation: int,
-        lease_seconds: float = 300,
-    ) -> bool:
-        now_datetime = datetime.now(timezone.utc)
-        now = now_datetime.isoformat(timespec="seconds")
-        lease_expires_at = (
-            now_datetime + timedelta(seconds=max(float(lease_seconds), 1))
-        ).isoformat()
-        updated = self._connection.execute(
-            """
-            UPDATE round_processing_jobs
-            SET heartbeat_at = ?, lease_expires_at = ?
-            WHERE job_id = ? AND status = 'processing' AND claimed_by = ?
-              AND lease_generation = ? AND lease_expires_at > ?
-            """,
-            (now, lease_expires_at, job_id, worker_id, lease_generation, now),
-        )
-        return updated.rowcount == 1
-
-    def finish_job(
-        self,
-        job_id: str,
-        status: str,
-        *,
-        worker_id: str,
-        lease_generation: int,
-        error: str | None = None,
-        retry_delay_seconds: float = 0,
-    ) -> bool:
-        if status not in {"completed", "no_knowledge", "retry_wait", "failed"}:
-            raise ValueError(f"unsupported processing status: {status}")
-        now = datetime.now(timezone.utc)
-        available_at = now + timedelta(seconds=max(retry_delay_seconds, 0))
-        updated = self._connection.execute(
-            """
-            UPDATE round_processing_jobs
-            SET status = ?, completed_at = CASE WHEN ? IN ('completed', 'no_knowledge', 'failed') THEN ? ELSE NULL END,
-                available_at = CASE WHEN ? = 'retry_wait' THEN ? ELSE available_at END,
-                last_error = ?, claimed_at = NULL, claimed_by = NULL,
-                lease_expires_at = NULL, heartbeat_at = NULL
-            WHERE job_id = ?
-              AND status = 'processing'
-              AND claimed_by = ?
-              AND lease_generation = ?
-              AND lease_expires_at > ?
-            """,
-            (
-                status,
-                status,
-                now.isoformat(timespec="seconds"),
-                status,
-                available_at.isoformat(timespec="seconds"),
-                error,
-                job_id,
-                worker_id,
-                lease_generation,
-                now.isoformat(timespec="seconds"),
-            ),
-        )
-        return updated.rowcount == 1
-
-    def create_attempt(
-        self,
-        *,
-        attempt_id: str,
-        raw_round_id: str,
-        job_id: str,
-        pipeline_version: int,
-        normalizer_version: int,
-        provider: str,
-        model: str,
-        prompt_version: int,
-        schema_version: int,
-        started_at: str,
-        completed_at: str | None = None,
-        response_digest: str | None = None,
-        error_code: str | None = None,
-        error_detail: str | None = None,
-    ) -> None:
-        self._connection.execute(
-            """
-            INSERT INTO hypothesis_attempts (
-                attempt_id, raw_round_id, job_id, pipeline_version, normalizer_version,
-                provider, model, prompt_version, schema_version, started_at, completed_at,
-                response_digest, error_code, error_detail
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                attempt_id,
-                raw_round_id,
-                job_id,
-                pipeline_version,
-                normalizer_version,
-                provider,
-                model,
-                prompt_version,
-                schema_version,
-                started_at,
-                completed_at,
-                response_digest,
-                error_code,
-                error_detail,
-            ),
-        )
-
-    def insert_hypothesis(
-        self,
-        *,
-        hypothesis_id: str,
-        raw_round_id: str,
-        attempt_id: str,
-        hypothesis_index: int,
-        title: str,
-        target: str,
-        statement: str,
-        rationale: str,
-        result: str,
-        artifacts_json: str,
-        content_digest: str,
-        status: str = "generated",
-        core_command_id: str | None = None,
-    ) -> None:
-        if status not in {
-            "generated",
-            "queued_for_core",
-            "accepted_by_core",
-            "rejected_by_core",
-        }:
-            raise ValueError(f"unsupported hypothesis status: {status}")
-        existing = self._connection.execute(
-            "SELECT * FROM hypotheses WHERE hypothesis_id = ?",
-            (hypothesis_id,),
-        ).fetchone()
-        if existing is not None:
-            comparable = {
-                "raw_round_id": raw_round_id,
-                "title": title,
-                "target": target,
-                "statement": statement,
-                "rationale": rationale,
-                "result": result,
-                "artifacts_json": artifacts_json,
-                "content_digest": content_digest,
-            }
-            if any(existing[name] != value for name, value in comparable.items()):
-                raise ValueError("hypothesis payload conflict")
-            existing_command_id = existing["core_command_id"]
-            if (
-                existing_command_id is not None
-                and core_command_id is not None
-                and existing_command_id != core_command_id
-            ):
-                raise ValueError("hypothesis core command conflict")
-            next_status = (
-                str(existing["status"])
-                if existing["status"] in {"accepted_by_core", "rejected_by_core"}
-                else status
-            )
-            if next_status != existing["status"] or (
-                existing_command_id is None and core_command_id is not None
-            ):
-                self._connection.execute(
-                    """
-                    UPDATE hypotheses
-                    SET status = ?, core_command_id = COALESCE(?, core_command_id)
-                    WHERE hypothesis_id = ?
-                    """,
-                    (next_status, core_command_id, hypothesis_id),
-                )
-            return
-        self._connection.execute(
-            """
-            INSERT INTO hypotheses (
-                hypothesis_id, raw_round_id, attempt_id, hypothesis_index, title, target,
-                statement, rationale, result, artifacts_json, content_digest, status,
-                core_command_id, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                hypothesis_id,
-                raw_round_id,
-                attempt_id,
-                hypothesis_index,
-                title,
-                target,
-                statement,
-                rationale,
-                result,
-                artifacts_json,
-                content_digest,
-                status,
-                core_command_id,
-                _now(),
-            ),
-        )
-
-    def update_hypothesis_core_status(
-        self,
-        hypothesis_id: str,
-        *,
-        status: str,
-        core_command_id: str | None = None,
-    ) -> bool:
-        if status not in {
-            "generated",
-            "queued_for_core",
-            "accepted_by_core",
-            "rejected_by_core",
-        }:
-            raise ValueError(f"unsupported hypothesis status: {status}")
-        updated = self._connection.execute(
-            """
-            UPDATE hypotheses
-            SET status = ?, core_command_id = COALESCE(?, core_command_id)
-            WHERE hypothesis_id = ?
-            """,
-            (status, core_command_id, hypothesis_id),
-        )
-        return updated.rowcount == 1
-
     def create_core_command(
         self,
         *,
@@ -701,7 +296,6 @@ class SQLiteRawRoundRepository:
         *,
         transport_status: str,
         core_raw_round_id: str | None = None,
-        core_job_id: str | None = None,
         error_code: str | None = None,
     ) -> bool:
         if transport_status not in {"queued", "accepted", "rejected", "retry_wait"}:
@@ -710,13 +304,12 @@ class SQLiteRawRoundRepository:
             """
             UPDATE raw_round_core_deliveries
             SET transport_status = ?, core_raw_round_id = COALESCE(?, core_raw_round_id),
-                core_job_id = COALESCE(?, core_job_id), last_error_code = ?, updated_at = ?
+                last_error_code = ?, updated_at = ?
             WHERE raw_round_id = ?
             """,
             (
                 transport_status,
                 core_raw_round_id,
-                core_job_id,
                 error_code,
                 _now(),
                 raw_round_id,
@@ -896,37 +489,6 @@ class SQLiteRawRoundRepository:
         )
 
     @staticmethod
-    def _normalized_round_from_row(row: sqlite3.Row) -> NormalizedRoundRecord:
-        return NormalizedRoundRecord(
-            normalized_round_id=str(row["normalized_round_id"]),
-            raw_round_id=str(row["raw_round_id"]),
-            normalizer_version=int(row["normalizer_version"]),
-            payload_json=str(row["payload_json"]),
-            payload_digest=str(row["payload_digest"]),
-            created_at=str(row["created_at"]),
-        )
-
-    @staticmethod
-    def _job_from_row(row: sqlite3.Row) -> RoundProcessingJob:
-        return RoundProcessingJob(
-            job_id=str(row["job_id"]),
-            raw_round_id=str(row["raw_round_id"]),
-            pipeline_version=int(row["pipeline_version"]),
-            normalizer_version=int(row["normalizer_version"]),
-            prompt_version=int(row["prompt_version"]),
-            status=str(row["status"]),
-            attempts=int(row["attempts"]),
-            available_at=str(row["available_at"]),
-            claimed_at=row["claimed_at"],
-            claimed_by=row["claimed_by"],
-            completed_at=row["completed_at"],
-            last_error=row["last_error"],
-            lease_expires_at=row["lease_expires_at"],
-            heartbeat_at=row["heartbeat_at"],
-            lease_generation=int(row["lease_generation"]),
-        )
-
-    @staticmethod
     def _core_command_from_row(row: sqlite3.Row) -> CoreCommandRecord:
         return CoreCommandRecord(
             command_id=str(row["command_id"]),
@@ -961,9 +523,6 @@ class SQLiteRawRoundRepository:
                 str(row["core_raw_round_id"])
                 if row["core_raw_round_id"] is not None
                 else None
-            ),
-            core_job_id=(
-                str(row["core_job_id"]) if row["core_job_id"] is not None else None
             ),
             last_error_code=(
                 str(row["last_error_code"])

@@ -17,9 +17,7 @@ from ledgermind_local.api.app import create_app
 from ledgermind_local.api.dependencies import Settings
 from ledgermind_local.bootstrap import (
     LocalRuntime,
-    build_core_projection_handlers,
     build_process_core_gateway,
-    build_projection_names,
     initialize_local_layout,
 )
 from ledgermind_local.config import LocalConfig
@@ -40,9 +38,7 @@ from ledgermind_local.paths import ServicePaths
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
 from ledgermind_local.scheduler import (
-    CoreProjectionWorker,
     RawRoundRetentionWorker,
-    WorkerState,
 )
 from ledgermind_local.service_lock import ServiceLock, ServiceLockError
 
@@ -153,7 +149,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     backup_restore_parser = backup_subparsers.add_parser(
         "restore",
-        help="Restore database and optional projections from backup",
+        help="Restore the Local database and Core data from backup",
     )
     backup_restore_parser.add_argument(
         "--source",
@@ -215,15 +211,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     profiles_remove_parser.add_argument("--id", dest="profile_id", required=True)
     profiles_remove_parser.set_defaults(func=_command_profiles_remove)
-
-    profiles_bind_parser = profiles_subparsers.add_parser(
-        "bind",
-        help="Bind inference profiles (deprecated; use inference bind)",
-    )
-    profiles_bind_parser.add_argument("--memory-space-id", required=True)
-    profiles_bind_parser.add_argument("--hypothesis-profile")
-    profiles_bind_parser.add_argument("--merge-profile")
-    profiles_bind_parser.set_defaults(func=_command_profiles_bind)
 
     inference_parser = subparsers.add_parser(
         "inference",
@@ -387,29 +374,6 @@ def _command_profiles_remove(args: argparse.Namespace) -> int:
             print("profile is still bound to a memory space")
             return 2
         print(f"profile removed: {args.profile_id}")
-        return 0
-    finally:
-        connection.close()
-
-
-def _command_profiles_bind(args: argparse.Namespace) -> int:
-    if args.hypothesis_profile is None and args.merge_profile is None:
-        print("at least one profile binding is required")
-        return 2
-    _, connection, store = _open_profile_store(args)
-    try:
-        try:
-            store.bind(
-                args.memory_space_id,
-                hypothesis_profile_id=args.hypothesis_profile,
-                merge_profile_id=args.merge_profile,
-            )
-            connection.commit()
-        except sqlite3.IntegrityError:
-            connection.rollback()
-            print("invalid memory space or profile binding")
-            return 2
-        print(f"profiles bound: {args.memory_space_id}")
         return 0
     finally:
         connection.close()
@@ -685,22 +649,6 @@ def _command_serve(args: argparse.Namespace) -> int:
         )
         return 2
 
-    def projection_factory(runtime: LocalRuntime) -> object:
-        gateway = runtime.core_gateway
-        if gateway is None:
-            raise RuntimeError("Core gateway is unavailable")
-        return CoreProjectionWorker(
-            database_path=runtime.database_path,
-            gateway=gateway,
-            consumer_id="local-projections",
-            handlers_factory=lambda connection: build_core_projection_handlers(
-                connection=connection,
-                database_path=runtime.database_path,
-                config=runtime.config,
-            ),
-            state=WorkerState("core_projections"),
-        )
-
     runtime = LocalRuntime(
         paths=paths,
         config=config,
@@ -711,9 +659,6 @@ def _command_serve(args: argparse.Namespace) -> int:
         lock_factory=ServiceLock,
         pid_writer=_write_pid_file,
         pid_remover=_remove_pid_file,
-        worker_factories={
-            "core_projections": projection_factory,
-        },
     )
     try:
         runtime.start()
@@ -762,7 +707,6 @@ def _command_serve(args: argparse.Namespace) -> int:
     app = create_app(
         application=runtime,
         settings=settings,
-        projection_names=build_projection_names(config),
     )
     server = _build_uvicorn_server(
         app=app,

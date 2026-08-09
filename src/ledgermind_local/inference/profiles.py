@@ -31,10 +31,6 @@ class InferenceProfile(BaseModel):
     max_retries: int = Field(default=2, ge=0, le=5)
     max_input_tokens: int = Field(default=12_000, ge=1, le=200_000)
     max_output_tokens: int = Field(default=2_000, ge=1, le=50_000)
-    hypothesis_prompt_version: int = Field(default=1, ge=1)
-    hypothesis_schema_version: int = Field(default=1, ge=1)
-    merge_prompt_version: int = Field(default=1, ge=1)
-    merge_schema_version: int = Field(default=1, ge=1)
     enabled: bool = True
 
     @field_validator("profile_id", "model", "secret_ref")
@@ -53,22 +49,4 @@ class InferenceProfile(BaseModel):
         return normalized
 
 
-class MemorySpaceInferenceProfiles(BaseModel):
-    """Profile bindings for one memory space."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    memory_space_id: str = Field(min_length=1, max_length=200)
-    hypothesis_profile_id: str | None = Field(default=None, max_length=200)
-    merge_profile_id: str | None = Field(default=None, max_length=200)
-
-    @field_validator("memory_space_id", "hypothesis_profile_id", "merge_profile_id")
-    @classmethod
-    def _normalize_ids(cls, value: str | None, info: object) -> str | None:
-        if value is None:
-            return None
-        field_name = getattr(info, "field_name", "value")
-        return _required_text(value, field_name)
-
-
-__all__ = ["InferenceProfile", "MemorySpaceInferenceProfiles", "ProviderKind"]
+__all__ = ["InferenceProfile", "ProviderKind"]

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from ledgermind_local.projections.gguf_vectorizer import GGUFVectorizer
+from ledgermind_local.inference.gguf_vectorizer import GGUFVectorizer
 
 
 class _FakeModel:

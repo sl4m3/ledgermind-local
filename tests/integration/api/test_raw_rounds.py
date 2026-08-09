@@ -79,7 +79,7 @@ def _client(path) -> TestClient:
     )
 
 
-def test_post_round_queues_raw_round_for_core_without_processing_job(tmp_path) -> None:
+def test_post_round_queues_raw_round_for_core(tmp_path) -> None:
     database = tmp_path / "state.db"
     _bootstrap(database)
 
@@ -96,7 +96,6 @@ def test_post_round_queues_raw_round_for_core_without_processing_job(tmp_path) -
     assert payload["core_command_id"]
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM raw_rounds").fetchone()[0] == 1
-        assert connection.execute("SELECT COUNT(*) FROM round_processing_jobs").fetchone()[0] == 0
         assert (
             connection.execute(
                 "SELECT transport_status FROM raw_round_core_deliveries"

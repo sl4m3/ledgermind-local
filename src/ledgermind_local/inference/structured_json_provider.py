@@ -74,7 +74,7 @@ class StructuredJsonProvider:
 
     Validates only transport-level and envelope-level properties: the response
     is a JSON object, bounded in size, with provider status. It does not
-    interpret facet, object-id, or merge semantics.
+    interpret object-facet semantics.
     """
 
     def __init__(

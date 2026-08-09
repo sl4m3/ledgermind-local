@@ -11,8 +11,6 @@ from pathlib import Path
 
 from ledgermind_local.core_gateway.base import CoreGateway
 from ledgermind_local.core_gateway.contracts import (
-    AcceptHypothesisCommand,
-    AcceptHypothesisResult,
     DomainRejectedError,
     IngestRawRoundCommand,
     IngestRawRoundResult,
@@ -82,7 +80,6 @@ class CoreCommandWorker:
                         "accepted": raw_result.accepted,
                         "duplicate": raw_result.duplicate,
                         "raw_round_id": raw_result.core_raw_round_id,
-                        "operational_job_id": raw_result.operational_job_id,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -93,48 +90,17 @@ class CoreCommandWorker:
                     status="completed",
                     result_json=result_json,
                 )
-            if command.command_type != "accept_hypothesis":
+            if command.command_type != "ingest_raw_round_v2":
                 raise DomainRejectedError(
                     "unsupported_command_type",
                     command.command_type,
                 )
-            try:
-                accept_command = AcceptHypothesisCommand.from_json(command.payload_json)
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise DomainRejectedError(
-                    "invalid_command_payload",
-                    "Core command payload failed contract validation",
-                ) from exc
-            result = self.gateway.accept_hypothesis(accept_command)
-            if not isinstance(result, AcceptHypothesisResult):
-                raise TransientCoreError("CoreGateway returned an invalid result")
-            if not result.accepted:
-                raise DomainRejectedError(
-                    "core_rejected", "Core did not accept hypothesis"
-                )
-            result_json = result.result_json or json.dumps(
-                {
-                    "accepted": result.accepted,
-                    "duplicate": result.duplicate,
-                    "core_reference_id": result.core_reference_id,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            return self._finish(
-                command.command_id,
-                status="completed",
-                result_json=result_json,
-                hypothesis_status="accepted_by_core",
-            )
         except DomainRejectedError as exc:
             return self._finish(
                 command.command_id,
                 status="rejected",
                 error_code=exc.code,
                 error_detail=_redact_text(exc.detail)[:2_000],
-                hypothesis_status="rejected_by_core",
             )
         except (TransientCoreError, ValueError) as exc:
             return self._finish_retry_or_failure(
@@ -150,6 +116,7 @@ class CoreCommandWorker:
                 error_code="core_gateway_error",
                 error=exc,
             )
+        return None
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -258,7 +225,6 @@ class CoreCommandWorker:
         result_json: str | None = None,
         error_code: str | None = None,
         error_detail: str | None = None,
-        hypothesis_status: str | None = None,
     ) -> CoreCommandProcessResult:
         with SQLiteUnitOfWork(self.database_path, write_transaction=True) as uow:
             command = uow.raw_rounds.get_core_command(command_id)
@@ -289,7 +255,6 @@ class CoreCommandWorker:
                         "failed": "rejected",
                     }.get(status, "retry_wait")
                     core_raw_round_id: str | None = None
-                    core_job_id: str | None = None
                     if result_json:
                         try:
                             result_payload = json.loads(result_json)
@@ -299,29 +264,16 @@ class CoreCommandWorker:
                                     if result_payload.get("raw_round_id") is not None
                                     else None
                                 )
-                                core_job_id = (
-                                    str(result_payload["operational_job_id"])
-                                    if result_payload.get("operational_job_id") is not None
-                                    else None
-                                )
                         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                             pass
                     uow.raw_rounds.update_core_raw_round_delivery(
                         raw_round_id,
                         transport_status=delivery_status,
                         core_raw_round_id=core_raw_round_id,
-                        core_job_id=core_job_id,
                         error_code=error_code,
                     )
                     if status == "completed":
                         uow.raw_rounds.clear_raw_round_payload(raw_round_id)
-            if hypothesis_status is not None:
-                payload = AcceptHypothesisCommand.from_json(command.payload_json)
-                uow.raw_rounds.update_hypothesis_core_status(
-                    payload.hypothesis.hypothesis_id,
-                    status=hypothesis_status,
-                    core_command_id=command_id,
-                )
             uow.commit()
         return CoreCommandProcessResult(command_id, status)
 

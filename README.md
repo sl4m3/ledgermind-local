@@ -1,14 +1,15 @@
 # ledgermind-local
 
 `ledgermind-local` — локальная служба LedgerMind 4.0. Она принимает
-структурные `RawRound v2`, хранит локальное состояние, выполняет выбранную
-пользователем обработку и общается с закрытым Rust Core через IPC.
+структурные `RawRound v2`, хранит транспортное состояние и общается с закрытым
+Rust Core через IPC. Доменное object-facet состояние и его обработка принадлежат
+Core; Local выполняет только технические generic execution tasks.
 
 ## Trust boundaries and data ownership
 
-- Local владеет `rounds.db`: raw-round metadata/payload, нормализованные раунды,
-  processing jobs, leases, inference attempts, hypothesis records, command
-  outbox и локальные projection stores остаются в локальной базе.
+- Local владеет `rounds.db`: raw-round metadata/payload, durable Core command
+  delivery, retention state, inference profile metadata, technical profile-slot
+  bindings и egress audit.
 - Local **никогда не открывает рабочую `knowledge.db`**. Knowledge доступен
   только через supervised `CoreGateway` к отдельному подписанному Rust process
   `ledgermind-core`; SQL Core и его миграции не входят в Local.
@@ -43,7 +44,7 @@ Full-ready дополнительно требует:
 - рабочий Core IPC и локальную `knowledge.db` в каталоге Core;
 - настроенный пользователем inference endpoint/profile и соответствующий
   `secret_ref`;
-- готовые processing workers, projection workers и наблюдаемую retry policy.
+- готовый generic execution worker и технические profile slots.
 
 Capture-ready не следует объявлять full-ready: захват и доставка могут быть
 здоровы, пока inference/Core временно недоступны.
@@ -74,8 +75,8 @@ python scripts/sign_core_binary.py \
 ## Backup archive sensitivity
 
 Backup archive следует считать чувствительным секретным материалом. В нём
-могут находиться raw conversation/tool payloads, нормализованные transcript,
-inference metadata, egress audit и локальные projection данные. Передавайте
+могут находиться raw conversation/tool payloads, inference metadata, egress
+audit и opaque Core snapshot artifacts. Передавайте
 архив только по доверенному каналу, ограничивайте права файла, шифруйте его
 при переносе и хранении, а перед восстановлением проверяйте источник и
 целостность. Не коммитьте archive в repository и не включайте в публичный

@@ -45,11 +45,9 @@ def test_config_has_expected_6_2_shape() -> None:
     assert '"config_version":1' in payload
     assert '"rounds_database_path":"rounds.db"' in payload
     assert '"log_level":"INFO"' in payload
-    assert '"projection_poll_interval_seconds":1.0' in payload
-    assert '"vector":{"enabled":false' in payload
-    assert '"markdown_projection":{"enabled":false' in payload
-    assert '"markdown_audit":{"enabled":false' in payload
-    assert "markdown_audit_enabled" not in payload
+    assert '"embedding":{"enabled":false' in payload
+    assert "core_model_tasks" in payload
+    assert "core_projections" not in payload
 
 
 def test_process_core_backend_is_the_only_default() -> None:
@@ -71,17 +69,34 @@ def test_config_to_json_is_deterministic() -> None:
     assert '"config_version":1' in first
 
 
-def test_markdown_audit_disabled_by_default() -> None:
-    config = LocalConfig.model_validate({"config_version": 1})
-    assert config.markdown_audit_enabled is False
-
-
-def test_markdown_audit_can_be_enabled() -> None:
-    config = LocalConfig.model_validate(
-        {"config_version": 1, "markdown_audit_enabled": True}
+def test_legacy_runtime_settings_migrate_to_current_shape() -> None:
+    config = LocalConfig.from_dict(
+        {
+            "config_version": 1,
+            "hypothesis_profile_id": "operational-default",
+            "merge_profile_id": "background-default",
+            "processing_max_attempts": 7,
+            "workers": {
+                "processing": {"enabled": True},
+                "core_projections": {"enabled": True},
+            },
+            "vector": {"enabled": True, "model_path": "model.gguf"},
+            "markdown_projection": {"enabled": True},
+        }
     )
-    assert config.markdown_audit_enabled is True
-    assert config.markdown_projection.enabled is True
+
+    assert config.config_version == 2
+    assert config.profile_slots.operational == "operational-default"
+    assert config.profile_slots.background == "background-default"
+    assert config.worker_max_attempts == 7
+    assert config.embedding.enabled is True
+    payload = config.model_dump()
+    assert "hypothesis_profile_id" not in payload
+    assert "merge_profile_id" not in payload
+    assert "processing" not in payload["workers"]
+    assert "core_projections" not in payload["workers"]
+    assert "vector" not in payload
+    assert "markdown_projection" not in payload
 
 
 def test_log_level_is_normalized_to_uppercase() -> None:

@@ -19,9 +19,7 @@ def _runtime(tmp_path: Path) -> LocalRuntime:
         config_version=1,
         workers=WorkerSetConfig(
             retention={"enabled": False},
-            processing={"enabled": False},
             core_commands={"enabled": False},
-            core_projections={"enabled": False},
             core_model_tasks={"enabled": False},
         ),
     )

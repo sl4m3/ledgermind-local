@@ -48,17 +48,14 @@ def _setup() -> tuple[InferenceProfileStore, sqlite3.Connection]:
             secret_ref="embed-secret",
         )
     )
-    store.bind(
-        "space",
-        hypothesis_profile_id="operational-default",
-        merge_profile_id="background-default",
-    )
+    store.bind_slot("space", slot="operational", profile_id="operational-default")
+    store.bind_slot("space", slot="background", profile_id="background-default")
     store.bind_slot("space", slot="embedding", profile_id="embedding-default")
     connection.commit()
     return store, connection
 
 
-def test_resolve_operational_slot_uses_hypothesis_profile_binding() -> None:
+def test_resolve_operational_slot_uses_operational_profile_binding() -> None:
     store, _ = _setup()
     resolver = StoreBackedProfileResolver(store)
 
@@ -68,7 +65,7 @@ def test_resolve_operational_slot_uses_hypothesis_profile_binding() -> None:
     assert profile.model == "op-model"
 
 
-def test_resolve_background_slot_uses_merge_profile_binding() -> None:
+def test_resolve_background_slot_uses_background_profile_binding() -> None:
     store, _ = _setup()
     resolver = StoreBackedProfileResolver(store)
 
@@ -102,8 +99,10 @@ def test_missing_binding_raises_structured_error() -> None:
 
 def test_unbound_slot_raises_structured_error() -> None:
     store, connection = _setup()
-    store.bind(
-        "space", hypothesis_profile_id=None, merge_profile_id="background-default"
+    connection.execute(
+        "DELETE FROM memory_space_model_profiles "
+        "WHERE memory_space_id = ? AND profile_slot = ?",
+        ("space", "operational"),
     )
     connection.commit()
     resolver = StoreBackedProfileResolver(store)
@@ -111,7 +110,7 @@ def test_unbound_slot_raises_structured_error() -> None:
     with pytest.raises(MissingProfileError) as error:
         resolver.resolve_profile("space", ProfileSlot.OPERATIONAL)
 
-    assert error.value.reason == "profile_id_missing"
+    assert error.value.reason == "binding_missing"
 
 
 def test_embedding_slot_without_configured_profile_raises() -> None:
@@ -127,12 +126,12 @@ def test_embedding_slot_without_configured_profile_raises() -> None:
     with pytest.raises(MissingProfileError) as error:
         resolver.resolve_profile("space", ProfileSlot.EMBEDDING)
 
-    assert error.value.reason == "profile_id_missing"
+    assert error.value.reason == "binding_missing"
 
 
 def test_missing_profile_row_raises_with_profile_id() -> None:
     store, _ = _setup()
-    store.bind("space", hypothesis_profile_id="missing-profile")
+    store.bind_slot("space", slot="operational", profile_id="missing-profile")
     resolver = StoreBackedProfileResolver(store)
 
     with pytest.raises(MissingProfileError) as error:

@@ -1,4 +1,4 @@
-"""Local vectorizer boundary used by derivative vector projections."""
+"""Local technical embedding backend boundary."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Protocol
 
 
 class Vectorizer(Protocol):
-    """Protocol for embedding services used only by local projections."""
+    """Protocol implemented by Local embedding backends."""
 
     @property
     def fingerprint(self) -> str: ...

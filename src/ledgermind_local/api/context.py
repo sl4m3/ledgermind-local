@@ -1,4 +1,4 @@
-"""Minimal public ContextView endpoint backed by a ContextSearch port."""
+"""Public ContextView endpoint backed directly by the Core gateway."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from ledgermind_local.core_gateway import (
 from .http import build_request_id, error_payload, validate_json_request_headers
 
 
-class ContextSearch(Protocol):
+class ContextGateway(Protocol):
     """Core v2 context boundary used by the public retrieval route."""
 
     def retrieve_context_v2(
@@ -77,7 +77,7 @@ class ContextViewResponse(BaseModel):
 
 def create_context_router(
     require_token: Callable[..., str],
-    context_search: ContextSearch | None,
+    context_gateway: ContextGateway | None,
     *,
     max_body_bytes: int,
     query_embedder: QueryEmbedder | None = None,
@@ -85,15 +85,14 @@ def create_context_router(
     router = APIRouter()
 
     @router.post("/v1/context/retrieve", response_model=ContextViewResponse)
-    @router.post("/v1/context/search", response_model=ContextViewResponse)
-    def search_context(
+    def retrieve_context(
         payload: ContextRetrieveRequest,
         request: Request,
         response: Response,
         _token: str = Depends(require_token),
     ) -> ContextViewResponse:
         validate_json_request_headers(request.headers, max_bytes=max_body_bytes)
-        if context_search is None:
+        if context_gateway is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=error_payload("core_unavailable", "Core gateway is unavailable"),
@@ -122,7 +121,7 @@ def create_context_router(
                 if payload.query_embedding is None:
                     raise TransientCoreError("embedding profile is unavailable")
                 query_embedding = payload.query_embedding
-            retrieve_v2 = getattr(context_search, "retrieve_context_v2", None)
+            retrieve_v2 = getattr(context_gateway, "retrieve_context_v2", None)
             if not callable(retrieve_v2):
                 raise TransientCoreError("Core retrieval v2 is unavailable")
             result = retrieve_v2(
@@ -144,7 +143,9 @@ def create_context_router(
                 )
             )
             response_payload = _context_v2_response(result.payload)
-            record_outcome = getattr(context_search, "record_retrieval_outcome_v2", None)
+            record_outcome = getattr(
+                context_gateway, "record_retrieval_outcome_v2", None
+            )
             retrieval_request_id = response_payload["retrieval_request_id"]
             response_items = response_payload["items"]
             candidate_ids = tuple(str(item["value_id"]) for item in response_items)
@@ -194,9 +195,9 @@ def create_context_router(
 
 
 __all__ = [
+    "ContextGateway",
     "ContextItemResponse",
     "ContextRetrieveRequest",
-    "ContextSearch",
     "ContextViewResponse",
     "QueryEmbedder",
     "create_context_router",

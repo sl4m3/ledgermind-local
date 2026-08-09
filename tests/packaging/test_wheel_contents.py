@@ -33,10 +33,12 @@ _REQUIRED_RUNTIME_FILES = {
     "ledgermind_local.persistence/rounds_migrations/0002_projection_state_compat.sql",
     "ledgermind_local.persistence/rounds_migrations/0003_core_projection_inbox.sql",
     "ledgermind_local.persistence/rounds_migrations/0004_core_projection_fts.sql",
-    "ledgermind_local.inference/prompts/hypothesis_v1.txt",
-    "ledgermind_local.inference/prompts/merge_v1.txt",
-    "ledgermind_local.inference/schemas/hypothesis-response-v1.schema.json",
-    "ledgermind_local.inference/schemas/merge-response-v1.schema.json",
+    "ledgermind_local.persistence/rounds_migrations/0005_worker_leases.sql",
+    "ledgermind_local.persistence/rounds_migrations/0006_object_facet_core_delivery.sql",
+    "ledgermind_local.core_gateway/contracts.py",
+    "ledgermind_local.core_gateway/process.py",
+    "ledgermind_local.inference/vectorizer.py",
+    "ledgermind_local.scheduler/core_execution_task_worker.py",
 }
 
 
@@ -48,6 +50,7 @@ def _build_wheel_names(source: Path, tmp_path: Path) -> list[str]:
         ignore=shutil.ignore_patterns(
             ".git",
             ".pytest_cache",
+            ".venv",
             "__pycache__",
             "build",
             "dist",
@@ -85,6 +88,7 @@ def _build_sdist_names(source: Path, tmp_path: Path) -> list[str]:
         ignore=shutil.ignore_patterns(
             ".git",
             ".pytest_cache",
+            ".venv",
             "__pycache__",
             "build",
             "dist",

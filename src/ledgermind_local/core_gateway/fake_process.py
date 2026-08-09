@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import sys
 import time
@@ -23,14 +22,15 @@ def _configure_python_paths() -> None:
 _configure_python_paths()
 
 from ledgermind_protocol.core_ipc import (
-    CORE_IPC_CAPABILITIES,
-    CORE_IPC_OPERATIONS,
     CoreError,
     CoreRequestEnvelope,
     CoreResponseEnvelope,
 )
 
-_V2_OPERATIONS = {
+_CURRENT_OPERATIONS = {
+    "handshake",
+    "health",
+    "shutdown",
     "ingest_raw_round_v2",
     "poll_execution_tasks_v2",
     "submit_execution_result_v2",
@@ -39,8 +39,14 @@ _V2_OPERATIONS = {
     "record_retrieval_outcome_v2",
     "run_control_maintenance_v1",
     "get_object_facet_statistics_v1",
+    "create_backup",
+    "validate_backup",
+    "prepare_restore",
+    "begin_restore",
+    "commit_restore",
+    "rollback_restore",
 }
-_V2_CAPABILITIES = {
+_CURRENT_CAPABILITIES = {
     "object_facet_memory_v1",
     "operational_pipeline_v1",
     "strict_candidate_binding_v2",
@@ -52,6 +58,8 @@ _V2_CAPABILITIES = {
     "object_resolution_v1",
     "explainable_context_v1",
     "control_contour_v1",
+    "core_owned_backup",
+    "coordinated_restore",
 }
 
 
@@ -122,7 +130,6 @@ def main() -> int:
     if "--schema-version" in sys.argv:
         schema_version = int(sys.argv[sys.argv.index("--schema-version") + 1])
     core_data_dir = Path(os.environ.get("LEDGERMIND_CORE_DATA_DIR", "."))
-    idempotency: dict[str, str] = {}
     if "--crash-once-file" in sys.argv:
         marker_index = sys.argv.index("--crash-once-file") + 1
         crash_once_file = Path(sys.argv[marker_index])
@@ -142,12 +149,10 @@ def main() -> int:
             return 0
         request = CoreRequestEnvelope.from_json(raw.decode("utf-8"))
         if request.operation == "handshake":
-            operations = sorted(
-                (set(CORE_IPC_OPERATIONS) | _V2_OPERATIONS) - missing_operations
-            )
+            operations = sorted(_CURRENT_OPERATIONS - missing_operations)
             capabilities = {
                 capability: capability not in missing_capabilities
-                for capability in (set(CORE_IPC_CAPABILITIES) | _V2_CAPABILITIES)
+                for capability in _CURRENT_CAPABILITIES
             }
             _write(
                 CoreResponseEnvelope.ok(
@@ -192,57 +197,6 @@ def main() -> int:
         elif request.operation == "shutdown":
             _write(CoreResponseEnvelope.ok(request.request_id, {"stopped": True}))
             return 0
-        elif request.operation == "accept_hypothesis":
-            key = str(request.payload["idempotency_key"])
-            fingerprint = json.dumps(
-                request.payload, sort_keys=True, separators=(",", ":")
-            )
-            previous = idempotency.get(key)
-            if previous is not None and previous != fingerprint:
-                _write(
-                    CoreResponseEnvelope.from_error(
-                        request.request_id,
-                        CoreError(
-                            code="IDEMPOTENCY_CONFLICT",
-                            message="idempotency key was already used with another payload",
-                            error_id="fake-error-1",
-                            retryable=False,
-                        ),
-                    )
-                )
-            else:
-                duplicate = previous is not None
-                idempotency[key] = fingerprint
-                _write(
-                    CoreResponseEnvelope.ok(
-                        request.request_id,
-                        {
-                            "accepted": True,
-                            "duplicate": duplicate,
-                            "core_reference_id": "core-hypothesis-1",
-                        },
-                    )
-                )
-        elif request.operation == "retrieve_context":
-            _write(
-                CoreResponseEnvelope.ok(
-                    request.request_id,
-                    {
-                        "api_version": "1",
-                        "items": [
-                            {
-                                "knowledge_id": "knowledge-1",
-                                "title": "Title",
-                                "target": "Target",
-                                "statement": "Statement",
-                                "relevance": 0.9,
-                            }
-                        ],
-                    },
-                )
-            )
-        elif request.operation == "record_context_usage":
-            _write(CoreResponseEnvelope.ok(request.request_id, {"recorded": True}))
         elif request.operation == "ingest_raw_round_v2":
             command_id = str(request.payload.get("command_id", request.request_id))
             _write(
@@ -251,7 +205,6 @@ def main() -> int:
                     {
                         "raw_round_id": command_id,
                         "duplicate": False,
-                        "operational_job_id": f"{command_id}:operational",
                         "status": "queued",
                     },
                 )
@@ -351,23 +304,6 @@ def main() -> int:
                     },
                 )
             )
-        elif request.operation == "fail_model_task":
-            payload = request.payload
-            retryable = bool(payload.get("retryable", False))
-            failed_at = str(payload.get("failed_at"))
-            _write(
-                CoreResponseEnvelope.ok(
-                    request.request_id,
-                    {
-                        "status": "pending" if retryable else "failed",
-                        "attempts": 1,
-                        "available_at": failed_at if retryable else None,
-                        "last_error_code": str(payload.get("error_code", "unknown")),
-                        "failed_at": failed_at,
-                        "completed_at": None if retryable else failed_at,
-                    },
-                )
-            )
         elif request.operation == "create_backup":
             relative_path = "exchange/outgoing/fake-core-backup.bin"
             snapshot = b"fake-core-snapshot-v1"
@@ -454,12 +390,7 @@ def main() -> int:
                 )
             )
         else:
-            _write(
-                CoreResponseEnvelope.ok(
-                    request.request_id,
-                    {"accepted": True, "duplicate": False},
-                )
-            )
+            _error(request.request_id, "INVALID_REQUEST", "operation is unavailable")
 
 
 if __name__ == "__main__":

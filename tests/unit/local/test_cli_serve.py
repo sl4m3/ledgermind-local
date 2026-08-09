@@ -40,11 +40,6 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
         advertised_operations = frozenset(
             {
                 "health",
-                "accept_hypothesis",
-                "retrieve_context",
-                "record_context_usage",
-                "poll_projection_events",
-                "ack_projection_events",
                 "ingest_raw_round_v2",
                 "poll_execution_tasks_v2",
                 "submit_execution_result_v2",
@@ -63,7 +58,6 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
         )
         advertised_capabilities = frozenset(
             {
-                "projection_events",
                 "core_owned_backup",
                 "coordinated_restore",
                 "object_facet_memory_v1",
@@ -137,7 +131,6 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
         lambda **kwargs: DummyGateway(),
     )
     monkeypatch.setattr(bootstrap_module, "CoreCommandWorker", DummyWorker)
-    monkeypatch.setattr(cli_module, "CoreProjectionWorker", DummyWorker)
     monkeypatch.setattr(bootstrap_module, "CoreExecutionTaskWorker", DummyWorker)
     monkeypatch.setattr(bootstrap_module, "RawRoundRetentionWorker", DummyWorker)
 

@@ -64,27 +64,19 @@ class StoreBackedProfileResolver(ProfileResolver):
     """
 
     def __init__(
-        self,
-        profile_store: InferenceProfileStore,
-        *,
-        embedding_profile_id: str | None = None,
+        self, profile_store: InferenceProfileStore
     ) -> None:
         self._profile_store = profile_store
-        # Kept as an input-only compatibility shim for callers from before
-        # slot persistence.  Runtime resolution always reads the embedding
-        # slot from ``memory_space_model_profiles``.
-        del embedding_profile_id
 
     def resolve_profile(
         self, memory_space_id: str, slot: ProfileSlot
     ) -> InferenceProfile:
-        binding = self._profile_store.get_binding(memory_space_id)
         profile_id = self._profile_store.get_slot(memory_space_id, slot.value)
         if profile_id is None:
             raise MissingProfileError(
                 slot=slot,
                 memory_space_id=memory_space_id,
-                reason="binding_missing" if binding is None else "profile_id_missing",
+                reason="binding_missing",
             )
         profile = self._profile_store.get(profile_id)
         if profile is None:
@@ -106,11 +98,8 @@ class StoreBackedProfileResolver(ProfileResolver):
 class DatabaseBackedProfileResolver(ProfileResolver):
     """Resolve a slot using a fresh Local SQLite connection per lookup."""
 
-    def __init__(
-        self, database_path: str | Path, *, embedding_profile_id: str | None = None
-    ) -> None:
+    def __init__(self, database_path: str | Path) -> None:
         self._database_path = database_path
-        del embedding_profile_id
 
     def resolve_profile(
         self, memory_space_id: str, slot: ProfileSlot
@@ -121,9 +110,7 @@ class DatabaseBackedProfileResolver(ProfileResolver):
         connection = open_sqlite_connection(self._database_path)
         try:
             migrations.apply_migrations(connection)
-            resolver = StoreBackedProfileResolver(
-                InferenceProfileStore(connection),
-            )
+            resolver = StoreBackedProfileResolver(InferenceProfileStore(connection))
             return resolver.resolve_profile(memory_space_id, slot)
         finally:
             connection.close()

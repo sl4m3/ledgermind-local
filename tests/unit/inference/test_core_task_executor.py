@@ -134,11 +134,8 @@ def _memory_store() -> sqlite3.Connection:
             secret_ref="embed-main",
         )
     )
-    store.bind(
-        "space",
-        hypothesis_profile_id="operational-default",
-        merge_profile_id="background-default",
-    )
+    store.bind_slot("space", slot="operational", profile_id="operational-default")
+    store.bind_slot("space", slot="background", profile_id="background-default")
     store.bind_slot(
         "space",
         slot="embedding",
@@ -151,7 +148,6 @@ def _memory_store() -> sqlite3.Connection:
 def _resolver() -> StoreBackedProfileResolver:
     return StoreBackedProfileResolver(
         InferenceProfileStore(_memory_store()),
-        embedding_profile_id="embedding-default",
     )
 
 

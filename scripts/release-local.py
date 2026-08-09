@@ -37,25 +37,28 @@ PACKAGE = "ledgermind_local"
 REQUIRED_IMPORTS = (
     "ledgermind_local.core_gateway.isolation",
     "ledgermind_local.core_gateway.maintenance",
+    "ledgermind_local.core_gateway.process",
+    "ledgermind_local.inference.vectorizer",
+    "ledgermind_local.scheduler.core_execution_task_worker",
     "ledgermind_local.scheduler.guarded_loop",
     "ledgermind_local.scheduler.retention_worker",
-    "ledgermind_local.search.vector",
 )
 REQUIRED_WHEEL_FILES = {
     "ledgermind_local/__init__.py",
     "ledgermind_local/core_gateway/isolation.py",
     "ledgermind_local/core_gateway/maintenance.py",
+    "ledgermind_local/core_gateway/process.py",
+    "ledgermind_local/core_gateway/contracts.py",
+    "ledgermind_local/inference/vectorizer.py",
+    "ledgermind_local/scheduler/core_execution_task_worker.py",
     "ledgermind_local/scheduler/guarded_loop.py",
     "ledgermind_local/scheduler/retention_worker.py",
-    "ledgermind_local/search/vector.py",
     "ledgermind_local/persistence/rounds_migrations/0001_initial.sql",
+    "ledgermind_local/persistence/rounds_migrations/0005_worker_leases.sql",
+    "ledgermind_local/persistence/rounds_migrations/0006_object_facet_core_delivery.sql",
     "ledgermind_local/persistence/rounds_migrations/0002_projection_state_compat.sql",
     "ledgermind_local/persistence/rounds_migrations/0003_core_projection_inbox.sql",
     "ledgermind_local/persistence/rounds_migrations/0004_core_projection_fts.sql",
-    "ledgermind_local/inference/prompts/hypothesis_v1.txt",
-    "ledgermind_local/inference/prompts/merge_v1.txt",
-    "ledgermind_local/inference/schemas/hypothesis-response-v1.schema.json",
-    "ledgermind_local/inference/schemas/merge-response-v1.schema.json",
 }
 _GENERATED_DIR_NAMES = {
     "build",
@@ -152,7 +155,7 @@ def _cleanup_generated(root: Path) -> None:
 
     for current, directories, files in os.walk(root, topdown=True):
         current_path = Path(current)
-        if ".git" in current_path.parts:
+        if any(part in {".git", ".venv", "venv", "env", "ENV"} for part in current_path.parts):
             directories[:] = []
             continue
         kept: list[str] = []
@@ -173,7 +176,7 @@ def _assert_no_generated(root: Path) -> None:
     found: list[str] = []
     for current, directories, files in os.walk(root):
         current_path = Path(current)
-        if ".git" in current_path.parts:
+        if any(part in {".git", ".venv", "venv", "env", "ENV"} for part in current_path.parts):
             directories[:] = []
             continue
         for name in directories:
@@ -549,7 +552,8 @@ def _load_manifest(path: Path) -> dict[str, Any]:
 
 
 def verify(args: argparse.Namespace) -> Path:
-    commit, commit_epoch = _git_state(ROOT)
+    commit = _git(ROOT, "rev-parse", "HEAD")
+    commit_epoch = int(_git(ROOT, "show", "-s", "--format=%ct", "HEAD"))
     version = _version(ROOT)
     path = _manifest_path(args, version, commit)
     manifest = _load_manifest(path)
@@ -588,7 +592,6 @@ def verify(args: argparse.Namespace) -> Path:
             raise ReleaseError(f"artifact predates current source commit: {name}")
     _cleanup_generated(ROOT)
     _assert_no_generated(ROOT)
-    _git_state(ROOT)
     print(path)
     return path
 

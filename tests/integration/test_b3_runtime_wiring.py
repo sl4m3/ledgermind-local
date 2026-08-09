@@ -15,7 +15,6 @@ from ledgermind_local.core_gateway.security_policy import (
     build_core_isolation_requirements,
 )
 from ledgermind_local.paths import ServicePaths
-from ledgermind_local.scheduler.core_model_task_worker import CoreModelTaskWorkerStats
 
 
 class _Gateway:
@@ -46,20 +45,13 @@ class _BlockingWorker:
         return None
 
 
-class _ObservedWorker:
+class _DegradedWorker:
     def __init__(self) -> None:
         self.observed = threading.Event()
 
-    def process_once(self) -> CoreModelTaskWorkerStats:
+    def process_once(self) -> SimpleNamespace:
         self.observed.set()
-        return CoreModelTaskWorkerStats(
-            fetched=1,
-            failed=1,
-            retry_scheduled=1,
-            terminal_failures=1,
-            provider_failures=1,
-            last_error_code="provider_unavailable",
-        )
+        return SimpleNamespace(degraded=True)
 
     def request_stop(self) -> None:
         return None
@@ -88,9 +80,7 @@ def _runtime(
 def _minimal_config(**workers: object) -> LocalConfig:
     defaults = {
         "retention": {"enabled": False},
-        "processing": {"enabled": False},
         "core_commands": {"enabled": False},
-        "core_projections": {"enabled": False},
         "core_model_tasks": {"enabled": False},
     }
     defaults.update(workers)
@@ -186,8 +176,8 @@ def test_runtime_does_not_close_core_when_worker_shutdown_times_out(tmp_path: Pa
     assert "core-close" in events
 
 
-def test_runtime_health_exposes_model_task_stats_without_result_payload(tmp_path: Path) -> None:
-    worker = _ObservedWorker()
+def test_runtime_health_exposes_worker_degradation_without_result_payload(tmp_path: Path) -> None:
+    worker = _DegradedWorker()
     config = _minimal_config(retention={"enabled": True, "interval_seconds": 0})
     runtime = _runtime(
         tmp_path,
@@ -204,11 +194,8 @@ def test_runtime_health_exposes_model_task_stats_without_result_payload(tmp_path
         assert report["full_ready"] is False
         assert report["degraded"] is True
         assert worker_report["state"]["degraded"] is True
-        assert worker_report["observability"]["retry_scheduled"] == 1
-        assert worker_report["observability"]["terminal_failures"] == 1
-        assert worker_report["observability"]["provider_failures"] == 1
-        assert "fetched" in worker_report["observability"]
-        assert "provider_unavailable" in json.dumps(worker_report)
+        assert worker_report["observability"] == {}
+        assert "provider_unavailable" not in json.dumps(worker_report)
         assert "model_input" not in json.dumps(report)
     finally:
         runtime.stop()

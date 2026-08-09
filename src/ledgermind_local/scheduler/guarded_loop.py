@@ -227,7 +227,7 @@ class GuardedWorkerLoop:
 def _result_item_id(result: object | None) -> str | None:
     if result is None:
         return None
-    for attribute in ("job_id", "command_id", "item_id"):
+    for attribute in ("command_id", "item_id"):
         value = getattr(result, attribute, None)
         if isinstance(value, str) and value:
             return value

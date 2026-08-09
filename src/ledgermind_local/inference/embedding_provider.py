@@ -1,4 +1,4 @@
-"""Embedding provider contract over the existing local vectorizer backend."""
+"""Embedding provider contract over the Local technical backend."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..projections.vectorizer import Vectorizer
 from .cancellation import CancellationToken
 from .profiles import InferenceProfile
+from .vectorizer import Vectorizer
 
 VectorizerFactory = Callable[[], Vectorizer]
 

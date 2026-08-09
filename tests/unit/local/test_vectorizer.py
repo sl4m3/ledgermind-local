@@ -1,10 +1,10 @@
-"""Tests for the local vectorizer contract used by projections."""
+"""Tests for the Local technical vectorizer contract."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ledgermind_local.projections import Vectorizer
+from ledgermind_local.inference.vectorizer import Vectorizer
 
 
 class _TestVectorizer:

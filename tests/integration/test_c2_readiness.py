@@ -67,9 +67,7 @@ def _config() -> LocalConfig:
         config_version=1,
         workers={
             "retention": {"enabled": False},
-            "processing": {"enabled": False},
             "core_commands": {"enabled": False},
-            "core_projections": {"enabled": False},
             "core_model_tasks": {"enabled": True},
         },
     )

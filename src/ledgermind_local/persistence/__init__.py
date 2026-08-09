@@ -9,9 +9,7 @@ from .memory_space_repository import (
 from .raw_round_repository import (
     CoreCommandRecord,
     CoreRawRoundDeliveryRecord,
-    NormalizedRoundRecord,
     RawRoundRecord,
-    RoundProcessingJob,
     SQLiteRawRoundRepository,
 )
 from .sqlite_uow import (
@@ -25,9 +23,7 @@ __all__ = [
     "CoreRawRoundDeliveryRecord",
     "MemorySpace",
     "MemorySpaceSourceClientChangedError",
-    "NormalizedRoundRecord",
     "RawRoundRecord",
-    "RoundProcessingJob",
     "SQLiteMemorySpaceRepository",
     "SQLiteRawRoundRepository",
     "SQLiteUnitOfWork",

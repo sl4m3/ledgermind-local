@@ -11,14 +11,14 @@ from ledgermind_local.core_gateway.process import ProcessCoreGateway
 _OPERATIONS = [
     "handshake",
     "health",
-    "accept_hypothesis",
-    "retrieve_context",
-    "record_context_usage",
-    "poll_projection_events",
-    "ack_projection_events",
-    "poll_model_tasks",
-    "submit_model_result",
-    "fail_model_task",
+    "ingest_raw_round_v2",
+    "poll_execution_tasks_v2",
+    "submit_execution_result_v2",
+    "fail_execution_task_v2",
+    "retrieve_context_v2",
+    "record_retrieval_outcome_v2",
+    "run_control_maintenance_v1",
+    "get_object_facet_statistics_v1",
     "create_backup",
     "validate_backup",
     "prepare_restore",
@@ -37,10 +37,8 @@ class _Supervisor:
             "supported_operations": list(_OPERATIONS),
             "capabilities": capabilities
             or {
-                "core_owned_backup": True,
-                "coordinated_restore": True,
-                "model_task_failure_reporting": True,
-                "projection_events": True,
+            "core_owned_backup": True,
+            "coordinated_restore": True,
             },
         }
 
@@ -68,8 +66,6 @@ def test_process_gateway_fails_closed_when_feature_flag_is_missing() -> None:
         capabilities={
             "core_owned_backup": False,
             "coordinated_restore": True,
-            "model_task_failure_reporting": True,
-            "projection_events": True,
         }
     )
 

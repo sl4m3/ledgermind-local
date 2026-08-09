@@ -1,3 +1,3 @@
-"""LedgerMind local service, persistence, projections, and Hermes integration."""
+"""LedgerMind Local service and Core gateway integration."""
 
 __all__: list[str] = []

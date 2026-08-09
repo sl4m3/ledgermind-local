@@ -30,19 +30,14 @@ def _normalize_database_path(database_path: str | Path) -> Path:
 def create_app(
     application: Application,
     settings: Settings,
-    *,
-    projection_names: tuple[str, ...] | None = None,
 ) -> FastAPI:
     """Create the Local HTTP surface without opening Core storage.
 
     ``application.core_gateway`` is an optional already-created boundary
     implementation.  The app factory never constructs a Python Core adapter and
     therefore never opens ``knowledge.db`` as part of Local request setup.
-    ``projection_names`` is retained for compatibility with callers; Core
-    projections are not built by Local HTTP.
     """
 
-    del projection_names
     app = FastAPI()
     app.state.application = application
     app.state.database_path = _normalize_database_path(settings.rounds_database_path)
@@ -79,9 +74,9 @@ def create_app(
     runtime = getattr(application, "runtime", None)
     if runtime is None and callable(getattr(application, "health_report", None)):
         runtime = application
-    context_search = getattr(application, "context_search", None)
-    if context_search is None:
-        context_search = core_gateway
+    context_gateway = getattr(application, "context_gateway", None)
+    if context_gateway is None:
+        context_gateway = core_gateway
     app.state.raw_round_handler = raw_round_handler
     app.state.core_gateway = core_gateway
     app.state.runtime = runtime
@@ -111,7 +106,7 @@ def create_app(
     app.include_router(
         create_context_router(
             require_token,
-            context_search,
+            context_gateway,
             max_body_bytes=settings.max_raw_round_bytes,
             query_embedder=query_embedder,
         )

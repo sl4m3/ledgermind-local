@@ -18,31 +18,14 @@ from pydantic import (
 CURRENT_CONFIG_VERSION = 2
 
 
-class VectorProjectionConfig(BaseModel):
-    """Configuration for optional local vector projection settings."""
+class EmbeddingConfig(BaseModel):
+    """Configuration for the Local technical embedding backend."""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     model_path: str = "~/.ledgermind/local/models/v5-small-text-matching-Q4_K_M.gguf"
     gpu_layers: int = Field(default=0, ge=0)
-    rebuild_threshold: int = Field(default=500, ge=0)
-
-
-class MarkdownProjectionConfig(BaseModel):
-    """Configuration for markdown derivative projection."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = False
-
-
-class GitAuditConfig(BaseModel):
-    """Configuration for markdown git-audit projection."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = False
 
 
 class WorkerConfig(BaseModel):
@@ -57,18 +40,14 @@ class WorkerConfig(BaseModel):
 
 
 class WorkerSetConfig(BaseModel):
-    """The complete set of Local-owned B2 worker switches."""
+    """The complete set of current Local-owned worker switches."""
 
     model_config = ConfigDict(extra="forbid")
 
     retention: WorkerConfig = Field(
         default_factory=lambda: WorkerConfig(enabled=True, interval_seconds=300.0)
     )
-    processing: WorkerConfig = Field(default_factory=WorkerConfig)
     core_commands: WorkerConfig = Field(
-        default_factory=lambda: WorkerConfig(enabled=True)
-    )
-    core_projections: WorkerConfig = Field(
         default_factory=lambda: WorkerConfig(enabled=True)
     )
     core_model_tasks: WorkerConfig = Field(
@@ -135,28 +114,6 @@ def _default_core_security() -> CoreSecurityConfig:
     )
 
 
-class SearchConfig(BaseModel):
-    """Local candidate search policy before Core's authoritative ranking."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    use_local_candidates: bool = True
-    candidate_multiplier: int = Field(default=4, ge=1, le=100)
-    fallback_to_core_fts: bool = True
-
-    @property
-    def enabled(self) -> bool:
-        """Compatibility alias for the B2 ``use_local_candidates`` switch."""
-
-        return self.use_local_candidates
-
-    @property
-    def fallback_to_core(self) -> bool:
-        """Compatibility alias for the B2 Core FTS fallback switch."""
-
-        return self.fallback_to_core_fts
-
-
 class ProfileSlotsConfig(BaseModel):
     """Optional persisted defaults for the three technical profile slots."""
 
@@ -178,7 +135,7 @@ class ProfileSlotsConfig(BaseModel):
 
 
 class LocalConfig(BaseModel):
-    """Strict service configuration for the local LedgerMind process."""
+    """Strict service configuration for the current Local runtime."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -199,30 +156,20 @@ class LocalConfig(BaseModel):
     core_startup_timeout_seconds: float = Field(default=10.0, gt=0.0)
     core_security: CoreSecurityConfig = Field(default_factory=_default_core_security)
     workers: WorkerSetConfig = Field(default_factory=WorkerSetConfig)
-    search: SearchConfig = Field(default_factory=SearchConfig)
     profile_slots: ProfileSlotsConfig = Field(default_factory=ProfileSlotsConfig)
     log_level: str = "INFO"
-    projection_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
-    processing_enabled: bool = False
-    processing_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
-    processing_max_attempts: int = Field(default=3, ge=1)
-    processing_retry_delay_seconds: float = Field(default=30.0, ge=0.0)
-    processing_lease_seconds: float = Field(default=300.0, ge=1.0)
-    processing_heartbeat_interval_seconds: float = Field(default=30.0, ge=1.0)
+    worker_max_attempts: int = Field(default=3, ge=1)
+    worker_retry_delay_seconds: float = Field(default=30.0, ge=0.0)
+    worker_lease_seconds: float = Field(default=300.0, ge=1.0)
     inference_secrets_path: str = "secrets.json"
     max_raw_round_bytes: int = Field(default=5_000_000, ge=1)
     raw_round_retention_days: int = Field(default=30, ge=1)
     allow_remote_bind: bool = False
-    vector: VectorProjectionConfig = Field(default_factory=VectorProjectionConfig)
-    markdown_projection: MarkdownProjectionConfig = Field(
-        default_factory=MarkdownProjectionConfig
-    )
-    markdown_audit: GitAuditConfig = Field(default_factory=GitAuditConfig)
-    markdown_audit_enabled: bool = False
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
 
     @property
     def database_path(self) -> str:
-        """Compatibility read alias; serialized config uses rounds name."""
+        """Read alias retained for callers that use the Local database name."""
 
         return self.rounds_database_path
 
@@ -253,7 +200,6 @@ class LocalConfig(BaseModel):
     @field_validator("allow_remote_bind", mode="after")
     @classmethod
     def _validate_remote_bind(cls, value: bool, info: Any) -> bool:
-        # pylint: disable=unused-argument
         if not value and info.data.get("bind_host") not in {
             "127.0.0.1",
             "localhost",
@@ -276,8 +222,6 @@ class LocalConfig(BaseModel):
         if legacy is None:
             return data
 
-        # A persisted configuration carrying the removed switch is an older
-        # schema.  Always emit the current version after migration.
         version = data.get("config_version")
         if not isinstance(version, int) or version < CURRENT_CONFIG_VERSION:
             data["config_version"] = CURRENT_CONFIG_VERSION
@@ -293,9 +237,6 @@ class LocalConfig(BaseModel):
                 "require_signature": True,
             }
         elif bool(legacy):
-            # A legacy true value is an explicit security requirement.  If a
-            # hand-edited config also supplied a permissive profile, migrate
-            # to the fail-closed equivalent rather than weakening it.
             if isinstance(security, CoreSecurityConfig):
                 security = security.model_dump(mode="python")
             elif isinstance(security, dict):
@@ -317,34 +258,8 @@ class LocalConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _materialize_legacy_worker_settings(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        data = dict(value)
-        workers_value = data.get("workers")
-        if isinstance(workers_value, WorkerSetConfig):
-            workers = workers_value.model_dump(mode="python")
-        elif isinstance(workers_value, dict):
-            workers = dict(workers_value)
-        else:
-            workers = {}
-        if "processing" not in workers:
-            workers["processing"] = {
-                "enabled": bool(data.get("processing_enabled", False)),
-                "interval_seconds": data.get("processing_poll_interval_seconds", 1.0),
-            }
-        if (
-            bool(data.get("processing_enabled", False))
-            and "core_commands" not in workers
-        ):
-            workers["core_commands"] = {"enabled": True}
-        data["workers"] = workers
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
     def _migrate_legacy_profile_slots(cls, value: object) -> object:
-        """Map one persisted legacy config into the technical slot shape."""
+        """Map legacy profile names to technical slots exactly once."""
 
         if not isinstance(value, dict):
             return value
@@ -370,33 +285,75 @@ class LocalConfig(BaseModel):
             data["config_version"] = CURRENT_CONFIG_VERSION
         return data
 
-    @model_validator(mode="after")
-    def _sync_legacy_worker_fields(self) -> LocalConfig:
-        processing = self.workers.processing
-        object.__setattr__(self, "processing_enabled", processing.enabled)
-        object.__setattr__(
-            self,
-            "processing_poll_interval_seconds",
-            processing.interval_seconds,
-        )
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _remove_legacy_runtime_settings(cls, value: object) -> object:
+        """Drop removed workers/projections while preserving safe settings.
 
-    @model_validator(mode="after")
-    def _sync_markdown_audit_flag(self) -> LocalConfig:
-        if (
-            self.markdown_projection.enabled
-            or self.markdown_audit_enabled
-            or self.markdown_audit.enabled
-        ):
-            object.__setattr__(self.markdown_projection, "enabled", True)
-            object.__setattr__(self, "markdown_audit_enabled", True)
+        Existing Local configs are accepted once, but removed switches are never
+        represented on the current model and therefore cannot start old workers.
+        """
+
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        changed = False
+
+        workers_value = data.get("workers")
+        if isinstance(workers_value, WorkerSetConfig):
+            workers = workers_value.model_dump(mode="python")
+        elif isinstance(workers_value, dict):
+            workers = dict(workers_value)
         else:
-            object.__setattr__(
-                self,
-                "markdown_audit_enabled",
-                bool(self.markdown_audit_enabled),
-            )
-        return self
+            workers = {}
+        for name in ("processing", "core_projections"):
+            if name in workers:
+                workers.pop(name)
+                changed = True
+        if workers_value is not None:
+            data["workers"] = workers
+
+        scalar_migrations = {
+            "processing_max_attempts": "worker_max_attempts",
+            "processing_retry_delay_seconds": "worker_retry_delay_seconds",
+            "processing_lease_seconds": "worker_lease_seconds",
+        }
+        for old_name, new_name in scalar_migrations.items():
+            if old_name in data:
+                if new_name not in data:
+                    data[new_name] = data[old_name]
+                data.pop(old_name)
+                changed = True
+
+        for old_name in (
+            "processing_enabled",
+            "processing_poll_interval_seconds",
+            "processing_heartbeat_interval_seconds",
+            "projection_poll_interval_seconds",
+            "search",
+            "markdown_projection",
+            "markdown_audit",
+            "markdown_audit_enabled",
+        ):
+            if old_name in data:
+                data.pop(old_name)
+                changed = True
+
+        legacy_embedding = data.pop("vector", None)
+        if legacy_embedding is not None:
+            changed = True
+            if "embedding" not in data and isinstance(legacy_embedding, dict):
+                data["embedding"] = {
+                    key: legacy_embedding[key]
+                    for key in ("enabled", "model_path", "gpu_layers")
+                    if key in legacy_embedding
+                }
+
+        if changed:
+            version = data.get("config_version")
+            if not isinstance(version, int) or version < CURRENT_CONFIG_VERSION:
+                data["config_version"] = CURRENT_CONFIG_VERSION
+        return data
 
     @classmethod
     def from_json(cls, payload: str) -> LocalConfig:
@@ -421,10 +378,7 @@ class LocalConfig(BaseModel):
 
     def to_json(self) -> str:
         return json.dumps(
-            self.model_dump(
-                exclude={"markdown_audit_enabled"},
-                exclude_defaults=False,
-            ),
+            self.model_dump(exclude_defaults=False),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

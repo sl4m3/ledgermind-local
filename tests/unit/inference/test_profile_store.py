@@ -9,7 +9,7 @@ from ledgermind_local.inference.profiles import InferenceProfile
 from ledgermind_local.persistence import rounds_migrations as migrations
 
 
-def _profile(profile_id: str = "hypothesis-default") -> InferenceProfile:
+def _profile(profile_id: str = "operational-default") -> InferenceProfile:
     return InferenceProfile(
         profile_id=profile_id,
         base_url="https://provider.example/v1",
@@ -35,8 +35,8 @@ def test_profile_store_upserts_and_lists_without_secret_values(tmp_path) -> None
     try:
         store = InferenceProfileStore(connection)
         store.upsert(_profile())
-        assert store.get("hypothesis-default") == _profile()
-        assert store.list_ids() == ("hypothesis-default",)
+        assert store.get("operational-default") == _profile()
+        assert store.list_ids() == ("operational-default",)
         row = connection.execute("SELECT * FROM inference_profiles").fetchone()
         assert row["secret_ref"] == "provider-main"
         assert "TOP_SECRET" not in " ".join(str(value) for value in row)
@@ -44,21 +44,19 @@ def test_profile_store_upserts_and_lists_without_secret_values(tmp_path) -> None
         connection.close()
 
 
-def test_profile_store_binds_memory_space_and_records_safe_audit(tmp_path) -> None:
+def test_profile_store_binds_technical_slots_and_records_safe_audit(tmp_path) -> None:
     connection = _connection(tmp_path / "local.db")
     try:
         store = InferenceProfileStore(connection)
         store.upsert(_profile())
-        store.bind("space", hypothesis_profile_id="hypothesis-default")
-        binding = store.get_binding("space")
-        assert binding is not None
-        assert binding.hypothesis_profile_id == "hypothesis-default"
+        store.bind_slot("space", slot="operational", profile_id="operational-default")
+        assert store.get_slot("space", "operational") == "operational-default"
 
         store.record_egress_audit(
             audit_id="audit-1",
             memory_space_id="space",
-            profile_id="hypothesis-default",
-            operation="hypothesis",
+            profile_id="operational-default",
+            operation="generate_json",
             provider_kind="openai_compatible",
             model="test-model",
             status="success",
@@ -81,8 +79,8 @@ def test_profile_store_rejects_binding_to_missing_profile(tmp_path) -> None:
     connection = _connection(tmp_path / "local.db")
     try:
         with pytest.raises(sqlite3.IntegrityError):
-            InferenceProfileStore(connection).bind(
-                "space", hypothesis_profile_id="missing"
+            InferenceProfileStore(connection).bind_slot(
+                "space", slot="operational", profile_id="missing"
             )
     finally:
         connection.close()

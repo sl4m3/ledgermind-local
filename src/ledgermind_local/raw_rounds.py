@@ -38,7 +38,6 @@ class RawRoundTooLarge(RawRoundError):
 @dataclass(frozen=True, slots=True)
 class RawRoundIngestResult:
     raw_round_id: str
-    job_id: str | None
     duplicate: bool
     status: str
     core_command_id: str | None = None
@@ -77,18 +76,10 @@ class RawRoundIngestHandler:
         database_path: str | Path,
         max_raw_round_bytes: int = 5_000_000,
         retention_days: int = 30,
-        pipeline_version: int = 1,
-        normalizer_version: int = 1,
-        prompt_version: int = 1,
-        core_pipeline: bool = False,
     ) -> None:
         self.database_path = database_path
         self.max_raw_round_bytes = max(int(max_raw_round_bytes), 1)
         self.retention_days = max(int(retention_days), 1)
-        self.pipeline_version = max(int(pipeline_version), 1)
-        self.normalizer_version = max(int(normalizer_version), 1)
-        self.prompt_version = max(int(prompt_version), 1)
-        self.core_pipeline = bool(core_pipeline)
 
     def handle(self, request: RawRoundRequest) -> RawRoundIngestResult:
         if calculate_payload_digest(request) != request.payload_digest:
@@ -119,31 +110,12 @@ class RawRoundIngestHandler:
                     raise RawRoundConflict(
                         "same source round identity already contains a different payload"
                     )
-                if self.core_pipeline:
-                    return self._queue_core_delivery(
-                        uow,
-                        raw_round_id=existing.raw_round_id,
-                        memory_space_id=request.memory_space_id,
-                        request=request,
-                        duplicate=True,
-                    )
-                job = uow.raw_rounds.get_job_for_round(
-                    existing.raw_round_id,
-                    self.pipeline_version,
-                    self.normalizer_version,
-                    self.prompt_version,
-                )
-                if job is None:
-                    job = uow.raw_rounds.create_job(
-                        job_id=str(uuid.uuid4()),
-                        raw_round_id=existing.raw_round_id,
-                        pipeline_version=self.pipeline_version,
-                        normalizer_version=self.normalizer_version,
-                        prompt_version=self.prompt_version,
-                    )
-                    uow.commit()
-                return RawRoundIngestResult(
-                    existing.raw_round_id, job.job_id, True, job.status
+                return self._queue_core_delivery(
+                    uow,
+                    raw_round_id=existing.raw_round_id,
+                    memory_space_id=request.memory_space_id,
+                    request=request,
+                    duplicate=True,
                 )
 
             self._ensure_memory_space(uow.connection, request.memory_space_id)
@@ -166,24 +138,12 @@ class RawRoundIngestHandler:
                     datetime.now(timezone.utc) + timedelta(days=self.retention_days)
                 ).isoformat(timespec="seconds"),
             )
-            if self.core_pipeline:
-                return self._queue_core_delivery(
-                    uow,
-                    raw_round_id=raw_round.raw_round_id,
-                    memory_space_id=request.memory_space_id,
-                    request=request,
-                    duplicate=False,
-                )
-            job = uow.raw_rounds.create_job(
-                job_id=str(uuid.uuid4()),
+            return self._queue_core_delivery(
+                uow,
                 raw_round_id=raw_round.raw_round_id,
-                pipeline_version=self.pipeline_version,
-                normalizer_version=self.normalizer_version,
-                prompt_version=self.prompt_version,
-            )
-            uow.commit()
-            return RawRoundIngestResult(
-                raw_round.raw_round_id, job.job_id, False, job.status
+                memory_space_id=request.memory_space_id,
+                request=request,
+                duplicate=False,
             )
 
     @staticmethod
@@ -222,7 +182,6 @@ class RawRoundIngestHandler:
         uow.commit()
         return RawRoundIngestResult(
             raw_round_id=raw_round_id,
-            job_id=None,
             duplicate=duplicate,
             status="queued_for_core" if delivery.transport_status == "queued" else delivery.transport_status,
             core_command_id=command.command_id,

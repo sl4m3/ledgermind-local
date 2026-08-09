@@ -1,4 +1,4 @@
-"""GGUF-backed vectorizer adapter used by local vector projections."""
+"""GGUF-backed Local technical embedding adapter."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
 
-from ledgermind_local.projections.vectorizer import Vectorizer
+from .vectorizer import Vectorizer
 
 _EmbeddingModelBuilder: TypeAlias = Callable[[str, int, int], Any]
 

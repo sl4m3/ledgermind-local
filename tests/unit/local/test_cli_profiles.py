@@ -31,22 +31,22 @@ def _add(home, profile_id: str, secret_ref: str = "provider-main") -> int:
 
 def test_profiles_add_and_list_do_not_print_secret_values(tmp_path, capsys) -> None:
     home = tmp_path / "local"
-    assert _add(home, "hypothesis-default") == 0
+    assert _add(home, "operational-default") == 0
     output = capsys.readouterr().out
-    assert "hypothesis-default" in output
+    assert "operational-default" in output
     assert "provider-main" in output
     assert "TOP_SECRET" not in output
 
     assert main(["--home", str(home), "profiles", "list"]) == 0
     output = capsys.readouterr().out
-    assert "hypothesis-default" in output
+    assert "operational-default" in output
     assert "secret_ref" in output
 
 
-def test_profiles_bind_and_remove(tmp_path) -> None:
+def test_profiles_bind_slots_and_remove(tmp_path) -> None:
     home = tmp_path / "local"
-    assert _add(home, "hypothesis-default") == 0
-    assert _add(home, "merge-default", "provider-merge") == 0
+    assert _add(home, "operational-default") == 0
+    assert _add(home, "background-default", "provider-background") == 0
     database = ServicePaths(home).rounds_database_file
     connection = sqlite3.connect(database)
     connection.execute(
@@ -61,27 +61,64 @@ def test_profiles_bind_and_remove(tmp_path) -> None:
             [
                 "--home",
                 str(home),
-                "profiles",
+                "inference",
                 "bind",
                 "--memory-space-id",
                 "space",
-                "--hypothesis-profile",
-                "hypothesis-default",
-                "--merge-profile",
-                "merge-default",
+                "--slot",
+                "operational",
+                "--profile-id",
+                "operational-default",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--home",
+                str(home),
+                "inference",
+                "bind",
+                "--memory-space-id",
+                "space",
+                "--slot",
+                "background",
+                "--profile-id",
+                "background-default",
             ]
         )
         == 0
     )
     connection = sqlite3.connect(database)
     row = connection.execute(
-        "SELECT hypothesis_profile_id, merge_profile_id FROM memory_space_inference_profiles"
+        "SELECT profile_slot, profile_id FROM memory_space_model_profiles "
+        "WHERE memory_space_id = ? ORDER BY profile_slot",
+        ("space",),
     ).fetchone()
-    assert row == ("hypothesis-default", "merge-default")
+    assert row == ("background", "background-default")
+    rows = connection.execute(
+        "SELECT profile_slot, profile_id FROM memory_space_model_profiles "
+        "WHERE memory_space_id = ? ORDER BY profile_slot",
+        ("space",),
+    ).fetchall()
+    assert rows == [
+        ("background", "background-default"),
+        ("operational", "operational-default"),
+    ]
+    connection.execute(
+        "DELETE FROM memory_space_model_profiles "
+        "WHERE memory_space_id = ? AND profile_slot = ?",
+        ("space", "background"),
+    )
+    connection.commit()
     connection.close()
 
     assert (
-        main(["--home", str(home), "profiles", "remove", "--id", "merge-default"]) == 0
+        main(
+            ["--home", str(home), "profiles", "remove", "--id", "background-default"]
+        )
+        == 0
     )
 
 

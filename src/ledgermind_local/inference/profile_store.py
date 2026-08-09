@@ -6,7 +6,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from .profiles import InferenceProfile, MemorySpaceInferenceProfiles
+from .profiles import InferenceProfile
 
 
 def _now() -> str:
@@ -34,10 +34,6 @@ class InferenceProfileStore:
                 "max_retries": row["max_retries"],
                 "max_input_tokens": row["max_input_tokens"],
                 "max_output_tokens": row["max_output_tokens"],
-                "hypothesis_prompt_version": row["hypothesis_prompt_version"],
-                "hypothesis_schema_version": row["hypothesis_schema_version"],
-                "merge_prompt_version": row["merge_prompt_version"],
-                "merge_schema_version": row["merge_schema_version"],
                 "enabled": bool(row["enabled"]),
             }
         )
@@ -71,10 +67,8 @@ class InferenceProfileStore:
             INSERT INTO inference_profiles (
                 profile_id, provider_kind, base_url, model, secret_ref,
                 timeout_seconds, max_retries, max_input_tokens, max_output_tokens,
-                hypothesis_prompt_version, hypothesis_schema_version,
-                merge_prompt_version, merge_schema_version, enabled,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                enabled, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(profile_id) DO UPDATE SET
                 provider_kind = excluded.provider_kind,
                 base_url = excluded.base_url,
@@ -84,10 +78,6 @@ class InferenceProfileStore:
                 max_retries = excluded.max_retries,
                 max_input_tokens = excluded.max_input_tokens,
                 max_output_tokens = excluded.max_output_tokens,
-                hypothesis_prompt_version = excluded.hypothesis_prompt_version,
-                hypothesis_schema_version = excluded.hypothesis_schema_version,
-                merge_prompt_version = excluded.merge_prompt_version,
-                merge_schema_version = excluded.merge_schema_version,
                 enabled = excluded.enabled,
                 updated_at = excluded.updated_at
             """,
@@ -101,10 +91,6 @@ class InferenceProfileStore:
                 values["max_retries"],
                 values["max_input_tokens"],
                 values["max_output_tokens"],
-                values["hypothesis_prompt_version"],
-                values["hypothesis_schema_version"],
-                values["merge_prompt_version"],
-                values["merge_schema_version"],
                 int(values["enabled"]),
                 now,
                 now,
@@ -121,84 +107,6 @@ class InferenceProfileStore:
             (profile_id,),
         )
         return cursor.rowcount == 1
-
-    def bind(
-        self,
-        memory_space_id: str,
-        *,
-        hypothesis_profile_id: str | None = None,
-        merge_profile_id: str | None = None,
-    ) -> MemorySpaceInferenceProfiles:
-        """Migrate the old two-name binding API into technical slots once.
-
-        New runtime resolution never reads the legacy table columns.  Keeping
-        the columns synchronized here lets an existing CLI/config migration
-        complete without making those columns a runtime fallback.
-        """
-
-        binding = MemorySpaceInferenceProfiles(
-            memory_space_id=memory_space_id,
-            hypothesis_profile_id=hypothesis_profile_id,
-            merge_profile_id=merge_profile_id,
-        )
-        # The deprecated binding API only owns the two legacy model slots.  Do
-        # not erase a separately configured embedding slot when an old caller
-        # updates operational/background bindings.
-        self._connection.execute(
-            "DELETE FROM memory_space_model_profiles "
-            "WHERE memory_space_id = ? AND profile_slot IN ('operational', 'background')",
-            (memory_space_id,),
-        )
-        if hypothesis_profile_id is not None:
-            self.bind_slot(
-                memory_space_id,
-                slot="operational",
-                profile_id=hypothesis_profile_id,
-            )
-        if merge_profile_id is not None:
-            self.bind_slot(
-                memory_space_id,
-                slot="background",
-                profile_id=merge_profile_id,
-            )
-        self._connection.execute(
-            """
-            INSERT INTO memory_space_inference_profiles (
-                memory_space_id, hypothesis_profile_id, merge_profile_id, updated_at
-            ) VALUES (?, ?, ?, ?)
-            ON CONFLICT(memory_space_id) DO UPDATE SET
-                hypothesis_profile_id = excluded.hypothesis_profile_id,
-                merge_profile_id = excluded.merge_profile_id,
-                updated_at = excluded.updated_at
-            """,
-            (
-                binding.memory_space_id,
-                binding.hypothesis_profile_id,
-                binding.merge_profile_id,
-                _now(),
-            ),
-        )
-        result = self.get_binding(memory_space_id)
-        if result is None:
-            raise RuntimeError("inference profile binding upsert did not produce a row")
-        return result
-
-    def get_binding(self, memory_space_id: str) -> MemorySpaceInferenceProfiles | None:
-        row = self._connection.execute(
-            """
-            SELECT memory_space_id, hypothesis_profile_id, merge_profile_id
-            FROM memory_space_inference_profiles
-            WHERE memory_space_id = ?
-            """,
-            (memory_space_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return MemorySpaceInferenceProfiles(
-            memory_space_id=row["memory_space_id"],
-            hypothesis_profile_id=row["hypothesis_profile_id"],
-            merge_profile_id=row["merge_profile_id"],
-        )
 
     def bind_slot(
         self, memory_space_id: str, *, slot: str, profile_id: str
