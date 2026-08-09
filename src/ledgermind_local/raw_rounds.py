@@ -167,7 +167,7 @@ class RawRoundIngestHandler:
         ).hexdigest()
         command = uow.raw_rounds.create_core_command(
             command_id=str(uuid.uuid4()),
-            command_type="ingest_raw_round_v2",
+            command_type="ingest_raw_round",
             memory_space_id=memory_space_id,
             idempotency_key=idempotency_key,
             payload_json=command_payload,

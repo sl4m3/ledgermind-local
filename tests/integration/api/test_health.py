@@ -33,16 +33,16 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_health_v1_live_accessible_without_token() -> None:
+def test_health_live_accessible_without_token() -> None:
     client = _build_client(database_path=":memory:")
-    response = client.get("/v1/health/live")
+    response = client.get("/health/live")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
 def test_health_ready_is_protected() -> None:
     client = _build_client(database_path=":memory:")
-    response = client.get("/v1/health/ready")
+    response = client.get("/health/ready")
     assert response.status_code == 401
 
 
@@ -53,7 +53,7 @@ def test_health_ready_fails_without_service_lock(tmp_path: Path) -> None:
         api_token=token,
         service_lock_path=tmp_path / "service.lock",
     )
-    response = client.get("/v1/health/ready", headers=_auth(token))
+    response = client.get("/health/ready", headers=_auth(token))
     assert response.status_code == 503
     payload = response.json()
     assert payload["ready"] is False
@@ -72,7 +72,7 @@ def test_health_ready_succeeds_when_service_lock_is_held_by_current_process(
         service_lock_path=lock_path,
     )
     with ServiceLock(lock_path=lock_path):
-        response = client.get("/v1/health/ready", headers=_auth(token))
+        response = client.get("/health/ready", headers=_auth(token))
 
     assert response.status_code == 200
     payload = response.json()
@@ -84,7 +84,7 @@ def test_health_ready_succeeds_when_service_lock_is_held_by_current_process(
 
 
 def test_health_details_requires_token() -> None:
-    response = _build_client(database_path=":memory:").get("/v1/health/details")
+    response = _build_client(database_path=":memory:").get("/health/details")
     assert response.status_code == 401
 
 
@@ -95,7 +95,7 @@ def test_health_details_fails_without_service_lock(tmp_path: Path) -> None:
         api_token=token,
         service_lock_path=tmp_path / "service.lock",
     )
-    response = client.get("/v1/health/details", headers=_auth(token))
+    response = client.get("/health/details", headers=_auth(token))
 
     assert response.status_code == 503
     payload = response.json()
@@ -114,7 +114,7 @@ def test_health_details_succeeds_when_service_lock_is_held_by_current_process(
         service_lock_path=lock_path,
     )
     with ServiceLock(lock_path=lock_path):
-        response = client.get("/v1/health/details", headers=_auth(token))
+        response = client.get("/health/details", headers=_auth(token))
 
     assert response.status_code == 200
     payload = response.json()

@@ -19,7 +19,7 @@ from ledgermind_local.persistence import rounds_migrations as migrations
 
 
 class _Gateway:
-    def __init__(self, *, schema_version: int = 11) -> None:
+    def __init__(self, *, schema_version: int = 12) -> None:
         self.schema_version = schema_version
 
     def require_capabilities(self, *capabilities: str) -> None:
@@ -153,7 +153,7 @@ def test_full_readiness_reports_each_missing_profile_slot(
         runtime.stop()
 
 
-def test_full_readiness_requires_schema_eleven(tmp_path: Path) -> None:
+def test_full_readiness_requires_schema_twelve(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path, gateway=_Gateway(schema_version=10))
     _seed_profiles(runtime.database_path)
 

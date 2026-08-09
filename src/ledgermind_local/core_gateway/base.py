@@ -14,9 +14,9 @@ from .contracts import (
     ObjectFacetStatistics,
     PollExecutionTasksCommand,
     PollExecutionTasksResult,
-    RecordRetrievalOutcomeV2Command,
-    RetrieveContextV2Command,
-    RetrieveContextV2Result,
+    RecordRetrievalOutcomeCommand,
+    RetrieveContextCommand,
+    RetrieveContextResult,
     RunControlMaintenanceCommand,
     SubmitExecutionResult,
     SubmitExecutionResultCommand,
@@ -43,12 +43,12 @@ class CoreGateway(Protocol):
         self, command: IngestRawRoundCommand
     ) -> IngestRawRoundResult: ...
 
-    def retrieve_context_v2(
-        self, request: RetrieveContextV2Command
-    ) -> RetrieveContextV2Result: ...
+    def retrieve_context(
+        self, request: RetrieveContextCommand
+    ) -> RetrieveContextResult: ...
 
-    def record_retrieval_outcome_v2(
-        self, command: RecordRetrievalOutcomeV2Command
+    def record_retrieval_outcome(
+        self, command: RecordRetrievalOutcomeCommand
     ) -> None: ...
 
     def run_control_maintenance(

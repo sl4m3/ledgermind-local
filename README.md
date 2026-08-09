@@ -1,7 +1,7 @@
 # ledgermind-local
 
-`ledgermind-local` — локальная служба LedgerMind 4.0. Она принимает
-структурные `RawRound v2`, хранит транспортное состояние и общается с закрытым
+`ledgermind-local` — локальная служба LedgerMind. Она принимает
+структурные `RawRound`, хранит транспортное состояние и общается с закрытым
 Rust Core через IPC. Доменное object-facet состояние и его обработка принадлежат
 Core; Local выполняет только технические generic execution tasks.
 
@@ -30,7 +30,7 @@ Local вызывает только те внешние API, endpoint и мод�
 ### Capture-ready
 
 Capture-ready означает, что интеграция может наблюдать завершённый раунд,
-создать валидный RawRound v2 и сохранить/доставить его без включённого
+создать валидный RawRound и сохранить/доставить его без включённого
 модельного провайдера. В этом режиме важны `rounds.db`, durable spool и
 повторяемая доставка; отсутствие Core или provider не должно уничтожать
 захваченные данные.
@@ -107,5 +107,6 @@ signature/public-key для binary, собранного этим же Docker bu
 
 ## Compatibility
 
-Версии v3 и v4 несовместимы. Автоматического импорта или миграции v3 нет;
-новая служба принимает RawRound v2 через Integrations.
+Legacy contract payloads are migrated once before Local workers start. Legacy
+runtime routes, operation names and aliases are not supported; new capture
+arrives through Integrations.

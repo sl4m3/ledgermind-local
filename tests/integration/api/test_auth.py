@@ -40,14 +40,14 @@ def test_health_live_returns_details_with_token() -> None:
 
 def test_auth_rejects_missing_token_for_protected_route() -> None:
     client = _build_client()
-    response = client.get("/v1/ping")
+    response = client.get("/ping")
     assert response.status_code == 401
 
 
 def test_auth_rejects_wrong_token_for_protected_route() -> None:
     client = _build_client(database_token="expected")
     response = client.get(
-        "/v1/ping",
+        "/ping",
         headers={"Authorization": "Bearer wrong"},
     )
     assert response.status_code == 401
@@ -57,7 +57,7 @@ def test_auth_allows_correct_token_for_protected_route() -> None:
     token = "correct-token"
     client = _build_client(database_token=token)
     response = client.get(
-        "/v1/ping",
+        "/ping",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200
@@ -67,8 +67,20 @@ def test_auth_allows_correct_token_for_protected_route() -> None:
 def test_query_token_does_not_open_protected_endpoint() -> None:
     token = "queryless"
     client = _build_client(database_token=token)
-    response = client.get(f"/v1/ping?api_token={token}")
+    response = client.get(f"/ping?api_token={token}")
     assert response.status_code == 401
+
+
+def test_versioned_routes_are_not_compatibility_aliases() -> None:
+    client = _build_client()
+    prefix = "/" + "v" + "1"
+    for route in (
+        prefix + "/ping",
+        prefix + "/rounds",
+        prefix + "/context/retrieve",
+        prefix + "/health/ready",
+    ):
+        assert client.get(route, headers={"Authorization": "Bearer test-token"}).status_code == 404
 
 
 def test_create_app_does_not_create_database_file(tmp_path) -> None:

@@ -30,7 +30,7 @@ class _Gateway:
             relative_path="exchange/outgoing/core-snapshot.bin",
             sha256=sha256_file(source),
             size_bytes=source.stat().st_size,
-            schema_version=11,
+            schema_version=12,
         )
 
     def validate_backup(self, command):
@@ -40,7 +40,7 @@ class _Gateway:
             relative_path=command.relative_path,
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=11,
+            schema_version=12,
         )
 
     def prepare_restore(self, command):
@@ -50,7 +50,7 @@ class _Gateway:
             relative_path=command.relative_path,
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=11,
+            schema_version=12,
             restore_token="restore-token",
             requires_restart=True,
         )
@@ -119,7 +119,8 @@ def test_core_backup_rejects_archive_path_traversal(tmp_path: Path) -> None:
     _rounds_database(rounds_database)
     archive_path = tmp_path / "unsafe.zip"
     payload = {
-        "format": "ledgermind-local-core-backup-v1",
+        "format": "ledgermind-local-core-backup",
+        "schema_version": 1,
         "core": {
             "relative_path": "exchange/outgoing/../escape.bin",
             "sha256": "sha256:" + "a" * 64,

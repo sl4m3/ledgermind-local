@@ -88,7 +88,7 @@ def create_app(
         AuthenticationError, cast(Any, authentication_error_handler)
     )
 
-    @app.get("/v1/ping")
+    @app.get("/ping")
     def ping(_token: str = Depends(require_token)) -> dict[str, str]:
         return {"pong": "true"}
 

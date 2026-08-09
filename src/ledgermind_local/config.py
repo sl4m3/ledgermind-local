@@ -24,7 +24,7 @@ class EmbeddingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    model_path: str = "~/.ledgermind/local/models/v5-small-text-matching-Q4_K_M.gguf"
+    model_path: str = "~/.ledgermind/local/models/small-text-matching-Q4_K_M.gguf"
     gpu_layers: int = Field(default=0, ge=0)
 
 

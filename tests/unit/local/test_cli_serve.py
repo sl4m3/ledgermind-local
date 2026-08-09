@@ -36,18 +36,18 @@ from ledgermind_local.service_lock import ServiceLockError
 
 def _patch_noop_core_runtime(monkeypatch) -> None:
     class DummyGateway:
-        advertised_schema_version = 11
+        advertised_schema_version = 12
         advertised_operations = frozenset(
             {
                 "health",
-                "ingest_raw_round_v2",
-                "poll_execution_tasks_v2",
-                "submit_execution_result_v2",
-                "fail_execution_task_v2",
-                "retrieve_context_v2",
-                "record_retrieval_outcome_v2",
-                "run_control_maintenance_v1",
-                "get_object_facet_statistics_v1",
+                "ingest_raw_round",
+                "poll_execution_tasks",
+                "submit_execution_result",
+                "fail_execution_task",
+                "retrieve_context",
+                "record_retrieval_outcome",
+                "run_control_maintenance",
+                "get_object_facet_statistics",
                 "create_backup",
                 "validate_backup",
                 "prepare_restore",
@@ -60,17 +60,17 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
             {
                 "core_owned_backup",
                 "coordinated_restore",
-                "object_facet_memory_v1",
-                "operational_pipeline_v1",
-                "strict_candidate_binding_v2",
-                "generic_execution_tasks_v1",
-                "raw_round_ingest_v2",
-                "context_retrieval_v2",
-                "context_provenance_v1",
-                "stable_sha256_digests_v1",
-                "object_resolution_v1",
-                "explainable_context_v1",
-                "control_contour_v1",
+                "object_facet_memory",
+                "operational_pipeline",
+                "strict_candidate_binding",
+                "generic_execution_tasks",
+                "raw_round_ingest",
+                "context_retrieval",
+                "context_provenance",
+                "stable_sha256_digests",
+                "object_resolution",
+                "explainable_context",
+                "control_contour",
             }
         )
 
@@ -85,7 +85,7 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
                 healthy=True,
                 backend="fake",
                 protocol_version=1,
-                schema_version=11,
+                schema_version=12,
             )
 
         def run_control_maintenance(self, command: object) -> ControlMaintenanceResult:
@@ -133,6 +133,7 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
     monkeypatch.setattr(bootstrap_module, "CoreCommandWorker", DummyWorker)
     monkeypatch.setattr(bootstrap_module, "CoreExecutionTaskWorker", DummyWorker)
     monkeypatch.setattr(bootstrap_module, "RawRoundRetentionWorker", DummyWorker)
+    monkeypatch.setattr(bootstrap_module, "migrate_contract_payloads", lambda **kwargs: None)
 
 
 def test_coalesce_optional_returns_fallback() -> None:

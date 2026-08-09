@@ -78,7 +78,7 @@ while True:
             'healthy': True,
             'backend': 'rust',
             'protocol_version': 1,
-            'schema_version': 2,
+            'schema_version': 12,
             'environment_keys': {json.dumps(list(environment_keys))},
         }})
     elif operation == 'shutdown':
@@ -214,7 +214,7 @@ def test_core_doctor_cli_verifies_binary_and_reports_runtime_without_secrets(
     assert report["version"] == "test-core-1"
     assert report["server_name"] == "signed-fake-core"
     assert report["health"]["protocol_version"] == 1
-    assert report["health"]["schema_version"] == 2
+    assert report["health"]["schema_version"] == 12
     assert report["sandbox"]["level"] in {"full", "partial"}
     assert report["sandbox"]["capabilities"]["binary_signature_verified"] is True
     assert "missing_requirements" in report["sandbox"]

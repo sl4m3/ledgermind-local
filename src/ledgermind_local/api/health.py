@@ -37,21 +37,17 @@ def create_health_router(
 
     router = APIRouter()
 
-    @router.get("/v1/health/live")
     @router.get("/health/live")
     def health_live(details: bool = Depends(maybe_token)) -> dict[str, str | bool]:
         payload: dict[str, str | bool] = {"status": "ok"}
         if details:
             payload["healthy"] = True
-            # Preserve the legacy authenticated live-detail contract.  Readiness
-            # and diagnostic payloads below intentionally remain path-free.
             payload["database_path"] = str(database_path)
             payload["capture_ready"] = bool(
                 getattr(runtime, "capture_ready", True) if runtime is not None else True
             )
         return payload
 
-    @router.get("/v1/health/capture-ready", response_model=None)
     @router.get("/health/capture-ready", response_model=None)
     def health_capture_ready(_token: str = Depends(require_token)) -> object:
         del _token
@@ -63,9 +59,7 @@ def create_health_router(
         )
         return _response_for_report(report, ready_key="capture_ready")
 
-    @router.get("/v1/health/full-ready", response_model=None)
     @router.get("/health/full-ready", response_model=None)
-    @router.get("/v1/health/ready", response_model=None)
     @router.get("/health/ready", response_model=None)
     def health_full_ready(_token: str = Depends(require_token)) -> object:
         del _token
@@ -77,7 +71,6 @@ def create_health_router(
         )
         return _response_for_report(report, ready_key="full_ready")
 
-    @router.get("/v1/health/details")
     @router.get("/health/details")
     def health_details(_token: str = Depends(require_token)) -> object:
         del _token
@@ -88,7 +81,7 @@ def create_health_router(
             runtime=runtime,
         )
         # Details remain queryable while capture is alive so operators can see why
-        # full readiness is degraded. Legacy non-runtime behavior is unchanged.
+        # full readiness is degraded.
         if runtime is not None and bool(report.get("capture_ready", False)):
             return report
         return _response_for_report(report, ready_key="full_ready")

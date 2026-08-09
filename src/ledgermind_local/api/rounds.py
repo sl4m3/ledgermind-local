@@ -24,7 +24,7 @@ def create_rounds_router(
 ) -> APIRouter:
     router = APIRouter()
 
-    @router.post("/v1/rounds", status_code=status.HTTP_202_ACCEPTED)
+    @router.post("/rounds", status_code=status.HTTP_202_ACCEPTED)
     def ingest_round(
         payload: RawRoundRequest,
         request: Request,
@@ -67,7 +67,7 @@ def create_rounds_router(
         response.headers["X-Request-ID"] = build_request_id(request.headers)
         response.headers["Cache-Control"] = "no-store"
         return {
-            "api_version": "2",
+            "schema_version": 2,
             "raw_round_id": result.raw_round_id,
             "core_command_id": result.core_command_id,
             "duplicate": result.duplicate,

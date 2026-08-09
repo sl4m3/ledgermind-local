@@ -5,24 +5,24 @@ from fastapi.testclient import TestClient
 
 from ledgermind_local.api.context import create_context_router
 from ledgermind_local.core_gateway.contracts import (
-    RecordRetrievalOutcomeV2Command,
-    RetrieveContextV2Command,
-    RetrieveContextV2Result,
+    RecordRetrievalOutcomeCommand,
+    RetrieveContextCommand,
+    RetrieveContextResult,
 )
 
 
 class _Gateway:
     def __init__(self) -> None:
-        self.request: RetrieveContextV2Command | None = None
-        self.outcomes: list[RecordRetrievalOutcomeV2Command] = []
+        self.request: RetrieveContextCommand | None = None
+        self.outcomes: list[RecordRetrievalOutcomeCommand] = []
 
-    def retrieve_context_v2(
-        self, request: RetrieveContextV2Command
-    ) -> RetrieveContextV2Result:
+    def retrieve_context(
+        self, request: RetrieveContextCommand
+    ) -> RetrieveContextResult:
         self.request = request
-        return RetrieveContextV2Result(
+        return RetrieveContextResult(
             {
-                "retrieval_request_id": "retrieval-v2-1",
+                "retrieval_request_id": "retrieval-1",
                 "items": [
                     {
                         "value_id": "value-1",
@@ -51,8 +51,8 @@ class _Gateway:
             }
         )
 
-    def record_retrieval_outcome_v2(
-        self, command: RecordRetrievalOutcomeV2Command
+    def record_retrieval_outcome(
+        self, command: RecordRetrievalOutcomeCommand
     ) -> None:
         self.outcomes.append(command)
 
@@ -61,12 +61,12 @@ class _Embedder:
     def embed_query_with_metadata(
         self, memory_space_id: str, query: str
     ) -> tuple[tuple[float, ...], str, str]:
-        assert memory_space_id == "space-v2"
+        assert memory_space_id == "space"
         assert query == "deployment"
-        return (0.1, 0.2), "embedder-v2", "2026-08"
+        return (0.1, 0.2), "embedder", "2026-08"
 
 
-def test_context_v2_embeds_query_returns_provenance_and_records_outcome() -> None:
+def test_context_embeds_query_returns_provenance_and_records_outcome() -> None:
     gateway = _Gateway()
     app = FastAPI()
     app.include_router(
@@ -79,10 +79,10 @@ def test_context_v2_embeds_query_returns_provenance_and_records_outcome() -> Non
     )
 
     response = TestClient(app).post(
-        "/v1/context/retrieve",
-        headers={"X-Request-ID": "request-v2-1"},
+        "/context/retrieve",
+        headers={"X-Request-ID": "request-1"},
         json={
-            "memory_space_id": "space-v2",
+            "memory_space_id": "space",
             "query": "deployment",
             "project_id": "project-1",
             "repository_id": "repository-1",
@@ -93,8 +93,8 @@ def test_context_v2_embeds_query_returns_provenance_and_records_outcome() -> Non
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["api_version"] == "2"
-    assert payload["retrieval_request_id"] == "retrieval-v2-1"
+    assert payload["schema_version"] == 2
+    assert payload["retrieval_request_id"] == "retrieval-1"
     assert payload["delivered_value_ids"] == ["value-1"]
     assert payload["items"][0]["object_name"] == "Deployment"
     assert payload["items"][0]["facet"] == "property"
@@ -103,7 +103,7 @@ def test_context_v2_embeds_query_returns_provenance_and_records_outcome() -> Non
     ]
     assert gateway.request is not None
     assert gateway.request.query_embedding == (0.1, 0.2)
-    assert gateway.request.embedding_model_id == "embedder-v2"
+    assert gateway.request.embedding_model_id == "embedder"
     assert gateway.request.repository_id == "repository-1"
     assert gateway.outcomes[0].candidate_value_ids == ("value-1",)
     assert gateway.outcomes[0].delivered_value_ids == ("value-1",)

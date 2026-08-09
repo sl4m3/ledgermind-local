@@ -87,7 +87,7 @@ def _minimal_config(**workers: object) -> LocalConfig:
     return LocalConfig(config_version=1, workers=defaults)
 
 
-def test_legacy_security_switch_migrates_to_secure_v2_without_serializing_legacy_key() -> None:
+def test_legacy_security_switch_migrates_to_secure_config_without_serializing_legacy_key() -> None:
     config = LocalConfig.from_dict(
         {
             "config_version": 1,
@@ -226,6 +226,34 @@ def test_runtime_builds_generic_execution_worker_for_core_model_tasks(
     try:
         assert len(created) == 1
         assert created[0]["worker_id"] == "local-execution-tasks"
+    finally:
+        runtime.stop()
+
+
+def test_contract_migration_runs_before_any_worker(tmp_path: Path, monkeypatch) -> None:
+    events: list[str] = []
+
+    def fake_contract_migration(**kwargs: object) -> None:
+        del kwargs
+        events.append("contract-migration")
+
+    class _Worker:
+        def process_once(self) -> None:
+            events.append("worker")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(bootstrap, "migrate_contract_payloads", fake_contract_migration)
+    runtime = _runtime(
+        tmp_path,
+        config=_minimal_config(retention={"enabled": True, "interval_seconds": 0}),
+        worker_factories={"retention": lambda _runtime: _Worker()},
+    )
+
+    runtime.start()
+    try:
+        assert events.index("contract-migration") < events.index("worker")
     finally:
         runtime.stop()
 

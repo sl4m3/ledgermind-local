@@ -38,6 +38,7 @@ REQUIRED_IMPORTS = (
     "ledgermind_local.core_gateway.isolation",
     "ledgermind_local.core_gateway.maintenance",
     "ledgermind_local.core_gateway.process",
+    "ledgermind_local.persistence.contract_migration",
     "ledgermind_local.inference.vectorizer",
     "ledgermind_local.scheduler.core_execution_task_worker",
     "ledgermind_local.scheduler.guarded_loop",
@@ -56,6 +57,8 @@ REQUIRED_WHEEL_FILES = {
     "ledgermind_local/persistence/rounds_migrations/0001_initial.sql",
     "ledgermind_local/persistence/rounds_migrations/0005_worker_leases.sql",
     "ledgermind_local/persistence/rounds_migrations/0006_object_facet_core_delivery.sql",
+    "ledgermind_local/persistence/rounds_migrations/0007_contract_naming.sql",
+    "ledgermind_local/persistence/contract_migration.py",
     "ledgermind_local/persistence/rounds_migrations/0002_projection_state_compat.sql",
     "ledgermind_local/persistence/rounds_migrations/0003_core_projection_inbox.sql",
     "ledgermind_local/persistence/rounds_migrations/0004_core_projection_fts.sql",
@@ -502,7 +505,8 @@ def build(args: argparse.Namespace) -> Path:
 
     records, digests = _artifact_records(output, copied_names)
     manifest = {
-        "format": "ledgermind-release-manifest-v1",
+        "format": "ledgermind-release-manifest",
+        "schema_version": 1,
         "component": COMPONENT,
         "source_commit": commit,
         "commit_sha": commit,
@@ -557,6 +561,10 @@ def verify(args: argparse.Namespace) -> Path:
     version = _version(ROOT)
     path = _manifest_path(args, version, commit)
     manifest = _load_manifest(path)
+    if manifest.get("format") != "ledgermind-release-manifest":
+        raise ReleaseError("unsupported release manifest format")
+    if manifest.get("schema_version") != 1:
+        raise ReleaseError("unsupported release manifest schema version")
     if manifest.get("component") != COMPONENT:
         raise ReleaseError("manifest component does not match Local")
     if manifest.get("source_commit") != commit or manifest.get("commit_sha") != commit:

@@ -238,7 +238,8 @@ class CoreBackupService:
     ) -> None:
         core_member = f"core_snapshot/{core_source.name}"
         manifest_payload = {
-            "format": "ledgermind-local-core-backup-v1",
+            "format": "ledgermind-local-core-backup",
+            "schema_version": 1,
             "created_at": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z"),
@@ -285,8 +286,10 @@ class CoreBackupService:
                 )
                 if not isinstance(manifest_payload, dict):
                     raise CoreBackupError("backup manifest is malformed")
-                if manifest_payload.get("format") != "ledgermind-local-core-backup-v1":
+                if manifest_payload.get("format") != "ledgermind-local-core-backup":
                     raise CoreBackupError("unsupported backup format")
+                if manifest_payload.get("schema_version") != 1:
+                    raise CoreBackupError("unsupported backup schema version")
                 core_payload = manifest_payload.get("core")
                 if not isinstance(core_payload, Mapping):
                     raise CoreBackupError("Core backup manifest is malformed")

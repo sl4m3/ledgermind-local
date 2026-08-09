@@ -10,9 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ledgermind_local.core_gateway import (
     DomainRejectedError,
-    RecordRetrievalOutcomeV2Command,
-    RetrieveContextV2Command,
-    RetrieveContextV2Result,
+    RecordRetrievalOutcomeCommand,
+    RetrieveContextCommand,
+    RetrieveContextResult,
     TransientCoreError,
 )
 
@@ -20,14 +20,14 @@ from .http import build_request_id, error_payload, validate_json_request_headers
 
 
 class ContextGateway(Protocol):
-    """Core v2 context boundary used by the public retrieval route."""
+    """Core context boundary used by the public retrieval route."""
 
-    def retrieve_context_v2(
-        self, request: RetrieveContextV2Command
-    ) -> RetrieveContextV2Result: ...
+    def retrieve_context(
+        self, request: RetrieveContextCommand
+    ) -> RetrieveContextResult: ...
 
-    def record_retrieval_outcome_v2(
-        self, command: RecordRetrievalOutcomeV2Command
+    def record_retrieval_outcome(
+        self, command: RecordRetrievalOutcomeCommand
     ) -> None: ...
 
 
@@ -38,7 +38,7 @@ class QueryEmbedder(Protocol):
 class ContextRetrieveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    api_version: Literal["1"] = "1"
+    schema_version: Literal[2] = 2
     memory_space_id: str = Field(min_length=1, max_length=200)
     query: str = Field(min_length=1, max_length=20_000)
     limit: int = Field(default=5, ge=1, le=50)
@@ -69,7 +69,7 @@ class ContextItemResponse(BaseModel):
 class ContextViewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    api_version: Literal["2"] = "2"
+    schema_version: Literal[2] = 2
     items: list[ContextItemResponse]
     retrieval_request_id: str
     delivered_value_ids: list[str] = Field(default_factory=list)
@@ -84,7 +84,7 @@ def create_context_router(
 ) -> APIRouter:
     router = APIRouter()
 
-    @router.post("/v1/context/retrieve", response_model=ContextViewResponse)
+    @router.post("/context/retrieve", response_model=ContextViewResponse)
     def retrieve_context(
         payload: ContextRetrieveRequest,
         request: Request,
@@ -121,11 +121,11 @@ def create_context_router(
                 if payload.query_embedding is None:
                     raise TransientCoreError("embedding profile is unavailable")
                 query_embedding = payload.query_embedding
-            retrieve_v2 = getattr(context_gateway, "retrieve_context_v2", None)
-            if not callable(retrieve_v2):
-                raise TransientCoreError("Core retrieval v2 is unavailable")
-            result = retrieve_v2(
-                RetrieveContextV2Command(
+            retrieve = getattr(context_gateway, "retrieve_context", None)
+            if not callable(retrieve):
+                raise TransientCoreError("Core retrieval is unavailable")
+            result = retrieve(
+                RetrieveContextCommand(
                     request_id=request_id,
                     memory_space_id=payload.memory_space_id,
                     query_text=payload.query,
@@ -142,9 +142,9 @@ def create_context_router(
                     explanation_level=payload.explanation_level,
                 )
             )
-            response_payload = _context_v2_response(result.payload)
+            response_payload = _context_response(result.payload)
             record_outcome = getattr(
-                context_gateway, "record_retrieval_outcome_v2", None
+                context_gateway, "record_retrieval_outcome", None
             )
             retrieval_request_id = response_payload["retrieval_request_id"]
             response_items = response_payload["items"]
@@ -154,7 +154,7 @@ def create_context_router(
                 # response represents all returned candidates as delivered;
                 # the two lists remain separate in the durable outcome event.
                 record_outcome(
-                    RecordRetrievalOutcomeV2Command(
+                    RecordRetrievalOutcomeCommand(
                         request_id=request_id,
                         retrieval_request_id=retrieval_request_id,
                         candidate_value_ids=candidate_ids,
@@ -204,16 +204,16 @@ __all__ = [
 ]
 
 
-def _context_v2_response(payload: dict[str, object]) -> dict[str, Any]:
+def _context_response(payload: dict[str, object]) -> dict[str, Any]:
     try:
-        from ledgermind_protocol.object_facet_v2 import RetrievalResponse
+        from ledgermind_protocol.object_facet import RetrievalResponse
 
         response = RetrievalResponse.model_validate(payload)
     except (ImportError, TypeError, ValueError) as exc:
-        raise ValueError("Core retrieval response is not strict object-facet v2") from exc
+        raise ValueError("Core retrieval response is not a strict object-facet response") from exc
     items = [item.model_dump(mode="json") for item in response.items]
     return {
-        "api_version": "2",
+        "schema_version": 2,
         "retrieval_request_id": response.retrieval_request_id,
         "items": items,
     }
