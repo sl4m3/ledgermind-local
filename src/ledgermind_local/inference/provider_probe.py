@@ -1,0 +1,445 @@
+"""Operational and background structured-output capability probes."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+from typing import Literal, Protocol
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from .profile_slots import ProfileResolver, ProfileSlot
+from .profiles import (
+    InferenceProfile,
+    ProviderCapabilities,
+    StructuredOutputMode,
+)
+from .providers.base import ChatMessage, InferenceProvider, ModelRequest
+from .providers.openai_compatible import decode_json_content
+from .secrets import SecretNotFoundError, SecretStore
+
+ProbeProviderFactory = Callable[[InferenceProfile, str], InferenceProvider]
+PROBE_MODE_ORDER: tuple[StructuredOutputMode, ...] = (
+    "json_schema",
+    "tool_call",
+    "json_object",
+    "prompt_only",
+)
+PROBE_TOOL_NAME = "submit_structured_result"
+_SAFE_PROBE_ERROR_CODES = frozenset(
+    {
+        "authentication_error",
+        "configuration_error",
+        "invalid_provider_response",
+        "provider_error",
+        "provider_transport_error",
+        "secret_missing",
+        "timeout",
+        "transient_provider_error",
+    }
+)
+
+
+class ProbeCapabilityStore(Protocol):
+    def upsert_capabilities(
+        self, capabilities: ProviderCapabilities
+    ) -> ProviderCapabilities: ...
+
+
+class ProviderProbeResult(BaseModel):
+    """Secret-free report returned by a real provider probe."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile_id: str = Field(min_length=1)
+    slot: str = Field(min_length=1)
+    probe_kind: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+    selected_mode: StructuredOutputMode = "auto"
+    attempted_modes: tuple[StructuredOutputMode, ...] = ()
+    capabilities: ProviderCapabilities
+    contract_digest: str = Field(min_length=1)
+    error_code: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+    @property
+    def mode(self) -> StructuredOutputMode:
+        return self.selected_mode
+
+
+class ProviderProbe:
+    """Run a real small operational or background contract through an endpoint."""
+
+    def __init__(
+        self,
+        *,
+        profile_resolver: ProfileResolver,
+        secret_store: SecretStore,
+        capability_store: ProbeCapabilityStore | None = None,
+        provider_factory: ProbeProviderFactory | None = None,
+    ) -> None:
+        self._profile_resolver = profile_resolver
+        self._secret_store = secret_store
+        self._capability_store = capability_store
+        if provider_factory is None:
+            from .structured_json_provider import default_provider_factory
+
+            self._provider_factory: ProbeProviderFactory = default_provider_factory
+        else:
+            self._provider_factory = provider_factory
+
+    def probe(
+        self,
+        memory_space_id: str,
+        slot: ProfileSlot | str,
+        *,
+        mode_override: StructuredOutputMode | None = None,
+        mode: StructuredOutputMode | None = None,
+    ) -> ProviderProbeResult:
+        if mode_override is not None and mode is not None and mode_override != mode:
+            raise ValueError("conflicting probe mode overrides")
+        override = mode_override or mode
+        profile_slot = slot if isinstance(slot, ProfileSlot) else ProfileSlot(slot)
+        if profile_slot is ProfileSlot.EMBEDDING:
+            raise ValueError("structured provider probe requires a generation slot")
+        profile = self._profile_resolver.resolve_profile(memory_space_id, profile_slot)
+        probe_kind = profile_slot.value
+        contract = _probe_contract(probe_kind)
+        contract_digest = str(contract["schema_digest"])
+        modes = _probe_modes(profile, override)
+
+        try:
+            secret = self._secret_store.get(profile.secret_ref)
+        except SecretNotFoundError:
+            return self._failed_result(
+                profile,
+                profile_slot,
+                contract_digest,
+                modes,
+                "secret_missing",
+            )
+
+        successful: set[StructuredOutputMode] = set()
+        attempted: list[StructuredOutputMode] = []
+        last_error_code: str | None = None
+        selected: StructuredOutputMode = "auto"
+        try:
+            provider = self._provider_factory(profile, secret)
+        except Exception as exc:  # noqa: BLE001 - persist a safe probe failure
+            return self._failed_result(
+                profile,
+                profile_slot,
+                contract_digest,
+                modes,
+                _safe_probe_error_code(exc),
+            )
+        try:
+            for candidate in modes:
+                attempted.append(candidate)
+                request = _probe_request(profile, contract, candidate)
+                try:
+                    response = provider.complete_json(request)
+                    decoded = decode_json_content(response.content)
+                    if not isinstance(decoded, dict):
+                        raise TypeError("probe response is not an object")
+                except Exception as exc:  # noqa: BLE001 - one mode must not abort auto
+                    last_error_code = _safe_probe_error_code(exc)
+                    continue
+                successful.add(candidate)
+                selected = candidate
+                break
+        finally:
+            close = getattr(provider, "close", None)
+            if callable(close):
+                close()
+
+        status: Literal["passed", "failed"] = (
+            "passed" if selected != "auto" else "failed"
+        )
+        capabilities = ProviderCapabilities(
+            profile_id=profile.profile_id,
+            structured_output_mode=selected,
+            json_schema_supported="json_schema" in successful,
+            tool_call_supported="tool_call" in successful,
+            json_object_supported="json_object" in successful,
+            prompt_only_supported="prompt_only" in successful,
+            probe_contract_digest=contract_digest,
+            probe_status=status,
+            last_probed_at=_now(),
+            last_error_code=None if status == "passed" else last_error_code,
+        )
+        self._persist(capabilities)
+        return ProviderProbeResult(
+            profile_id=profile.profile_id,
+            slot=profile_slot.value,
+            probe_kind=probe_kind,
+            status=status,
+            selected_mode=selected,
+            attempted_modes=tuple(attempted),
+            capabilities=capabilities,
+            contract_digest=contract_digest,
+            error_code=capabilities.last_error_code,
+            metadata={"mode_order": list(modes)},
+        )
+
+    run = probe
+
+    def probe_operational(
+        self,
+        memory_space_id: str,
+        *,
+        mode_override: StructuredOutputMode | None = None,
+    ) -> ProviderProbeResult:
+        return self.probe(
+            memory_space_id,
+            ProfileSlot.OPERATIONAL,
+            mode_override=mode_override,
+        )
+
+    def probe_background(
+        self,
+        memory_space_id: str,
+        *,
+        mode_override: StructuredOutputMode | None = None,
+    ) -> ProviderProbeResult:
+        return self.probe(
+            memory_space_id,
+            ProfileSlot.BACKGROUND,
+            mode_override=mode_override,
+        )
+
+    def _persist(self, capabilities: ProviderCapabilities) -> None:
+        if self._capability_store is not None:
+            self._capability_store.upsert_capabilities(capabilities)
+
+    def _failed_result(
+        self,
+        profile: InferenceProfile,
+        slot: ProfileSlot,
+        contract_digest: str,
+        modes: tuple[StructuredOutputMode, ...],
+        error_code: str,
+    ) -> ProviderProbeResult:
+        capabilities = ProviderCapabilities(
+            profile_id=profile.profile_id,
+            structured_output_mode="auto",
+            probe_contract_digest=contract_digest,
+            probe_status="failed",
+            last_probed_at=_now(),
+            last_error_code=error_code,
+        )
+        self._persist(capabilities)
+        return ProviderProbeResult(
+            profile_id=profile.profile_id,
+            slot=slot.value,
+            probe_kind=slot.value,
+            status="failed",
+            attempted_modes=(),
+            capabilities=capabilities,
+            contract_digest=contract_digest,
+            error_code=error_code,
+            metadata={"mode_order": list(modes)},
+        )
+
+
+def _probe_modes(
+    profile: InferenceProfile,
+    override: StructuredOutputMode | None,
+) -> tuple[StructuredOutputMode, ...]:
+    if override is not None:
+        if override == "auto":
+            return PROBE_MODE_ORDER
+        return (override,)
+    preference = profile.structured_output_preference
+    if preference == "auto":
+        return PROBE_MODE_ORDER
+    return (preference,)
+
+
+def _probe_contract(probe_kind: str) -> dict[str, object]:
+    if probe_kind == "operational":
+        object_schema: dict[str, object] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "mention_ref": {"type": "string"},
+                "resolution": {"enum": ["existing", "new", "ambiguous"]},
+                "existing_object_id": {"type": ["string", "null"]},
+                "new_canonical_name": {"type": ["string", "null"]},
+                "ambiguous_candidate_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "mention_ref",
+                "resolution",
+                "existing_object_id",
+                "new_canonical_name",
+                "ambiguous_candidate_ids",
+            ],
+        }
+        value_schema: dict[str, object] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "primary_mention_ref": {"type": "string"},
+                "related_mention_refs": {"type": "array", "items": {"type": "string"}},
+                "facet": {"type": "string"},
+                "content": {"type": "string"},
+                "source_event_ids": {"type": "array", "items": {"type": "string"}},
+                "scope_text": {"type": ["string", "null"]},
+                "valid_from": {"type": ["string", "null"]},
+                "valid_to": {"type": ["string", "null"]},
+            },
+            "required": [
+                "primary_mention_ref",
+                "related_mention_refs",
+                "facet",
+                "content",
+                "source_event_ids",
+                "scope_text",
+                "valid_from",
+                "valid_to",
+            ],
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"const": 1},
+                "objects": {"type": "array", "items": object_schema},
+                "values": {"type": "array", "items": value_schema},
+            },
+            "required": ["schema_version", "objects", "values"],
+        }
+        template: dict[str, object] = {
+            "schema_version": 1,
+            "objects": [
+                {
+                    "mention_ref": "mention-001",
+                    "resolution": "new",
+                    "existing_object_id": None,
+                    "new_canonical_name": "PostgreSQL",
+                    "ambiguous_candidate_ids": [],
+                }
+            ],
+            "values": [
+                {
+                    "primary_mention_ref": "mention-001",
+                    "related_mention_refs": [],
+                    "facet": "property",
+                    "content": "Project uses PostgreSQL",
+                    "source_event_ids": ["event-user"],
+                    "scope_text": None,
+                    "valid_from": None,
+                    "valid_to": None,
+                }
+            ],
+        }
+        contract_name = "operational_extraction"
+    elif probe_kind == "background":
+        result_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "content": {"type": "string"},
+                "scope_text": {"type": ["string", "null"]},
+                "valid_from": {"type": ["string", "null"]},
+                "valid_to": {"type": ["string", "null"]},
+            },
+            "required": ["content", "scope_text", "valid_from", "valid_to"],
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"const": 1},
+                "action": {"enum": ["merge", "replace"]},
+                "source_value_ids": {"type": "array", "items": {"type": "string"}},
+                "result": result_schema,
+            },
+            "required": ["schema_version", "action", "source_value_ids", "result"],
+        }
+        template = {
+            "schema_version": 1,
+            "action": "merge",
+            "source_value_ids": ["value-a", "value-b"],
+            "result": {
+                "content": "Core works offline",
+                "scope_text": None,
+                "valid_from": None,
+                "valid_to": None,
+            },
+        }
+        contract_name = "background_consolidation"
+    else:
+        raise ValueError(f"unsupported structured probe kind: {probe_kind}")
+    digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            schema,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "contract_name": contract_name,
+        "schema_version": 1,
+        "json_schema": schema,
+        "schema_digest": digest,
+        "compact_template": template,
+        "examples": [],
+        "max_output_tokens": 256,
+        "allow_empty_result": True,
+    }
+
+
+def _probe_request(
+    profile: InferenceProfile,
+    contract: Mapping[str, object],
+    mode: StructuredOutputMode,
+) -> ModelRequest:
+    return ModelRequest(
+        model=profile.model,
+        messages=(
+            ChatMessage(
+                role="system",
+                content="This is a technical provider capability probe. Return the requested JSON object only.",
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"Return one JSON object matching the {contract['contract_name']} contract. "
+                    f"Use this compact example exactly as the shape guide: {json.dumps(contract['compact_template'], ensure_ascii=False, sort_keys=True)}"
+                ),
+            ),
+        ),
+        max_output_tokens=min(profile.max_output_tokens, 64),
+        output_contract=dict(contract),
+        mode=mode,
+        tool_name=PROBE_TOOL_NAME,
+        token_parameter=profile.token_parameter,
+        supports_system_role=profile.supports_system_role,
+        supports_seed=profile.supports_seed,
+    )
+
+
+def _safe_probe_error_code(exc: BaseException) -> str:
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code in _SAFE_PROBE_ERROR_CODES:
+        return code
+    if isinstance(exc, ValueError):
+        return "invalid_provider_response"
+    return "provider_error"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+__all__ = [
+    "PROBE_MODE_ORDER",
+    "PROBE_TOOL_NAME",
+    "ProviderProbe",
+    "ProviderProbeResult",
+]

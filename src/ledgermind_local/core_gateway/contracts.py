@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
+from ..embedding_purpose import validate_embedding_purpose
+
 
 class CoreGatewayError(RuntimeError):
     """Base error for Core delivery failures."""
@@ -99,6 +101,13 @@ class IngestRawRoundCommand:
     raw_round_id: str
     raw_round: dict[str, Any]
     resolution_context: dict[str, Any] | None = None
+    embedding_profile: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.embedding_profile is not None and not isinstance(
+            self.embedding_profile, dict
+        ):
+            raise TypeError("embedding_profile must be an object")
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -110,6 +119,8 @@ class IngestRawRoundCommand:
         }
         if self.resolution_context is not None:
             payload["resolution_context"] = self.resolution_context
+        if self.embedding_profile is not None:
+            payload["embedding_profile"] = self.embedding_profile
         return payload
 
 
@@ -141,6 +152,7 @@ class CoreExecutionTask:
     model_request: dict[str, Any] | None
     embedding_request: dict[str, Any] | None
     operation_input: dict[str, Any] | None
+    structured_generation: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 2:
@@ -155,6 +167,7 @@ class CoreExecutionTask:
             (self.model_request, "model_request"),
             (self.embedding_request, "embedding_request"),
             (self.operation_input, "operation_input"),
+            (self.structured_generation, "structured_generation"),
         ):
             if value is not None and not isinstance(value, dict):
                 raise TypeError(f"{name} must be an object")
@@ -169,7 +182,17 @@ class CoreExecutionTask:
                 raise ValueError("generate_json task has an invalid request shape")
             _strict_mapping(
                 self.model_request,
-                {"messages", "max_output_tokens", "response_format"},
+                {
+                    "messages",
+                    "max_output_tokens",
+                    "response_format",
+                    "output_contract",
+                    "mode",
+                    "structured_output_mode",
+                    "tool_name",
+                    "metadata",
+                    "seed",
+                },
                 "model_request",
             )
             messages = self.model_request.get("messages")
@@ -183,11 +206,50 @@ class CoreExecutionTask:
             ):
                 raise TypeError("model_request.max_output_tokens must be an integer")
             response_format = self.model_request.get("response_format")
-            if not isinstance(response_format, str) or response_format not in {
+            if response_format is not None:
+                if isinstance(response_format, str):
+                    valid_response_format = response_format in {
+                        "json_object",
+                        "text",
+                    }
+                elif isinstance(response_format, dict):
+                    valid_response_format = response_format.get("type") in {
+                        "json_object",
+                        "json_schema",
+                    }
+                else:
+                    valid_response_format = False
+                if not valid_response_format:
+                    raise ValueError("model_request.response_format is invalid")
+            output_contract = self.model_request.get("output_contract")
+            if output_contract is not None and not isinstance(output_contract, dict):
+                raise TypeError("model_request.output_contract must be an object")
+            if response_format is None and output_contract is None:
+                raise ValueError(
+                    "model_request requires output_contract or response_format"
+                )
+            mode = self.model_request.get(
+                "mode", self.model_request.get("structured_output_mode")
+            )
+            if mode is not None and mode not in {
+                "auto",
+                "json_schema",
+                "tool_call",
                 "json_object",
-                "text",
+                "prompt_only",
             }:
-                raise ValueError("model_request.response_format is invalid")
+                raise ValueError("model_request mode is invalid")
+            tool_name = self.model_request.get("tool_name")
+            if tool_name is not None:
+                _required(tool_name, "model_request.tool_name")
+            metadata = self.model_request.get("metadata")
+            if metadata is not None and not isinstance(metadata, dict):
+                raise TypeError("model_request.metadata must be an object")
+            seed = self.model_request.get("seed")
+            if seed is not None and (
+                isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
+            ):
+                raise TypeError("model_request.seed must be a non-negative integer")
             for message in messages:
                 if not isinstance(message, dict):
                     raise TypeError("model_request.messages must contain objects")
@@ -201,7 +263,7 @@ class CoreExecutionTask:
                 raise ValueError("embed_texts task has an invalid request shape")
             _strict_mapping(
                 self.embedding_request,
-                {"texts", "purpose", "dimensions"},
+                {"texts", "purpose", "subject_refs", "dimensions"},
                 "embedding_request",
             )
             texts = self.embedding_request.get("texts")
@@ -209,7 +271,18 @@ class CoreExecutionTask:
                 raise ValueError("embedding_request.texts must be a non-empty array")
             if any(not isinstance(text, str) or not text.strip() for text in texts):
                 raise ValueError("embedding_request.texts must contain text")
-            _required(self.embedding_request.get("purpose"), "embedding purpose")
+            subject_refs = self.embedding_request.get("subject_refs")
+            if subject_refs is not None:
+                if not isinstance(subject_refs, list) or any(
+                    not isinstance(subject_ref, str) or not subject_ref.strip()
+                    for subject_ref in subject_refs
+                ):
+                    raise ValueError("embedding_request.subject_refs must contain strings")
+                if len(set(subject_refs)) != len(subject_refs):
+                    raise ValueError("embedding_request.subject_refs must be unique")
+            validate_embedding_purpose(
+                _required(self.embedding_request.get("purpose"), "embedding purpose")
+            )
             dimensions = self.embedding_request.get("dimensions")
             if dimensions is not None and (
                 isinstance(dimensions, bool)
@@ -234,6 +307,7 @@ class CoreExecutionTask:
                 "model_request",
                 "embedding_request",
                 "operation_input",
+                "structured_generation",
             },
             "object-facet execution task",
         )
@@ -250,6 +324,7 @@ class CoreExecutionTask:
             (model_request, "model_request"),
             (embedding_request, "embedding_request"),
             (operation_input, "operation_input"),
+            (payload.get("structured_generation"), "structured_generation"),
         ):
             if value is not None and not isinstance(value, dict):
                 raise TypeError(f"{name} must be an object")
@@ -275,6 +350,11 @@ class CoreExecutionTask:
             operation_input=(
                 dict(operation_input) if operation_input is not None else None
             ),
+            structured_generation=(
+                dict(payload["structured_generation"])
+                if isinstance(payload.get("structured_generation"), dict)
+                else None
+            ),
         )
 
     def to_payload(self) -> dict[str, object]:
@@ -290,6 +370,8 @@ class CoreExecutionTask:
             "embedding_request": self.embedding_request,
             "operation_input": self.operation_input,
         }
+        if self.structured_generation is not None:
+            payload["structured_generation"] = self.structured_generation
         if self.lease is not None:
             payload["lease"] = self.lease
         return payload
@@ -308,6 +390,11 @@ class CoreExecutionResult:
     embedding_result: dict[str, Any] | None
     egress_audit: dict[str, Any]
     error_code: str | None = None
+    raw_model_text: str | None = None
+    structured_output_mode: str | None = None
+    contract_digest: str | None = None
+    tool_name: str | None = None
+    metadata: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _required(self.task_id, "result.task_id")
@@ -331,9 +418,19 @@ class CoreExecutionResult:
             raise ValueError("embed_texts result has an invalid output shape")
         if self.error_code is not None:
             _required(self.error_code, "result.error_code")
+        if self.raw_model_text is not None and not isinstance(self.raw_model_text, str):
+            raise TypeError("result.raw_model_text must be a string")
+        if self.structured_output_mode is not None:
+            _required(self.structured_output_mode, "result.structured_output_mode")
+        if self.contract_digest is not None:
+            _required(self.contract_digest, "result.contract_digest")
+        if self.tool_name is not None:
+            _required(self.tool_name, "result.tool_name")
+        if self.metadata is not None and not isinstance(self.metadata, dict):
+            raise TypeError("result.metadata must be an object")
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "task_id": self.task_id,
             "task_kind": self.task_kind,
             "status": self.status,
@@ -344,6 +441,17 @@ class CoreExecutionResult:
             "egress_audit": self.egress_audit,
             "error_code": self.error_code,
         }
+        if self.raw_model_text is not None:
+            payload["raw_model_text"] = self.raw_model_text
+        if self.structured_output_mode is not None:
+            payload["structured_output_mode"] = self.structured_output_mode
+        if self.contract_digest is not None:
+            payload["contract_digest"] = self.contract_digest
+        if self.tool_name is not None:
+            payload["tool_name"] = self.tool_name
+        if self.metadata is not None:
+            payload["metadata"] = self.metadata
+        return payload
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> CoreExecutionResult:
@@ -359,6 +467,11 @@ class CoreExecutionResult:
                 "embedding_result",
                 "egress_audit",
                 "error_code",
+                "raw_model_text",
+                "structured_output_mode",
+                "contract_digest",
+                "tool_name",
+                "metadata",
             },
             "object-facet execution result",
         )
@@ -381,6 +494,12 @@ class CoreExecutionResult:
                 raise TypeError(f"{name} must be an object")
         if not isinstance(audit, dict):
             raise TypeError("result.egress_audit must be an object")
+        raw_model_text = payload.get("raw_model_text")
+        if raw_model_text is not None and not isinstance(raw_model_text, str):
+            raise TypeError("result.raw_model_text must be a string")
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise TypeError("result.metadata must be an object")
         if task_kind == "generate_json":
             if not isinstance(output, dict) or embedding_result is not None:
                 raise ValueError("generate_json result has an invalid output shape")
@@ -403,6 +522,30 @@ class CoreExecutionResult:
                 _required(payload["error_code"], "result.error_code")
                 if payload.get("error_code") is not None
                 else None
+            ),
+            raw_model_text=(
+                raw_model_text if isinstance(raw_model_text, str) else None
+            ),
+            structured_output_mode=(
+                _required(
+                    payload["structured_output_mode"],
+                    "result.structured_output_mode",
+                )
+                if payload.get("structured_output_mode") is not None
+                else None
+            ),
+            contract_digest=(
+                _required(payload["contract_digest"], "result.contract_digest")
+                if payload.get("contract_digest") is not None
+                else None
+            ),
+            tool_name=(
+                _required(payload["tool_name"], "result.tool_name")
+                if payload.get("tool_name") is not None
+                else None
+            ),
+            metadata=(
+                dict(metadata) if isinstance(metadata, dict) else None
             ),
         )
 
@@ -596,12 +739,25 @@ class CoreHealth:
 @dataclass(frozen=True, slots=True)
 class RunControlMaintenanceCommand:
     request_id: str
+    embedding_profiles: dict[str, dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         _required(self.request_id, "request_id")
+        if self.embedding_profiles is not None:
+            if not isinstance(self.embedding_profiles, dict):
+                raise TypeError("embedding_profiles must be an object")
+            if any(
+                not isinstance(memory_space_id, str)
+                or not memory_space_id.strip()
+                or not isinstance(profile, dict)
+                for memory_space_id, profile in self.embedding_profiles.items()
+            ):
+                raise TypeError("embedding_profiles must map ids to objects")
 
     def to_payload(self) -> dict[str, object]:
-        return {}
+        if self.embedding_profiles is None:
+            return {}
+        return {"embedding_profiles": self.embedding_profiles}
 
 
 @dataclass(frozen=True, slots=True)

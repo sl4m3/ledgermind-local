@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from ledgermind_local.inference.profiles import InferenceProfile
+from ledgermind_local.inference.profiles import (
+    EmbeddingProfileIdentity,
+    InferenceProfile,
+    embedding_profile_fingerprint,
+)
 from ledgermind_local.inference.secrets import SecretNotFoundError, SecretStore
 
 
@@ -49,6 +53,53 @@ def test_inference_profile_rejects_invalid_provider_and_limits() -> None:
             secret_ref="ref",
             max_output_tokens=0,
         )
+
+
+def test_embedding_profile_fingerprint_is_stable_token_free_and_config_sensitive() -> None:
+    first = embedding_profile_fingerprint(
+        "nvidia/nemotron-3-embed-1b",
+        "model-build-1",
+        1024,
+        {
+            "provider": "local",
+            "runtime": {
+                "endpoint": "https://user:first-secret@provider.example/v1?token=first",
+                "gpu_layers": 0,
+                "token": "first-secret",
+            },
+        },
+    )
+    reordered = embedding_profile_fingerprint(
+        "nvidia/nemotron-3-embed-1b",
+        "model-build-1",
+        1024,
+        {
+            "runtime": {
+                "token": "second-secret",
+                "endpoint": "https://user:second-secret@provider.example/v1?token=second",
+                "gpu_layers": 0,
+            },
+            "provider": "local",
+        },
+    )
+
+    assert first == reordered
+    assert first.startswith("sha256:")
+    assert len(first) == len("sha256:") + 64
+    assert first != embedding_profile_fingerprint(
+        "nvidia/nemotron-3-embed-1b", "model-build-1", 1536, {"provider": "local"}
+    )
+    assert first != embedding_profile_fingerprint(
+        "nvidia/nemotron-3-embed-1b", "model-build-1", 1024, {"provider": "api"}
+    )
+
+    identity = EmbeddingProfileIdentity(
+        model_id="nvidia/nemotron-3-embed-1b",
+        model_version="model-build-1",
+        dimensions=1024,
+        config={"provider": "local"},
+    )
+    assert identity.profile_fingerprint.startswith("sha256:")
 
 
 def test_secret_store_is_private_atomic_and_does_not_expose_value(

@@ -1,0 +1,37 @@
+"""Repair release links, permissions, and Hermes hooks."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..config_writer import load_installer_config
+from ..paths import InstallerPaths
+from ..targets.base import AdapterContext
+from ..targets.registry import get_target_adapter
+from .common import install_bin_link
+from .doctor import doctor
+
+
+def repair(*, paths: InstallerPaths, dry_run: bool = False) -> dict[str, Any]:
+    if not paths.config_file.is_file():
+        raise RuntimeError("LedgerMind configuration is missing")
+    config = load_installer_config(paths.config_file)
+    if not paths.current_link.exists():
+        raise RuntimeError("current release symlink is missing")
+    if dry_run:
+        return {"status": "dry_run", "current": str(paths.current_link)}
+    install_bin_link(paths)
+    adapter = get_target_adapter(config.target)
+    discovery = adapter.discover()
+    context = AdapterContext(
+        config=config, paths=paths, discovery=discovery, bundle_root=paths.current_link
+    )
+    adapter.repair(context)
+    return {
+        "status": "passed",
+        "doctor": doctor(paths=paths),
+        "current": str(paths.current_link),
+    }
+
+
+__all__ = ["repair"]

@@ -5,8 +5,14 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from datetime import datetime, timezone
+from typing import cast
 
-from .profiles import InferenceProfile
+from .profiles import (
+    InferenceProfile,
+    ProbeStatus,
+    ProviderCapabilities,
+    StructuredOutputMode,
+)
 
 
 def _now() -> str:
@@ -34,8 +40,27 @@ class InferenceProfileStore:
                 "max_retries": row["max_retries"],
                 "max_input_tokens": row["max_input_tokens"],
                 "max_output_tokens": row["max_output_tokens"],
+                "structured_output_preference": row["structured_output_preference"],
+                "token_parameter": row["token_parameter"],
+                "supports_system_role": bool(row["supports_system_role"]),
+                "supports_seed": bool(row["supports_seed"]),
                 "enabled": bool(row["enabled"]),
             }
+        )
+
+    @staticmethod
+    def _capabilities_from_row(row: sqlite3.Row) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            profile_id=row["profile_id"],
+            structured_output_mode=row["structured_output_mode"],
+            json_schema_supported=bool(row["json_schema_supported"]),
+            tool_call_supported=bool(row["tool_call_supported"]),
+            json_object_supported=bool(row["json_object_supported"]),
+            prompt_only_supported=bool(row["prompt_only_supported"]),
+            probe_contract_digest=row["probe_contract_digest"],
+            probe_status=row["probe_status"],
+            last_probed_at=row["last_probed_at"],
+            last_error_code=row["last_error_code"],
         )
 
     def get(self, profile_id: str) -> InferenceProfile | None:
@@ -67,8 +92,9 @@ class InferenceProfileStore:
             INSERT INTO inference_profiles (
                 profile_id, provider_kind, base_url, model, secret_ref,
                 timeout_seconds, max_retries, max_input_tokens, max_output_tokens,
-                enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                structured_output_preference, token_parameter,
+                supports_system_role, supports_seed, enabled, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(profile_id) DO UPDATE SET
                 provider_kind = excluded.provider_kind,
                 base_url = excluded.base_url,
@@ -78,6 +104,10 @@ class InferenceProfileStore:
                 max_retries = excluded.max_retries,
                 max_input_tokens = excluded.max_input_tokens,
                 max_output_tokens = excluded.max_output_tokens,
+                structured_output_preference = excluded.structured_output_preference,
+                token_parameter = excluded.token_parameter,
+                supports_system_role = excluded.supports_system_role,
+                supports_seed = excluded.supports_seed,
                 enabled = excluded.enabled,
                 updated_at = excluded.updated_at
             """,
@@ -91,6 +121,10 @@ class InferenceProfileStore:
                 values["max_retries"],
                 values["max_input_tokens"],
                 values["max_output_tokens"],
+                values["structured_output_preference"],
+                values["token_parameter"],
+                int(values["supports_system_role"]),
+                int(values["supports_seed"]),
                 int(values["enabled"]),
                 now,
                 now,
@@ -100,6 +134,95 @@ class InferenceProfileStore:
         if result is None:
             raise RuntimeError("inference profile upsert did not produce a row")
         return result
+
+    def get_capabilities(self, profile_id: str) -> ProviderCapabilities | None:
+        row = self._connection.execute(
+            "SELECT * FROM inference_provider_capabilities WHERE profile_id = ?",
+            (profile_id,),
+        ).fetchone()
+        return self._capabilities_from_row(row) if row is not None else None
+
+    def list_capabilities(self) -> tuple[ProviderCapabilities, ...]:
+        rows = self._connection.execute(
+            "SELECT * FROM inference_provider_capabilities ORDER BY profile_id"
+        ).fetchall()
+        return tuple(self._capabilities_from_row(row) for row in rows)
+
+    def upsert_capabilities(
+        self,
+        capabilities: ProviderCapabilities | None = None,
+        *,
+        profile_id: str | None = None,
+        structured_output_mode: str = "auto",
+        json_schema_supported: bool = False,
+        tool_call_supported: bool = False,
+        json_object_supported: bool = False,
+        prompt_only_supported: bool = False,
+        probe_contract_digest: str | None = None,
+        probe_status: str = "unknown",
+        last_probed_at: str | None = None,
+        last_error_code: str | None = None,
+    ) -> ProviderCapabilities:
+        """Persist a content-free capability observation for a profile."""
+
+        if capabilities is None:
+            if profile_id is None:
+                raise ValueError("profile_id is required for capability persistence")
+            capabilities = ProviderCapabilities(
+                profile_id=profile_id,
+                structured_output_mode=cast(StructuredOutputMode, structured_output_mode),
+                json_schema_supported=json_schema_supported,
+                tool_call_supported=tool_call_supported,
+                json_object_supported=json_object_supported,
+                prompt_only_supported=prompt_only_supported,
+                probe_contract_digest=probe_contract_digest,
+                probe_status=cast(ProbeStatus, probe_status),
+                last_probed_at=last_probed_at,
+                last_error_code=last_error_code,
+            )
+        elif profile_id is not None and profile_id != capabilities.profile_id:
+            raise ValueError("profile_id does not match capabilities")
+
+        values = capabilities.model_dump(mode="python")
+        self._connection.execute(
+            """
+            INSERT INTO inference_provider_capabilities (
+                profile_id, structured_output_mode, json_schema_supported,
+                tool_call_supported, json_object_supported, prompt_only_supported,
+                probe_contract_digest, probe_status, last_probed_at, last_error_code
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(profile_id) DO UPDATE SET
+                structured_output_mode = excluded.structured_output_mode,
+                json_schema_supported = excluded.json_schema_supported,
+                tool_call_supported = excluded.tool_call_supported,
+                json_object_supported = excluded.json_object_supported,
+                prompt_only_supported = excluded.prompt_only_supported,
+                probe_contract_digest = excluded.probe_contract_digest,
+                probe_status = excluded.probe_status,
+                last_probed_at = excluded.last_probed_at,
+                last_error_code = excluded.last_error_code
+            """,
+            (
+                values["profile_id"],
+                values["structured_output_mode"],
+                int(values["json_schema_supported"]),
+                int(values["tool_call_supported"]),
+                int(values["json_object_supported"]),
+                int(values["prompt_only_supported"]),
+                values["probe_contract_digest"],
+                values["probe_status"],
+                values["last_probed_at"],
+                values["last_error_code"],
+            ),
+        )
+        result = self.get_capabilities(capabilities.profile_id)
+        if result is None:
+            raise RuntimeError("provider capability upsert did not produce a row")
+        return result
+
+    save_capabilities = upsert_capabilities
+    get_provider_capabilities = get_capabilities
+    save_provider_capabilities = upsert_capabilities
 
     def remove(self, profile_id: str) -> bool:
         cursor = self._connection.execute(
@@ -188,4 +311,37 @@ class InferenceProfileStore:
         return resolved_audit_id
 
 
-__all__ = ["InferenceProfileStore"]
+class DatabaseBackedCapabilityStore:
+    """Capability repository that opens a short-lived Local DB connection."""
+
+    def __init__(self, database_path: str) -> None:
+        self._database_path = database_path
+
+    def get_capabilities(self, profile_id: str) -> ProviderCapabilities | None:
+        from ..persistence import open_sqlite_connection
+        from ..persistence import rounds_migrations as migrations
+
+        connection = open_sqlite_connection(self._database_path)
+        try:
+            migrations.apply_migrations(connection)
+            return InferenceProfileStore(connection).get_capabilities(profile_id)
+        finally:
+            connection.close()
+
+    def upsert_capabilities(
+        self, capabilities: ProviderCapabilities
+    ) -> ProviderCapabilities:
+        from ..persistence import open_sqlite_connection
+        from ..persistence import rounds_migrations as migrations
+
+        connection = open_sqlite_connection(self._database_path)
+        try:
+            migrations.apply_migrations(connection)
+            result = InferenceProfileStore(connection).upsert_capabilities(capabilities)
+            connection.commit()
+            return result
+        finally:
+            connection.close()
+
+
+__all__ = ["DatabaseBackedCapabilityStore", "InferenceProfileStore"]

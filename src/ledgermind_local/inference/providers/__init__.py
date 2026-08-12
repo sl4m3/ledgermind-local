@@ -13,7 +13,15 @@ from .base import (
     ProviderTransportError,
     TransientProviderError,
 )
-from .openai_compatible import OpenAICompatibleProvider
+from .openai_compatible import (
+    OpenAICompatibleProvider,
+    build_payload_json_object,
+    build_payload_json_schema,
+    build_payload_prompt_only,
+    build_payload_tool_call,
+    parse_content_response,
+    parse_tool_call_response,
+)
 
 __all__ = [
     "ChatMessage",
@@ -28,4 +36,10 @@ __all__ = [
     "ProviderTimeoutError",
     "ProviderTransportError",
     "TransientProviderError",
+    "build_payload_json_object",
+    "build_payload_json_schema",
+    "build_payload_prompt_only",
+    "build_payload_tool_call",
+    "parse_content_response",
+    "parse_tool_call_response",
 ]

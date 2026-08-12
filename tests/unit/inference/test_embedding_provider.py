@@ -77,16 +77,29 @@ def _provider(
 
 def test_embed_returns_batch_with_model_metadata() -> None:
     vectorizer = _FakeVectorizer(dimension=3, fingerprint="sha256:abc")
-    batch = _provider(vectorizer).embed(
-        ["first text", "second"], _profile(), "knowledge"
-    )
+    provider = _provider(vectorizer)
+    identity = provider.describe_profile(_profile())
+    batch = provider.embed(["first text", "second"], _profile(), "knowledge")
 
     assert len(batch.vectors) == 2
     assert all(len(vector) == 3 for vector in batch.vectors)
     assert batch.dimensions == 3
     assert batch.model == "embed-model"
-    assert batch.model_version == "sha256:abc"
+    assert batch.model_version == identity.profile_fingerprint
+    assert batch.model_version.startswith("sha256:")
     assert batch.purpose == "knowledge"
+
+
+def test_profile_fingerprint_is_stable_and_secret_free() -> None:
+    profile = _profile()
+    provider = _provider(_FakeVectorizer(dimension=3, fingerprint="sha256:abc"))
+
+    first = provider.describe_profile(profile)
+    second = provider.describe_profile(profile)
+
+    assert first == second
+    assert "embed-secret" not in first.model_dump_json()
+    assert first.to_core_metadata()["embedding_model_version"] == first.profile_fingerprint
 
 
 def test_embed_closes_vectorizer_after_use() -> None:

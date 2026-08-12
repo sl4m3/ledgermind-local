@@ -28,6 +28,12 @@ def _task_payload() -> dict[str, object]:
         },
         "embedding_request": None,
         "operation_input": {"domain": {"owned_by": "core"}},
+        "structured_generation": {
+            "root_task_id": "task-1",
+            "attempt_number": 0,
+            "attempt_kind": "primary",
+            "contract_digest": "sha256:" + "a" * 64,
+        },
     }
 
 
@@ -37,9 +43,45 @@ def test_execution_task_round_trip_preserves_opaque_operation_metadata() -> None
     assert task.task_kind == "generate_json"
     assert task.operation == "core_owned_operation"
     assert task.operation_input == {"domain": {"owned_by": "core"}}
+    assert task.structured_generation is not None
     assert task.to_payload()["operation_input"] == {
         "domain": {"owned_by": "core"}
     }
+    assert task.to_payload()["structured_generation"]["attempt_number"] == 0
+
+
+def test_claim_operations_and_subject_query_embedding_are_wire_opaque() -> None:
+    for operation in ("extract_claims", "resolve_subjects", "semantic_repair"):
+        payload = _task_payload()
+        payload["operation"] = operation
+        payload["operation_input"] = {"claims": [], "coverage": []}
+        task = CoreExecutionTask.from_payload(payload)
+        assert task.operation == operation
+        assert task.operation_input == {"claims": [], "coverage": []}
+
+    payload = {
+        "schema_version": 2,
+        "task_id": "subject-task",
+        "task_kind": "embed_texts",
+        "operation": "embed_texts",
+        "profile_slot": "embedding",
+        "memory_space_id": "space-1",
+        "expires_at": _EXPIRES_AT,
+        "embedding_request": {
+            "texts": ["language LocaleProvider"],
+            "subject_refs": ["subject:language"],
+            "purpose": "subject_query",
+        },
+    }
+    task = CoreExecutionTask.from_payload(payload)
+    assert task.embedding_request == payload["embedding_request"]
+    assert task.to_payload()["embedding_request"] == payload["embedding_request"]
+
+    with pytest.raises(ValueError, match="not supported"):
+        CoreExecutionTask.from_payload({**payload, "embedding_request": {
+            **payload["embedding_request"],
+            "purpose": "object_first",
+        }})
 
 
 def test_execution_result_rejects_unknown_fields_and_invalid_shape() -> None:

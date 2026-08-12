@@ -28,6 +28,7 @@ class Settings:
     service_lock_path: Path | None = None
     max_raw_round_bytes: int = 5_000_000
     raw_round_retention_days: int = 30
+    runtime_supervisor: object | None = None
 
     def __init__(
         self,
@@ -36,6 +37,7 @@ class Settings:
         service_lock_path: Path | None = None,
         max_raw_round_bytes: int = 5_000_000,
         raw_round_retention_days: int = 30,
+        runtime_supervisor: object | None = None,
         *,
         database_path: str | Path | None = None,
     ) -> None:
@@ -52,6 +54,7 @@ class Settings:
         object.__setattr__(self, "service_lock_path", service_lock_path)
         object.__setattr__(self, "max_raw_round_bytes", max_raw_round_bytes)
         object.__setattr__(self, "raw_round_retention_days", raw_round_retention_days)
+        object.__setattr__(self, "runtime_supervisor", runtime_supervisor)
         self.__post_init__()
 
     @property

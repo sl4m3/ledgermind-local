@@ -28,7 +28,10 @@ from ledgermind_local.inference import (
     InferenceProfile,
     InferenceProfileStore,
     SecretStore,
+    StoreBackedProfileResolver,
 )
+from ledgermind_local.inference.provider_probe import ProviderProbe
+from ledgermind_local.inference.structured_json_provider import default_provider_factory
 from ledgermind_local.maintenance.coordinated_restore import (
     CoordinatedRestoreError,
     CoordinatedRestoreService,
@@ -202,6 +205,28 @@ def _build_parser() -> argparse.ArgumentParser:
     profiles_add_parser.add_argument("--max-retries", type=int, default=2)
     profiles_add_parser.add_argument("--max-input-tokens", type=int, default=12_000)
     profiles_add_parser.add_argument("--max-output-tokens", type=int, default=2_000)
+    profiles_add_parser.add_argument(
+        "--structured-output-preference",
+        "--structured-output-mode",
+        dest="structured_output_preference",
+        choices=("auto", "json_schema", "tool_call", "json_object", "prompt_only"),
+        default="auto",
+    )
+    profiles_add_parser.add_argument(
+        "--token-parameter",
+        choices=("max_tokens", "max_completion_tokens"),
+        default="max_tokens",
+    )
+    profiles_add_parser.add_argument(
+        "--no-system-role",
+        action="store_true",
+        help="Fold system messages into a user-compatible request",
+    )
+    profiles_add_parser.add_argument(
+        "--supports-seed",
+        action="store_true",
+        help="Allow the provider seed parameter when a task supplies one",
+    )
     profiles_add_parser.add_argument("--disabled", action="store_true")
     profiles_add_parser.set_defaults(func=_command_profiles_add)
 
@@ -230,6 +255,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     inference_bind_parser.add_argument("--profile-id", required=True)
     inference_bind_parser.set_defaults(func=_command_inference_bind)
+
+    inference_probe_parser = inference_subparsers.add_parser(
+        "probe",
+        help="Run a real structured-output contract probe for a bound profile",
+    )
+    inference_probe_parser.add_argument("--memory-space-id", required=True)
+    inference_probe_parser.add_argument(
+        "--slot", choices=("operational", "background"), required=True
+    )
+    inference_probe_parser.add_argument(
+        "--mode",
+        "--structured-output-mode",
+        dest="mode",
+        choices=("auto", "json_schema", "tool_call", "json_object", "prompt_only"),
+    )
+    inference_probe_parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        help="Print machine-readable probe diagnostics",
+    )
+    inference_probe_parser.set_defaults(func=_command_inference_probe)
 
     secrets_parser = subparsers.add_parser(
         "secrets",
@@ -346,6 +393,10 @@ def _command_profiles_add(args: argparse.Namespace) -> int:
             max_retries=args.max_retries,
             max_input_tokens=args.max_input_tokens,
             max_output_tokens=args.max_output_tokens,
+            structured_output_preference=args.structured_output_preference,
+            token_parameter=args.token_parameter,
+            supports_system_role=not bool(args.no_system_role),
+            supports_seed=bool(args.supports_seed),
             enabled=not bool(args.disabled),
         )
         store.upsert(profile)
@@ -397,6 +448,56 @@ def _command_inference_bind(args: argparse.Namespace) -> int:
             f"profile slot bound: {args.memory_space_id} {args.slot} -> {args.profile_id}"
         )
         return 0
+    finally:
+        connection.close()
+
+
+def _command_inference_probe(args: argparse.Namespace) -> int:
+    """Run an operational/background contract probe and persist its result."""
+
+    paths, connection, store = _open_profile_store(args)
+    try:
+        try:
+            config = LocalConfig.from_file(paths.config_file)
+            resolver = StoreBackedProfileResolver(store)
+            secret_store = SecretStore(
+                paths.resolve_home_path(config.inference_secrets_path)
+            )
+            result = ProviderProbe(
+                profile_resolver=resolver,
+                secret_store=secret_store,
+                capability_store=store,
+                provider_factory=default_provider_factory,
+            ).probe(
+                args.memory_space_id,
+                args.slot,
+                mode_override=args.mode,
+            )
+            connection.commit()
+        except Exception as exc:  # noqa: BLE001 - CLI emits a safe diagnostic
+            connection.rollback()
+            error_code = getattr(exc, "code", None)
+            if not isinstance(error_code, str) or not error_code:
+                error_code = "probe_failed"
+            payload: dict[str, object] = {
+                "status": "failed",
+                "error_code": error_code,
+            }
+            if bool(args.json_output):
+                print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            else:
+                print(f"inference probe: FAIL ({error_code})")
+            return 1
+
+        payload = result.model_dump(mode="json")
+        if bool(args.json_output):
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(
+                f"inference probe: {result.status.upper()} "
+                f"profile={result.profile_id} mode={result.selected_mode}"
+            )
+        return 0 if result.status == "passed" else 1
     finally:
         connection.close()
 
@@ -514,8 +615,7 @@ def _command_status(args: argparse.Namespace) -> int:
             f"({'present' if database_exists else 'missing'})"
         )
         print(
-            f"config: {paths.config_file} "
-            f"({'present' if config_exists else 'missing'})"
+            f"config: {paths.config_file} ({'present' if config_exists else 'missing'})"
         )
         print(f"token: {paths.token_file} ({'present' if token_exists else 'missing'})")
         if not (database_exists and config_exists and token_exists):
@@ -676,9 +776,7 @@ def _command_serve(args: argparse.Namespace) -> int:
         components = report.get("components")
         core_report = components.get("core", {}) if isinstance(components, dict) else {}
         error_code = (
-            core_report.get("error_code")
-            if isinstance(core_report, dict)
-            else None
+            core_report.get("error_code") if isinstance(core_report, dict) else None
         )
         safe_code = (
             error_code if isinstance(error_code, str) and error_code else "unavailable"
@@ -703,6 +801,9 @@ def _command_serve(args: argparse.Namespace) -> int:
         service_lock_path=paths.service_lock_file,
         max_raw_round_bytes=config.max_raw_round_bytes,
         raw_round_retention_days=config.raw_round_retention_days,
+        runtime_supervisor=_build_runtime_supervisor(
+            config=config, host=host, port=port
+        ),
     )
     app = create_app(
         application=runtime,
@@ -723,6 +824,34 @@ def _command_serve(args: argparse.Namespace) -> int:
         _restore_signal_handlers(installed_handlers)
         runtime.stop()
     return 0
+
+
+def _build_runtime_supervisor(*, config: LocalConfig, host: str, port: int) -> object:
+    from ledgermind_local.installer.paths import InstallerPaths
+    from ledgermind_local.runtime.supervisor import RuntimeSupervisor
+
+    endpoint_host = host if host in {"127.0.0.1", "localhost", "::1"} else "127.0.0.1"
+    embedding_command: tuple[str, ...] | None = None
+    if config.embedding.enabled:
+        embedding_command = (
+            sys.executable,
+            "-m",
+            "ledgermind_local.installer.embeddings.serve",
+            "--model-path",
+            str(Path(config.embedding.model_path).expanduser()),
+            "--gpu-layers",
+            str(config.embedding.gpu_layers),
+            "--port",
+            "8766",
+        )
+    return RuntimeSupervisor(
+        InstallerPaths(),
+        endpoint=f"http://{endpoint_host}:{port}",
+        idle_shutdown_seconds=60.0,
+        lease_ttl_seconds=30.0,
+        commands={},
+        embedding_command=embedding_command,
+    )
 
 
 def _build_core_backup_service(
@@ -792,11 +921,19 @@ def _command_backup_create(args: argparse.Namespace) -> int:
             finally:
                 connection.close()
             gateway, service = _build_core_backup_service(paths=paths, config=config)
-            destination = args.destination if args.destination is not None else paths.backups_dir
+            destination = (
+                args.destination if args.destination is not None else paths.backups_dir
+            )
             archive = service.create_backup(destination)
         print(f"backup created: {archive}")
         return 0
-    except (CoreBackupError, ServiceLockError, OSError, RuntimeError, ValueError) as exc:
+    except (
+        CoreBackupError,
+        ServiceLockError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         print(f"backup unavailable: {exc}", file=sys.stderr)
         return 1
     finally:
@@ -821,7 +958,9 @@ def _command_backup_restore(args: argparse.Namespace) -> int:
             else paths.resolve_rounds_database_path(config.rounds_database_path)
         ).expanduser()
         with ServiceLock(paths.service_lock_file):
-            gateway, backup_service = _build_core_backup_service(paths=paths, config=config)
+            gateway, backup_service = _build_core_backup_service(
+                paths=paths, config=config
+            )
             restore_service = _build_coordinated_restore_service(
                 gateway=gateway,
                 backup_service=backup_service,
@@ -850,7 +989,13 @@ def _command_backup_restore(args: argparse.Namespace) -> int:
     except CoordinatedRestoreError as exc:
         print(f"restore unavailable: {exc.code}", file=sys.stderr)
         return 1
-    except (CoreBackupError, ServiceLockError, OSError, RuntimeError, ValueError) as exc:
+    except (
+        CoreBackupError,
+        ServiceLockError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         print(f"restore unavailable: {type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
@@ -878,7 +1023,9 @@ def _command_maintenance_retention(args: argparse.Namespace) -> int:
                 connection.commit()
             finally:
                 connection.close()
-            result = RawRoundRetentionWorker(database_path).process_once(limit=args.limit)
+            result = RawRoundRetentionWorker(database_path).process_once(
+                limit=args.limit
+            )
         print(json.dumps({"purged": result.purged}, sort_keys=True))
         return 0
     except ServiceLockError as exc:
@@ -890,9 +1037,46 @@ def _command_maintenance_retention(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    installer_commands = {
+        "install",
+        "configure",
+        "repair",
+        "update",
+        "uninstall",
+        "status",
+        "export-config",
+        "import-config",
+        "runtime",
+    }
+    command = _first_command(raw_argv)
+    if command in installer_commands:
+        from ledgermind_local.installer.cli import main as installer_main
+
+        return installer_main(raw_argv)
+    if command == "doctor" and "--database" not in raw_argv:
+        from ledgermind_local.installer.cli import main as installer_main
+
+        return installer_main(raw_argv)
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     return int(args.func(args))
+
+
+def _first_command(argv: Sequence[str]) -> str | None:
+    """Return the first subcommand without matching option values as commands."""
+
+    index = 0
+    while index < len(argv):
+        value = argv[index]
+        if value == "--home":
+            index += 2
+            continue
+        if value.startswith(("--home=", "-")):
+            index += 1
+            continue
+        return value
+    return None
 
 
 if __name__ == "__main__":

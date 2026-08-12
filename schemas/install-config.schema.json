@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "target", "generation", "embedding"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "target": {"const": "hermes"},
+    "memory_data_path": {"type": ["string", "null"]},
+    "generation": {
+      "$ref": "#/$defs/generation"
+    },
+    "embedding": {
+      "oneOf": [
+        {
+          "required": ["mode", "api"],
+          "properties": {"mode": {"const": "api"}, "api": {"$ref": "#/$defs/embeddingApi"}},
+          "not": {"required": ["local"]}
+        },
+        {
+          "required": ["mode", "local"],
+          "properties": {"mode": {"const": "local"}, "local": {"$ref": "#/$defs/embeddingLocal"}},
+          "not": {"required": ["api"]}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "idle_shutdown_seconds": {"type": "number", "minimum": 0},
+        "lease_ttl_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "heartbeat_seconds": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "advanced": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation_max_input": {"type": ["integer", "null"], "minimum": 1},
+        "generation_max_output": {"type": ["integer", "null"], "minimum": 1},
+        "embedding_max_text_length": {"type": ["integer", "null"], "minimum": 1},
+        "retry_attempts": {"type": "integer", "minimum": 0, "maximum": 10},
+        "allow_custom_model": {"type": "boolean"},
+        "custom_model_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$"},
+        "custom_runtime_compatibility": {"type": ["string", "null"]}
+      }
+    }
+  },
+  "$defs": {
+    "generation": {
+      "type": "object",
+      "required": ["endpoint", "model"],
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {"type": "string", "format": "uri"},
+        "token": {"type": ["string", "null"]},
+        "token_env": {"type": ["string", "null"]},
+        "token_stdin": {"type": "boolean"},
+        "secret_ref": {"type": ["string", "null"]},
+        "model": {"type": "string"},
+        "operational_model": {"type": ["string", "null"]},
+        "background_model": {"type": ["string", "null"]},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "max_concurrency": {"type": "integer", "minimum": 1},
+        "structured_json_support": {"type": "boolean"}
+      }
+    },
+    "embeddingApi": {
+      "type": "object",
+      "required": ["endpoint", "model", "dimensions"],
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {"type": "string", "format": "uri"},
+        "token": {"type": ["string", "null"]},
+        "token_env": {"type": ["string", "null"]},
+        "token_stdin": {"type": "boolean"},
+        "secret_ref": {"type": ["string", "null"]},
+        "model": {"type": "string"},
+        "dimensions": {"type": "integer", "minimum": 1},
+        "batch_size": {"type": "integer", "minimum": 1},
+        "concurrency": {"type": "integer", "minimum": 1},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "embeddingLocal": {
+      "type": "object",
+      "required": ["catalog_id"],
+      "additionalProperties": false,
+      "properties": {
+        "catalog_id": {"type": "string"},
+        "device": {"enum": ["auto", "cpu", "cuda", "rocm"]},
+        "model_path": {"type": ["string", "null"]},
+        "model_storage_path": {"type": ["string", "null"]},
+        "batch_size": {"type": "integer", "minimum": 1},
+        "concurrency": {"type": "integer", "minimum": 1},
+        "threads": {"type": "integer", "minimum": 0},
+        "gpu_allocation": {"type": "string"},
+        "auto_start": {"type": "boolean"}
+      }
+    }
+  }
+}

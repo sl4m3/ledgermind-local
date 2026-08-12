@@ -8,11 +8,13 @@ import time
 from collections.abc import Callable
 from typing import Literal, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+from ..embedding_purpose import EmbeddingPurpose
 from .cancellation import CancellationToken
 from .embedding_provider import EmbeddingBatch, EmbeddingProvider
 from .profile_slots import ProfileResolver, ProfileSlot
+from .profiles import StructuredOutputMode
 from .providers.base import ChatMessage, ProviderCancelledError, ProviderTimeoutError
 from .structured_json_provider import StructuredJsonProvider
 
@@ -32,6 +34,18 @@ class ModelRequestSpec(BaseModel):
     messages: tuple[ChatMessage, ...] = Field(min_length=1, max_length=32)
     max_output_tokens: int = Field(gt=0, le=50_000)
     response_format: dict[str, object] | None = None
+    output_contract: dict[str, object] | None = None
+    mode: StructuredOutputMode = Field(
+        default="auto",
+        validation_alias=AliasChoices("mode", "structured_output_mode"),
+    )
+    tool_name: str | None = Field(default=None, min_length=1, max_length=200)
+    metadata: dict[str, object] = Field(default_factory=dict)
+    seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
+
+    @property
+    def structured_output_mode(self) -> StructuredOutputMode:
+        return self.mode
 
 
 class EmbeddingRequestSpec(BaseModel):
@@ -40,7 +54,8 @@ class EmbeddingRequestSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     texts: tuple[str, ...] = Field(min_length=1)
-    purpose: str = Field(min_length=1, max_length=200)
+    purpose: EmbeddingPurpose
+    subject_refs: tuple[str, ...] | None = Field(default=None, max_length=512)
     dimensions: int | None = Field(default=None, gt=0, le=100_000)
 
 
@@ -62,6 +77,7 @@ class GenericExecutionTask(BaseModel):
     expires_at: str | None = Field(default=None, max_length=64)
     lease: dict[str, object] | None = None
     operation_input: dict[str, object] | None = None
+    structured_generation: dict[str, object] | None = None
 
 
 class EgressAuditRecord(BaseModel):
@@ -93,6 +109,19 @@ class GenericExecutionResult(BaseModel):
     embedding_result: EmbeddingBatch | None = None
     egress_audit: EgressAuditRecord
     error_code: str | None = Field(default=None, max_length=200)
+    raw_model_text: str | None = None
+    structured_output_mode: StructuredOutputMode | None = None
+    contract_digest: str | None = Field(default=None, max_length=200)
+    tool_name: str | None = Field(default=None, min_length=1, max_length=200)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+    @property
+    def mode(self) -> StructuredOutputMode | None:
+        return self.structured_output_mode
+
+    @property
+    def selected_mode(self) -> StructuredOutputMode | None:
+        return self.structured_output_mode
 
 
 class CoreExecutorError(RuntimeError):
@@ -170,6 +199,11 @@ class CoreTaskExecutor:
                     memory_space_id=_memory_space_id(task),
                     messages=spec.messages,
                     max_output_tokens=spec.max_output_tokens,
+                    output_contract=spec.output_contract,
+                    mode=spec.mode,
+                    tool_name=spec.tool_name,
+                    metadata=spec.metadata,
+                    seed=spec.seed,
                     response_format=spec.response_format,
                     profile_slot=task.profile_slot,
                     cancellation_token=token,
@@ -199,6 +233,11 @@ class CoreTaskExecutor:
             status="completed",
             output=result.data,
             egress_audit=audit,
+            raw_model_text=result.raw_text,
+            structured_output_mode=result.structured_output_mode,
+            contract_digest=result.contract_digest,
+            tool_name=result.tool_name,
+            metadata=result.metadata,
         )
 
     def _execute_embed_texts(
@@ -393,6 +432,9 @@ def _model_request_bytes(spec: ModelRequestSpec) -> int:
             for message in spec.messages
         ],
         "max_output_tokens": spec.max_output_tokens,
+        "output_contract": spec.output_contract,
+        "mode": spec.mode,
+        "tool_name": spec.tool_name,
     }
     return len(
         json.dumps(
@@ -416,6 +458,7 @@ __all__ = [
     "CoreExecutorError",
     "CoreTaskExecutor",
     "EgressAuditRecord",
+    "EmbeddingPurpose",
     "EmbeddingRequestSpec",
     "ExecutionCancelledError",
     "ExecutionStatus",

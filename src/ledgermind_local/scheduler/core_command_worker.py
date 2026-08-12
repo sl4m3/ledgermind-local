@@ -6,6 +6,7 @@ import json
 import re
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,6 +52,7 @@ class CoreCommandWorker:
         retry_delay_seconds: float = 30,
         lease_seconds: float = 300,
         state: WorkerState | None = None,
+        embedding_profile_metadata_factory: Callable[[str], dict[str, object]] | None = None,
     ) -> None:
         self.database_path = database_path
         self.gateway = gateway
@@ -59,6 +61,7 @@ class CoreCommandWorker:
         self.retry_delay_seconds = max(float(retry_delay_seconds), 0)
         self.lease_seconds = max(float(lease_seconds), 1)
         self.state = state or WorkerState("core-command")
+        self.embedding_profile_metadata_factory = embedding_profile_metadata_factory
         self._stop = threading.Event()
         self._loop: GuardedWorkerLoop | None = None
 
@@ -191,6 +194,16 @@ class CoreCommandWorker:
             raise DomainRejectedError(
                 "invalid_raw_round_payload", "RawRound payload must be an object"
             )
+        embedding_profile = None
+        if self.embedding_profile_metadata_factory is not None:
+            embedding_profile = self.embedding_profile_metadata_factory(command.memory_space_id)
+        extensions = raw_payload.get("extensions")
+        resolution_context = (
+            dict(extensions["resolution_context"])
+            if isinstance(extensions, dict)
+            and isinstance(extensions.get("resolution_context"), dict)
+            else None
+        )
         return self.gateway.ingest_raw_round(
             IngestRawRoundCommand(
                 command_id=command.command_id,
@@ -198,6 +211,8 @@ class CoreCommandWorker:
                 memory_space_id=command.memory_space_id,
                 raw_round_id=raw_round_id,
                 raw_round=raw_payload,
+                resolution_context=resolution_context,
+                embedding_profile=embedding_profile,
             )
         )
 

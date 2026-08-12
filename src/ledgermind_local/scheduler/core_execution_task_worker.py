@@ -8,6 +8,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 from ledgermind_local.core_gateway.base import CoreGateway
 from ledgermind_local.core_gateway.contracts import (
@@ -18,6 +19,7 @@ from ledgermind_local.core_gateway.contracts import (
     SubmitExecutionResultCommand,
     TransientCoreError,
 )
+from ledgermind_local.embedding_purpose import validate_embedding_purpose
 from ledgermind_local.inference.core_task_executor import (
     CoreTaskExecutor,
     EmbeddingRequestSpec,
@@ -25,6 +27,7 @@ from ledgermind_local.inference.core_task_executor import (
     ModelRequestSpec,
 )
 from ledgermind_local.inference.profile_slots import ProfileSlot
+from ledgermind_local.inference.profiles import StructuredOutputMode
 from ledgermind_local.inference.providers.base import (
     ChatMessage,
     ProviderAuthenticationError,
@@ -51,6 +54,17 @@ _SAFE_ERROR_CODES = frozenset(
         "provider_secret_missing",
         "provider_error",
         "invalid_model_output",
+        "invalid_provider_response",
+        "invalid_json_response",
+        "invalid_request",
+        "secret_missing",
+        "input_budget_exceeded",
+        "authentication_error",
+        "configuration_error",
+        "cancelled",
+        "timeout",
+        "transport_error",
+        "transient_provider_error",
         "profile_not_found",
         "profile_disabled",
         "input_too_large",
@@ -98,6 +112,11 @@ class ExecutionFailureClassification:
 def classify_execution_error(exc: BaseException) -> ExecutionFailureClassification:
     """Classify provider/Core failures without serializing exception details."""
 
+    code = getattr(exc, "code", None)
+    if code == "input_budget_exceeded":
+        return ExecutionFailureClassification("input_budget_exceeded", False, 0)
+    if code in {"invalid_json_response", "invalid_request", "secret_missing"}:
+        return ExecutionFailureClassification(str(code), False, 0)
     if isinstance(exc, (ProviderTimeoutError, TimeoutError)):
         return ExecutionFailureClassification("provider_timeout", True)
     if isinstance(exc, (ProviderTransportError, ConnectionError, OSError)):
@@ -248,7 +267,7 @@ class CoreExecutionTaskWorker:
                     task_id=task.task_id,
                     memory_space_id=memory_space_id,
                     worker_id=self._worker_id,
-                    error_code=result.error_code or result.status,
+                    error_code=_safe_error_code(result.error_code, result.status),
                     retryable=result.status in {"timeout", "cancelled"},
                     retry_after_seconds=60
                     if result.status in {"timeout", "cancelled"}
@@ -297,16 +316,55 @@ def _local_execution_task(
                 for message in wire.model_request.get("messages", [])
             ),
             max_output_tokens=int(wire.model_request["max_output_tokens"]),
-            response_format={"type": wire.model_request["response_format"]}
-            if wire.model_request.get("response_format") == "json_object"
-            else None,
+            response_format=(
+                {"type": wire.model_request["response_format"]}
+                if isinstance(wire.model_request.get("response_format"), str)
+                else (
+                    dict(wire.model_request["response_format"])
+                    if isinstance(wire.model_request.get("response_format"), dict)
+                    else None
+                )
+            ),
+            output_contract=(
+                dict(wire.model_request["output_contract"])
+                if isinstance(wire.model_request.get("output_contract"), dict)
+                else None
+            ),
+            mode=cast(
+                StructuredOutputMode,
+                str(
+                    wire.model_request.get("mode")
+                    or wire.model_request.get("structured_output_mode")
+                    or "auto"
+                ),
+            ),
+            tool_name=(
+                str(wire.model_request["tool_name"])
+                if wire.model_request.get("tool_name") is not None
+                else None
+            ),
+            metadata=(
+                dict(wire.model_request["metadata"])
+                if isinstance(wire.model_request.get("metadata"), dict)
+                else {}
+            ),
+            seed=(
+                int(wire.model_request["seed"])
+                if wire.model_request.get("seed") is not None
+                else None
+            ),
         )
     embedding_request = None
     if wire.embedding_request is not None:
-        embedding_request = EmbeddingRequestSpec(
-            texts=tuple(str(text) for text in wire.embedding_request.get("texts", [])),
-            purpose=str(wire.embedding_request["purpose"]),
-            dimensions=(
+            embedding_request = EmbeddingRequestSpec(
+                texts=tuple(str(text) for text in wire.embedding_request.get("texts", [])),
+                purpose=validate_embedding_purpose(wire.embedding_request["purpose"]),
+                subject_refs=(
+                    tuple(str(subject_ref) for subject_ref in wire.embedding_request["subject_refs"])
+                    if isinstance(wire.embedding_request.get("subject_refs"), list)
+                    else None
+                ),
+                dimensions=(
                 int(wire.embedding_request["dimensions"])
                 if wire.embedding_request.get("dimensions") is not None
                 else None
@@ -322,6 +380,7 @@ def _local_execution_task(
         expires_at=wire.expires_at,
         lease={"memory_space_id": memory_space_id, "value": wire.lease},
         operation_input=wire.operation_input,
+        structured_generation=wire.structured_generation,
     )
 
 

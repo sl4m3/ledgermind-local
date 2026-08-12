@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..embedding_purpose import EmbeddingPurpose, validate_embedding_purpose
 from .cancellation import CancellationToken
-from .profiles import InferenceProfile
+from .profiles import (
+    EmbeddingProfileIdentity,
+    EmbeddingProfileReadiness,
+    InferenceProfile,
+)
 from .vectorizer import Vectorizer
 
 VectorizerFactory = Callable[[], Vectorizer]
@@ -65,6 +70,7 @@ class EmbeddingProvider:
         vectorizer_factory: VectorizerFactory,
         max_texts: int = 64,
         max_text_chars: int = 8_000,
+        identity_config: Mapping[str, object] | None = None,
     ) -> None:
         if max_texts < 1:
             raise ValueError("max_texts must be positive")
@@ -73,12 +79,58 @@ class EmbeddingProvider:
         self._vectorizer_factory = vectorizer_factory
         self.max_texts = max_texts
         self.max_text_chars = max_text_chars
+        self._identity_config = dict(identity_config or {})
+
+    def describe_profile(self, profile: InferenceProfile) -> EmbeddingProfileIdentity:
+        """Resolve opaque embedding identity without sending any text."""
+
+        vectorizer = self._vectorizer_factory()
+        try:
+            return self._profile_identity(
+                profile,
+                vectorizer,
+                self._vectorizer_dimension(vectorizer),
+            )
+        finally:
+            close = getattr(vectorizer, "close", None)
+            if callable(close):
+                close()
+
+    # Explicit alias for callers that name the contract rather than the action.
+    embedding_profile_identity = describe_profile
+
+    def readiness(self, profile: InferenceProfile) -> EmbeddingProfileReadiness:
+        """Return secret-free profile readiness and identity metadata."""
+
+        try:
+            identity = self.describe_profile(profile)
+        except Exception as exc:  # noqa: BLE001 - readiness must remain observable
+            code = getattr(exc, "code", None)
+            if not isinstance(code, str) or not code:
+                code = "embedding_profile_unavailable"
+            return EmbeddingProfileReadiness(
+                profile_id=profile.profile_id,
+                ready=False,
+                error_code=code,
+            )
+        if identity.dimensions is None:
+            return EmbeddingProfileReadiness(
+                profile_id=profile.profile_id,
+                ready=False,
+                identity=identity,
+                error_code="embedding_dimensions_unknown",
+            )
+        return EmbeddingProfileReadiness(
+            profile_id=profile.profile_id,
+            ready=True,
+            identity=identity,
+        )
 
     def embed(
         self,
         texts: Sequence[str],
         profile: InferenceProfile,
-        purpose: str,
+        purpose: EmbeddingPurpose,
         *,
         cancellation_token: CancellationToken | None = None,
     ) -> EmbeddingBatch:
@@ -87,8 +139,10 @@ class EmbeddingProvider:
         token.raise_if_cancelled()
         if profile is None:
             raise EmbeddingRequestError("embedding profile is required")
-        if purpose is None or not purpose.strip():
-            raise EmbeddingRequestError("embedding purpose is required")
+        try:
+            validate_embedding_purpose(purpose)
+        except ValueError as exc:
+            raise EmbeddingRequestError(str(exc)) from exc
         if not texts:
             raise EmbeddingRequestError("embedding batch must not be empty")
         if len(texts) > self.max_texts:
@@ -109,11 +163,15 @@ class EmbeddingProvider:
             if len(raw_vectors) != len(texts):
                 raise EmbeddingModelError("embedding backend returned a partial result")
             vectors = self._validated_vectors(vectorizer, raw_vectors)
-            model_version = vectorizer.fingerprint or "unknown"
+            identity = self._profile_identity(
+                profile,
+                vectorizer,
+                len(vectors[0]) if vectors else self._vectorizer_dimension(vectorizer),
+            )
             return EmbeddingBatch(
                 vectors=tuple(vectors),
                 model=profile.model,
-                model_version=model_version,
+                model_version=identity.profile_fingerprint,
                 dimensions=len(vectors[0]) if vectors else 0,
                 purpose=purpose,
             )
@@ -156,6 +214,34 @@ class EmbeddingProvider:
         except (RuntimeError, TypeError, ValueError):
             return None
 
+    def _profile_identity(
+        self,
+        profile: InferenceProfile,
+        vectorizer: Vectorizer,
+        dimensions: int | None,
+    ) -> EmbeddingProfileIdentity:
+        try:
+            model_version = vectorizer.fingerprint.strip()
+        except (AttributeError, RuntimeError, TypeError):
+            model_version = ""
+        if not model_version or model_version == "unknown":
+            raise EmbeddingModelError(
+                "embedding backend did not expose a stable model fingerprint"
+            )
+        config: dict[str, object] = {
+            "base_url": profile.base_url,
+            "provider_kind": profile.provider_kind,
+            "vectorizer": f"{type(vectorizer).__module__}.{type(vectorizer).__qualname__}",
+            "max_input_tokens": profile.max_input_tokens,
+            **self._identity_config,
+        }
+        return EmbeddingProfileIdentity(
+            model_id=profile.model,
+            model_version=model_version,
+            dimensions=dimensions,
+            config=config,
+        )
+
 
 __all__ = [
     "EmbeddingBatch",
@@ -164,7 +250,10 @@ __all__ = [
     "EmbeddingError",
     "EmbeddingModelError",
     "EmbeddingNonFiniteError",
+    "EmbeddingProfileIdentity",
+    "EmbeddingProfileReadiness",
     "EmbeddingProvider",
+    "EmbeddingPurpose",
     "EmbeddingRequestError",
     "EmbeddingTextTooLargeError",
     "VectorizerFactory",

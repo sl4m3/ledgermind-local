@@ -68,6 +68,12 @@ class StoreBackedProfileResolver(ProfileResolver):
     ) -> None:
         self._profile_store = profile_store
 
+    @property
+    def profile_store(self) -> InferenceProfileStore:
+        """Expose the same Local-owned store for capability lookups."""
+
+        return self._profile_store
+
     def resolve_profile(
         self, memory_space_id: str, slot: ProfileSlot
     ) -> InferenceProfile:
@@ -100,6 +106,10 @@ class DatabaseBackedProfileResolver(ProfileResolver):
 
     def __init__(self, database_path: str | Path) -> None:
         self._database_path = database_path
+
+    @property
+    def database_path(self) -> str | Path:
+        return self._database_path
 
     def resolve_profile(
         self, memory_space_id: str, slot: ProfileSlot

@@ -21,6 +21,7 @@ from .errors import AuthenticationError, authentication_error_handler
 from .health import create_health_router
 from .http import error_payload
 from .rounds import create_rounds_router
+from .runtime import create_runtime_router
 
 
 def _normalize_database_path(database_path: str | Path) -> Path:
@@ -80,7 +81,10 @@ def create_app(
     app.state.raw_round_handler = raw_round_handler
     app.state.core_gateway = core_gateway
     app.state.runtime = runtime
-    query_embedder = runtime if callable(getattr(runtime, "embed_query", None)) else None
+    app.state.runtime_supervisor = settings.runtime_supervisor
+    query_embedder = (
+        runtime if callable(getattr(runtime, "embed_query", None)) else None
+    )
 
     require_token = build_bearer_token_dependency(settings=settings)
     maybe_token = build_optional_bearer_token_dependency(settings=settings)
@@ -110,6 +114,9 @@ def create_app(
             max_body_bytes=settings.max_raw_round_bytes,
             query_embedder=query_embedder,
         )
+    )
+    app.include_router(
+        create_runtime_router(require_token, settings.runtime_supervisor)
     )
 
     return app

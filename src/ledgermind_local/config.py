@@ -26,6 +26,13 @@ class EmbeddingConfig(BaseModel):
     enabled: bool = False
     model_path: str = "~/.ledgermind/local/models/small-text-matching-Q4_K_M.gguf"
     gpu_layers: int = Field(default=0, ge=0)
+    provider_mode: Literal["local", "api"] = "local"
+    endpoint: str | None = None
+    model: str | None = None
+    dimensions: int = Field(default=0, ge=0)
+    batch_size: int = Field(default=32, ge=1, le=4096)
+    timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    secret_ref: str | None = None
 
 
 class WorkerConfig(BaseModel):
@@ -380,6 +387,6 @@ class LocalConfig(BaseModel):
         return json.dumps(
             self.model_dump(exclude_defaults=False),
             ensure_ascii=False,
-            sort_keys=True,
+            sort_keys=False,
             separators=(",", ":"),
         )

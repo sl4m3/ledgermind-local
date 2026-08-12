@@ -110,3 +110,23 @@ signature/public-key для binary, собранного этим же Docker bu
 Legacy contract payloads are migrated once before Local workers start. Legacy
 runtime routes, operation names and aliases are not supported; new capture
 arrives through Integrations.
+
+## Universal Hermes installer
+
+The release installer is rootless and uses one configuration engine for the
+interactive wizard and agent-driven JSON installs. It accepts only an
+OpenAI-compatible generation API and either an OpenAI-compatible embeddings
+API or a signed local CPU/GPU model catalog entry:
+
+```bash
+curl -fsSL https://github.com/sl4m3/ledgermind/releases/latest/download/install.sh | sh
+ledgermind install schema --json
+ledgermind doctor --json
+ledgermind runtime status --json
+```
+
+Install data follows XDG directories. Signed manifests, bundle artifacts,
+Core, model files, and embedding runtimes are verified before `current` is
+switched. The default runtime is on-demand: Hermes acquires a TTL lease before
+memory work, heartbeats while active, and releases it on shutdown. Ordinary
+uninstall preserves user memory, configuration, and secrets.

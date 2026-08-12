@@ -1,14 +1,21 @@
-"""OpenAI-compatible JSON completion provider."""
+"""OpenAI-compatible structured completion transport.
+
+The endpoint family shares an HTTP envelope, but does not share support for
+structured output modes or request parameter names.  Builders and parsers are
+kept separate so capability decisions remain explicit at the Local boundary.
+"""
 
 from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 import httpx
 
 from ..cancellation import CancellationToken
+from ..profiles import TokenParameter
 from .base import (
     InferenceProvider,
     ModelRequest,
@@ -22,11 +29,281 @@ from .base import (
     TransientProviderError,
 )
 
+DEFAULT_TOOL_NAME = "submit_structured_result"
+_PROMPT_ONLY_SUFFIX = (
+    "\n\nReturn only one JSON object. Do not use Markdown. "
+    "Do not add explanations."
+)
+
+
+def _contract_schema(request: ModelRequest) -> dict[str, object]:
+    contract = request.output_contract
+    schema = contract.get("json_schema") if isinstance(contract, dict) else None
+    if not isinstance(schema, dict) and isinstance(request.response_format, dict):
+        response_schema = request.response_format.get("json_schema")
+        if isinstance(response_schema, dict):
+            schema = response_schema.get("schema")
+    if not isinstance(schema, dict):
+        raise ProviderConfigurationError(
+            "json_schema mode requires an output contract schema"
+        )
+    return schema
+
+
+def _contract_name(request: ModelRequest) -> str:
+    contract = request.output_contract
+    if isinstance(contract, dict):
+        name = contract.get("contract_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    if isinstance(request.response_format, dict):
+        response_schema = request.response_format.get("json_schema")
+        if isinstance(response_schema, dict):
+            name = response_schema.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    return "structured_result"
+
+
+def _token_parameter(request: ModelRequest) -> TokenParameter:
+    return request.token_parameter or "max_tokens"
+
+
+def _messages_payload(
+    request: ModelRequest,
+    *,
+    prompt_only: bool = False,
+) -> list[dict[str, str]]:
+    supports_system_role = request.supports_system_role is not False
+    messages: list[dict[str, str]] = []
+    for message in request.messages:
+        role = message.role
+        if role == "system" and not supports_system_role:
+            role = "user"
+        messages.append({"role": role, "content": message.content})
+    if prompt_only:
+        if not messages:
+            raise ProviderConfigurationError("prompt_only mode requires messages")
+        messages[-1]["content"] += _PROMPT_ONLY_SUFFIX
+    return messages
+
+
+def _base_payload(request: ModelRequest, *, prompt_only: bool = False) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "model": request.model,
+        "messages": _messages_payload(request, prompt_only=prompt_only),
+    }
+    token_parameter = _token_parameter(request)
+    payload[token_parameter] = request.max_output_tokens
+    if request.supports_seed and request.seed is not None:
+        payload["seed"] = request.seed
+    return payload
+
+
+def build_payload_json_schema(request: ModelRequest) -> dict[str, object]:
+    """Build the strict JSON Schema request payload."""
+
+    payload = _base_payload(request)
+    payload["response_format"] = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": _contract_name(request),
+            "strict": True,
+            "schema": _contract_schema(request),
+        },
+    }
+    return payload
+
+
+def build_payload_tool_call(request: ModelRequest) -> dict[str, object]:
+    """Build a forced single-function tool-call payload."""
+
+    payload = _base_payload(request)
+    tool_name = request.tool_name or DEFAULT_TOOL_NAME
+    parameters: dict[str, object] = {}
+    if isinstance(request.output_contract, dict):
+        schema = request.output_contract.get("json_schema")
+        if isinstance(schema, dict):
+            parameters = schema
+    payload["tools"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "description": "Return the requested structured result",
+                "parameters": parameters,
+            },
+        }
+    ]
+    payload["tool_choice"] = {
+        "type": "function",
+        "function": {"name": tool_name},
+    }
+    return payload
+
+
+def build_payload_json_object(request: ModelRequest) -> dict[str, object]:
+    """Build the legacy JSON-object payload."""
+
+    payload = _base_payload(request)
+    payload["response_format"] = {"type": "json_object"}
+    return payload
+
+
+def build_payload_prompt_only(request: ModelRequest) -> dict[str, object]:
+    """Build a payload relying only on the prompt's JSON instructions."""
+
+    return _base_payload(request, prompt_only=True)
+
+
+def build_payload(request: ModelRequest) -> dict[str, object]:
+    """Dispatch to the explicit payload builder for ``request.mode``."""
+
+    if request.response_format is not None:
+        format_type = request.response_format.get("type")
+        if format_type == "json_object":
+            return build_payload_json_object(request)
+        if format_type == "json_schema":
+            return build_payload_json_schema(request)
+        raise ProviderConfigurationError("unsupported response format")
+    mode = request.mode
+    if mode == "json_schema":
+        return build_payload_json_schema(request)
+    if mode == "tool_call":
+        return build_payload_tool_call(request)
+    if mode == "prompt_only":
+        return build_payload_prompt_only(request)
+    # ``auto`` is useful when a request is constructed directly.  Runtime
+    # selection normally resolves it before a provider is called.
+    return build_payload_json_object(request)
+
+
+def _message_from_response(response: Mapping[str, object]) -> Mapping[str, object]:
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ProviderResponseError("provider response has no choices")
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise ProviderResponseError("provider response choice is invalid")
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        raise ProviderResponseError("provider response message is invalid")
+    return message
+
+
+def parse_content_response(response: Mapping[str, object]) -> str:
+    """Extract content from an OpenAI-compatible response envelope."""
+
+    message = _message_from_response(response)
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ProviderResponseError("provider response content is missing")
+    return content
+
+
+def parse_tool_call_response(
+    response: Mapping[str, object],
+    *,
+    expected_tool_name: str | None = None,
+) -> str:
+    """Extract the first function's JSON arguments from ``tool_calls``."""
+
+    message = _message_from_response(response)
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list) or not tool_calls:
+        raise ProviderResponseError("provider response has no tool calls")
+    first_call = tool_calls[0]
+    if not isinstance(first_call, dict):
+        raise ProviderResponseError("provider tool call is invalid")
+    function = first_call.get("function")
+    if not isinstance(function, dict):
+        raise ProviderResponseError("provider tool call function is invalid")
+    name = function.get("name")
+    if expected_tool_name is not None and name != expected_tool_name:
+        raise ProviderResponseError("provider returned an unexpected tool name")
+    arguments = function.get("arguments")
+    if isinstance(arguments, dict):
+        arguments = json.dumps(
+            arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+    if not isinstance(arguments, str) or not arguments.strip():
+        raise ProviderResponseError("provider tool arguments are missing")
+    return arguments
+
+
+def strip_json_fence(content: str) -> str:
+    """Remove one complete Markdown JSON fence without repairing its shape."""
+
+    normalized = content.strip()
+    if not normalized.startswith("```"):
+        return normalized
+    lines = normalized.splitlines()
+    if len(lines) < 3 or not lines[-1].strip() == "```":
+        raise ProviderResponseError("provider JSON fence is incomplete")
+    language = lines[0].strip()[3:].strip().lower()
+    if language not in {"", "json"}:
+        raise ProviderResponseError("provider returned an unsupported code fence")
+    inner = "\n".join(lines[1:-1]).strip()
+    if not inner:
+        raise ProviderResponseError("provider JSON content is empty")
+    return inner
+
+
+def decode_json_content(content: str) -> object:
+    """Decode JSON after the one permitted code-fence normalization."""
+
+    normalized = strip_json_fence(content)
+    try:
+        return json.loads(normalized)
+    except ValueError as exc:
+        raise ProviderResponseError("provider returned invalid JSON content") from exc
+
+
+def _safe_metadata(
+    envelope: Mapping[str, object],
+    response: httpx.Response,
+) -> dict[str, object]:
+    """Keep only known response metadata; never copy arbitrary provider data."""
+
+    metadata: dict[str, object] = {}
+    request_id = response.headers.get("x-request-id") or response.headers.get(
+        "request-id"
+    )
+    if request_id:
+        metadata["request_id"] = request_id
+    for key in ("id", "created", "system_fingerprint"):
+        value = envelope.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            metadata[key] = value
+    usage = envelope.get("usage")
+    if isinstance(usage, dict):
+        safe_usage: dict[str, int] = {}
+        for key, value in usage.items():
+            if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool):
+                safe_usage[key] = value
+        if safe_usage:
+            metadata["usage"] = safe_usage
+    choices = envelope.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        finish_reason = choices[0].get("finish_reason")
+        if isinstance(finish_reason, str):
+            metadata["finish_reason"] = finish_reason
+    return metadata
+
 
 class OpenAICompatibleProvider(InferenceProvider):
     """Synchronous provider for OpenAI-compatible ``/chat/completions`` APIs."""
 
     provider_kind = "openai_compatible"
+
+    # Keep builders/parsers discoverable on the concrete provider for callers
+    # that do not need to instantiate an HTTP client.
+    build_payload_json_schema = staticmethod(build_payload_json_schema)
+    build_payload_tool_call = staticmethod(build_payload_tool_call)
+    build_payload_json_object = staticmethod(build_payload_json_object)
+    build_payload_prompt_only = staticmethod(build_payload_prompt_only)
+    parse_content_response = staticmethod(parse_content_response)
+    parse_tool_call_response = staticmethod(parse_tool_call_response)
 
     def __init__(
         self,
@@ -41,6 +318,9 @@ class OpenAICompatibleProvider(InferenceProvider):
         read_timeout_seconds: float | None = None,
         write_timeout_seconds: float | None = None,
         pool_timeout_seconds: float | None = None,
+        token_parameter: TokenParameter = "max_tokens",
+        supports_system_role: bool = True,
+        supports_seed: bool = False,
         client: httpx.Client | None = None,
     ) -> None:
         normalized_url = base_url.strip().rstrip("/")
@@ -63,6 +343,8 @@ class OpenAICompatibleProvider(InferenceProvider):
             raise ProviderConfigurationError(
                 "retry_delay_seconds is outside the supported range"
             )
+        if token_parameter not in {"max_tokens", "max_completion_tokens"}:
+            raise ProviderConfigurationError("unsupported token parameter")
         timeout_values = {
             "connect_timeout_seconds": (
                 timeout_seconds
@@ -97,6 +379,9 @@ class OpenAICompatibleProvider(InferenceProvider):
         self.max_retries = int(max_retries)
         self.max_response_bytes = int(max_response_bytes)
         self.retry_delay_seconds = float(retry_delay_seconds)
+        self.token_parameter = token_parameter
+        self.supports_system_role = bool(supports_system_role)
+        self.supports_seed = bool(supports_seed)
         self.timeout = httpx.Timeout(
             self.timeout_seconds,
             connect=timeout_values["connect_timeout_seconds"],
@@ -118,6 +403,22 @@ class OpenAICompatibleProvider(InferenceProvider):
         if self._owns_client:
             self._client.close()
 
+    def _prepare_request(self, request: ModelRequest) -> ModelRequest:
+        updates: dict[str, object] = {}
+        if request.token_parameter is None:
+            updates["token_parameter"] = self.token_parameter
+        if request.supports_system_role is None:
+            updates["supports_system_role"] = self.supports_system_role
+        if request.supports_seed is None:
+            updates["supports_seed"] = self.supports_seed
+        if request.response_format is not None:
+            format_type = request.response_format.get("type")
+            if format_type in {"json_object", "json_schema"}:
+                updates["mode"] = format_type
+        if request.mode == "auto" and request.response_format is None:
+            updates["mode"] = "json_object"
+        return request.model_copy(update=updates) if updates else request
+
     def _request(
         self,
         request: ModelRequest,
@@ -125,8 +426,13 @@ class OpenAICompatibleProvider(InferenceProvider):
         token: CancellationToken | None = None,
     ) -> ModelResponse:
         _raise_if_cancelled(token)
-        payload = request.to_openai_payload()
-        request_bytes = len(request.encoded_payload())
+        prepared = self._prepare_request(request)
+        payload = prepared.to_openai_payload()
+        request_bytes = len(
+            json.dumps(
+                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        )
         attempts = 0
         for attempt in range(1, self.max_retries + 2):
             _raise_if_cancelled(token)
@@ -171,7 +477,7 @@ class OpenAICompatibleProvider(InferenceProvider):
                 raise ProviderResponseError("provider response exceeds size limit")
             return self._parse_response(
                 response,
-                request=request,
+                request=prepared,
                 attempts=attempts,
                 request_bytes=request_bytes,
                 response_bytes=response_bytes,
@@ -204,30 +510,20 @@ class OpenAICompatibleProvider(InferenceProvider):
     ) -> ModelResponse:
         try:
             envelope = response.json()
-        except (ValueError, json.JSONDecodeError) as exc:
+        except ValueError as exc:
             raise ProviderResponseError(
                 "provider returned invalid response JSON"
             ) from exc
         if not isinstance(envelope, dict):
             raise ProviderResponseError("provider response envelope is invalid")
-        choices = envelope.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise ProviderResponseError("provider response has no choices")
-        first_choice = choices[0]
-        if not isinstance(first_choice, dict):
-            raise ProviderResponseError("provider response choice is invalid")
-        message = first_choice.get("message")
-        if not isinstance(message, dict):
-            raise ProviderResponseError("provider response message is invalid")
-        content = message.get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise ProviderResponseError("provider response content is missing")
-        try:
-            decoded = json.loads(content)
-        except (ValueError, json.JSONDecodeError) as exc:
-            raise ProviderResponseError(
-                "provider returned invalid JSON content"
-            ) from exc
+
+        if request.mode == "tool_call":
+            content = parse_tool_call_response(
+                envelope, expected_tool_name=request.tool_name or DEFAULT_TOOL_NAME
+            )
+        else:
+            content = parse_content_response(envelope)
+        decoded = decode_json_content(content)
         if not isinstance(decoded, (dict, list)):
             raise ProviderResponseError(
                 "provider JSON content must be an object or array"
@@ -237,11 +533,19 @@ class OpenAICompatibleProvider(InferenceProvider):
             response_model = request.model
         return ModelResponse(
             content=content,
+            raw_text=content,
             model=response_model,
             attempts=attempts,
             request_bytes=request_bytes,
             response_bytes=response_bytes,
             status_code=response.status_code,
+            output_contract=request.output_contract,
+            mode=request.mode,
+            tool_name=(
+                request.tool_name
+                or (DEFAULT_TOOL_NAME if request.mode == "tool_call" else None)
+            ),
+            metadata=_safe_metadata(envelope, response),
         )
 
     def complete_json(
@@ -266,4 +570,16 @@ def _raise_if_cancelled(token: CancellationToken | None) -> None:
         token.raise_if_cancelled()
 
 
-__all__ = ["OpenAICompatibleProvider"]
+__all__ = [
+    "DEFAULT_TOOL_NAME",
+    "OpenAICompatibleProvider",
+    "build_payload",
+    "build_payload_json_object",
+    "build_payload_json_schema",
+    "build_payload_prompt_only",
+    "build_payload_tool_call",
+    "decode_json_content",
+    "parse_content_response",
+    "parse_tool_call_response",
+    "strip_json_fence",
+]

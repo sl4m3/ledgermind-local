@@ -346,7 +346,14 @@ class ProcessCoreGateway(CoreGateway):
                 "raw_round": command.raw_round,
             }
             if command.resolution_context is not None:
-                request_payload["resolution_context"] = command.resolution_context
+                raw_context = dict(command.resolution_context)
+                for name in ("project", "repository", "task", "conversation"):
+                    identifier = f"{name}_id"
+                    if identifier not in raw_context and name in raw_context:
+                        raw_context[identifier] = raw_context[name]
+                    raw_context.pop(name, None)
+                raw_context.pop("context_origin", None)
+                request_payload["resolution_context"] = raw_context
             request = IngestRawRoundRequest.model_validate(request_payload)
         except (ImportError, TypeError, ValueError) as exc:
             raise DomainRejectedError("invalid_raw_round", str(exc)) from exc

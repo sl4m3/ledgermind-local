@@ -27,10 +27,12 @@ from ledgermind_local.core_gateway.supervisor import CoreSupervisor
 from ledgermind_local.inference.core_task_executor import CoreTaskExecutor
 from ledgermind_local.inference.embedding_provider import EmbeddingProvider
 from ledgermind_local.inference.gguf_vectorizer import GGUFVectorizer
+from ledgermind_local.inference.openai_vectorizer import OpenAIEmbeddingVectorizer
 from ledgermind_local.inference.profile_slots import (
     DatabaseBackedProfileResolver,
     ProfileSlot,
 )
+from ledgermind_local.inference.profile_store import DatabaseBackedCapabilityStore
 from ledgermind_local.inference.secrets import SecretStore
 from ledgermind_local.inference.structured_json_provider import StructuredJsonProvider
 from ledgermind_local.maintenance.coordinated_restore import (
@@ -59,10 +61,30 @@ def _build_runtime_vectorizer_factory(config: LocalConfig) -> Callable[[], Any]:
     """Build the technical embedding backend used by generic Core tasks."""
 
     if not config.embedding.enabled:
+
         def unavailable_vectorizer() -> Any:
             raise RuntimeError("local embedding backend is disabled")
 
         return unavailable_vectorizer
+
+    if config.embedding.provider_mode == "api":
+        if (
+            not config.embedding.endpoint
+            or not config.embedding.model
+            or not config.embedding.dimensions
+            or not config.embedding.secret_ref
+        ):
+            raise RuntimeError("API embedding configuration is incomplete")
+        token_store = SecretStore(config.inference_secrets_path)
+        token = token_store.get(config.embedding.secret_ref)
+        return lambda: OpenAIEmbeddingVectorizer(
+            endpoint=config.embedding.endpoint or "",
+            token=token,
+            model=config.embedding.model or "",
+            dimensions=config.embedding.dimensions,
+            batch_size=config.embedding.batch_size,
+            timeout_seconds=config.embedding.timeout_seconds,
+        )
 
     model_path = Path(config.embedding.model_path).expanduser()
     return lambda: GGUFVectorizer(
@@ -97,7 +119,9 @@ class _RuntimeWorkerHandle:
     state: WorkerState
 
 
-def build_process_core_gateway(*, paths: ServicePaths, config: LocalConfig) -> ProcessCoreGateway:
+def build_process_core_gateway(
+    *, paths: ServicePaths, config: LocalConfig
+) -> ProcessCoreGateway:
     """Build the process Core boundary without starting the child process."""
 
     command_path = paths.resolve_core_path(config.core_binary_path)
@@ -164,7 +188,9 @@ class LocalRuntime:
         core_gateway_factory: Callable[[], CoreGateway] | None = None,
         migration_runner: Callable[[sqlite3.Connection], object] | None = None,
         contract_migration_runner: Callable[..., object] | None = None,
-        connection_factory: Callable[[str | Path], sqlite3.Connection] = open_sqlite_connection,
+        connection_factory: Callable[
+            [str | Path], sqlite3.Connection
+        ] = open_sqlite_connection,
         lock_factory: Callable[[Path], ServiceLock] = ServiceLock,
         pid_writer: Callable[[Path, int], None] | None = None,
         pid_remover: Callable[[Path], None] | None = None,
@@ -173,9 +199,10 @@ class LocalRuntime:
         self.paths = paths
         self.config = config
         self.api_token = api_token
-        self.database_path = Path(database_path or paths.resolve_rounds_database_path(
-            config.rounds_database_path
-        )).expanduser()
+        self.database_path = Path(
+            database_path
+            or paths.resolve_rounds_database_path(config.rounds_database_path)
+        ).expanduser()
         self.core_gateway = core_gateway
         self.core_gateway_factory = core_gateway_factory or (
             lambda: build_process_core_gateway(paths=self.paths, config=self.config)
@@ -366,6 +393,51 @@ class LocalRuntime:
         batch = provider.embed((query,), profile, "retrieval_query")
         return batch.vectors[0], batch.model, batch.model_version
 
+    def embedding_profile_metadata(self, memory_space_id: str) -> dict[str, object]:
+        """Resolve the active embedding identity without exposing provider secrets."""
+
+        resolver = DatabaseBackedProfileResolver(self.database_path)
+        profile = resolver.resolve_profile(memory_space_id, ProfileSlot.EMBEDDING)
+        provider = EmbeddingProvider(
+            vectorizer_factory=_build_runtime_vectorizer_factory(self.config)
+        )
+        readiness = provider.readiness(profile)
+        if not readiness.ready:
+            raise RuntimeError(
+                f"embedding profile is not ready: {readiness.error_code or 'unknown'}"
+            )
+        return readiness.to_core_metadata()
+
+    def _embedding_profiles_by_memory_space(self) -> dict[str, dict[str, object]]:
+        """Resolve every Local embedding binding for a Core maintenance pass."""
+
+        connection = self.connection_factory(self.database_path)
+        try:
+            self.migration_runner(connection)
+            rows = connection.execute(
+                """
+                SELECT DISTINCT memory_space_id
+                FROM memory_space_model_profiles
+                WHERE profile_slot = 'embedding'
+                ORDER BY memory_space_id
+                """
+            ).fetchall()
+        finally:
+            close = getattr(connection, "close", None)
+            if callable(close):
+                close()
+        profiles: dict[str, dict[str, object]] = {}
+        for row in rows:
+            memory_space_id = str(row[0])
+            try:
+                profiles[memory_space_id] = self.embedding_profile_metadata(memory_space_id)
+            except Exception as exc:  # noqa: BLE001 - readiness remains content-free
+                logger.warning(
+                    "embedding profile identity unavailable",
+                    extra={"memory_space_id": memory_space_id, "error_code": _safe_error_code(exc)},
+                )
+        return profiles
+
     def stop(self) -> None:
         """Stop workers before Core and preserve incomplete shutdown state."""
 
@@ -525,7 +597,9 @@ class LocalRuntime:
             "incomplete": self._shutdown_incomplete,
             "timed_out_workers": list(self._shutdown_timed_out_workers),
         }
-        retention_report = worker_reports.get("retention", {"enabled": False, "ready": True})
+        retention_report = worker_reports.get(
+            "retention", {"enabled": False, "ready": True}
+        )
         isolation_report = dict(isolation)
         capabilities_payload = isolation_report.get("capabilities")
         if isinstance(capabilities_payload, dict):
@@ -554,9 +628,13 @@ class LocalRuntime:
             and bool(report["state"].get("degraded"))
             for report in worker_reports.values()
         )
-        degraded = bool(degraded_workers or self._shutdown_incomplete or not restore_ready)
+        degraded = bool(
+            degraded_workers or self._shutdown_incomplete or not restore_ready
+        )
         return {
-            "status": "ready" if full_ready else ("capture-ready" if capture_ready else "unavailable"),
+            "status": "ready"
+            if full_ready
+            else ("capture-ready" if capture_ready else "unavailable"),
             "capture_ready": capture_ready,
             "full_ready": full_ready,
             "degraded": degraded,
@@ -667,7 +745,9 @@ class LocalRuntime:
         handle.loop.request_stop()
         result = handle.loop.shutdown(handle.config.shutdown_timeout_seconds)
         if not bool(getattr(result, "stopped", False)):
-            raise RuntimeError("Core delivery worker did not stop for contract migration")
+            raise RuntimeError(
+                "Core delivery worker did not stop for contract migration"
+            )
 
     def _build_restore_service(self) -> CoordinatedRestoreService | None:
         backup_service = self._backup_service
@@ -750,7 +830,9 @@ class LocalRuntime:
             start = getattr(self.core_gateway, "start", None)
             if callable(start):
                 start()
-            require_capabilities = getattr(self.core_gateway, "require_capabilities", None)
+            require_capabilities = getattr(
+                self.core_gateway, "require_capabilities", None
+            )
             if callable(require_capabilities):
                 require_capabilities(*required)
             health = getattr(self.core_gateway, "health", None)
@@ -760,12 +842,18 @@ class LocalRuntime:
                     getattr(health_result, "healthy", health_result is True)
                 )
                 health_schema = getattr(health_result, "schema_version", None)
-                if isinstance(health_schema, int) and not isinstance(health_schema, bool):
+                if isinstance(health_schema, int) and not isinstance(
+                    health_schema, bool
+                ):
                     self._core_schema_version = health_schema
             else:
                 self._core_ready = True
-            advertised_schema = getattr(self.core_gateway, "advertised_schema_version", None)
-            if isinstance(advertised_schema, int) and not isinstance(advertised_schema, bool):
+            advertised_schema = getattr(
+                self.core_gateway, "advertised_schema_version", None
+            )
+            if isinstance(advertised_schema, int) and not isinstance(
+                advertised_schema, bool
+            ):
                 self._core_schema_version = advertised_schema
             if not self._core_ready:
                 raise RuntimeError("Core health check failed")
@@ -798,9 +886,11 @@ class LocalRuntime:
             self._component_errors["control"] = "unsupported"
         else:
             try:
+                embedding_profiles = self._embedding_profiles_by_memory_space()
                 result = run_control(
                     RunControlMaintenanceCommand(
-                        f"local-control:{os.getpid()}:{uuid.uuid4()}"
+                        f"local-control:{os.getpid()}:{uuid.uuid4()}",
+                        embedding_profiles=embedding_profiles,
                     )
                 )
                 self._control_maintenance = {
@@ -875,6 +965,7 @@ class LocalRuntime:
                 retry_delay_seconds=self.config.worker_retry_delay_seconds,
                 lease_seconds=self.config.worker_lease_seconds,
                 state=WorkerState(name),
+                embedding_profile_metadata_factory=self.embedding_profile_metadata,
             )
         if name == "core_model_tasks":
             secret_store = SecretStore(
@@ -888,9 +979,14 @@ class LocalRuntime:
                     json_provider=StructuredJsonProvider(
                         profile_resolver=profile_resolver,
                         secret_store=secret_store,
+                        capability_store=DatabaseBackedCapabilityStore(
+                            str(self.database_path)
+                        ),
                     ),
                     embedding_provider=EmbeddingProvider(
-                        vectorizer_factory=_build_runtime_vectorizer_factory(self.config)
+                        vectorizer_factory=_build_runtime_vectorizer_factory(
+                            self.config
+                        )
                     ),
                     profile_resolver=profile_resolver,
                     generate_json_timeout_seconds=300,
@@ -1084,6 +1180,8 @@ def _remove_runtime_pid(pid_file: Path) -> None:
     except (FileNotFoundError, ValueError, OSError):
         return
     pid_file.unlink(missing_ok=True)
+
+
 def bootstrap_local_service(
     *,
     home: str | Path = "~/.ledgermind/local",

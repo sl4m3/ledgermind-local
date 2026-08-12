@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import time
 
+from ledgermind_local.embedding_purpose import EmbeddingPurpose
 from ledgermind_local.inference.cancellation import CancellationToken
 from ledgermind_local.inference.core_task_executor import (
     CoreTaskExecutor,
@@ -216,6 +217,8 @@ def _json_task(
 def _embed_task(
     *,
     texts: tuple[str, ...] = ("hello world", "second text"),
+    purpose: EmbeddingPurpose = "knowledge",
+    subject_refs: tuple[str, ...] | None = None,
     dimensions: int | None = 3,
     task_id: str = "task-2",
 ) -> GenericExecutionTask:
@@ -226,7 +229,8 @@ def _embed_task(
         profile_slot=ProfileSlot.EMBEDDING,
         embedding_request=EmbeddingRequestSpec(
             texts=texts,
-            purpose="knowledge",
+            purpose=purpose,
+            subject_refs=subject_refs,
             dimensions=dimensions,
         ),
         lease={"memory_space_id": "space"},
@@ -272,7 +276,8 @@ def test_embedding_task_completes_with_vectors_and_audit(tmp_path) -> None:
     assert len(result.embedding_result.vectors) == 2
     assert result.embedding_result.dimensions == 3
     assert result.embedding_result.model == "embed-model"
-    assert result.embedding_result.model_version == "m1"
+    assert result.embedding_result.model_version.startswith("sha256:")
+    assert len(result.embedding_result.model_version) == len("sha256:") + 64
     audit = result.egress_audit
     assert audit.task_kind == "embed_texts"
     assert audit.profile_id == "embedding-default"
@@ -280,6 +285,26 @@ def test_embedding_task_completes_with_vectors_and_audit(tmp_path) -> None:
     assert audit.status == "completed"
     assert SECRET_VALUE not in audit.model_dump_json()
     assert "hello world" not in audit.model_dump_json()
+
+
+def test_subject_query_embedding_task_is_accepted_without_domain_interpretation(
+    tmp_path,
+) -> None:
+    executor = _executor(tmp_path)
+
+    result = executor.execute(
+        _embed_task(
+            texts=("language LocaleProvider",),
+            purpose="subject_query",
+            subject_refs=("subject:language",),
+            dimensions=4,
+            task_id="subject-query-task",
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.embedding_result is not None
+    assert result.embedding_result.purpose == "subject_query"
 
 
 def test_unknown_task_kind_is_reported_without_crashing(tmp_path) -> None:
