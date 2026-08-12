@@ -2,6 +2,7 @@
 
 from .base import (
     ChatMessage,
+    GenerationTransport,
     InferenceProvider,
     ModelRequest,
     ModelResponse,
@@ -12,6 +13,8 @@ from .base import (
     ProviderTimeoutError,
     ProviderTransportError,
     TransientProviderError,
+    normalize_error,
+    normalize_usage,
 )
 from .openai_compatible import (
     OpenAICompatibleProvider,
@@ -22,10 +25,13 @@ from .openai_compatible import (
     parse_content_response,
     parse_tool_call_response,
 )
+from .google_boundary import GoogleGenerationTransport
 
 __all__ = [
     "ChatMessage",
+    "GenerationTransport",
     "InferenceProvider",
+    "GoogleGenerationTransport",
     "ModelRequest",
     "ModelResponse",
     "OpenAICompatibleProvider",
@@ -36,6 +42,8 @@ __all__ = [
     "ProviderTimeoutError",
     "ProviderTransportError",
     "TransientProviderError",
+    "normalize_error",
+    "normalize_usage",
     "build_payload_json_object",
     "build_payload_json_schema",
     "build_payload_prompt_only",

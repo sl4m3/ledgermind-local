@@ -23,6 +23,7 @@ class OpenAIEmbeddingVectorizer(Vectorizer):
         dimensions: int,
         batch_size: int,
         timeout_seconds: float,
+        max_concurrency: int = 1,
     ) -> None:
         self._provider = OpenAICompatibleEmbeddingProvider(
             endpoint=endpoint,
@@ -30,6 +31,7 @@ class OpenAIEmbeddingVectorizer(Vectorizer):
             model=model,
             dimensions=dimensions,
             batch_size=batch_size,
+            max_concurrency=max_concurrency,
             timeout_seconds=timeout_seconds,
         )
         self._model = model

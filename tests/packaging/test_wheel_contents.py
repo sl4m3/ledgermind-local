@@ -37,6 +37,8 @@ _REQUIRED_RUNTIME_FILES = {
     "ledgermind_local.persistence/rounds_migrations/0006_object_facet_core_delivery.sql",
     "ledgermind_local.persistence/rounds_migrations/0007_contract_naming.sql",
     "ledgermind_local.persistence/rounds_migrations/0008_provider_capabilities.sql",
+    "ledgermind_local.persistence/rounds_migrations/0009_provider_capability_cache.sql",
+    "ledgermind_local.persistence/rounds_migrations/0010_embedding_vector_cache.sql",
     "ledgermind_local.persistence/contract_migration.py",
     "ledgermind_local.core_gateway/contracts.py",
     "ledgermind_local.core_gateway/process.py",

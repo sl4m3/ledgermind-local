@@ -71,7 +71,7 @@ def test_migration_and_capability_persistence_are_restart_safe(tmp_path) -> None
         } <= columns
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone()[0] == 8
+        ).fetchone()[0] == 10
     finally:
         connection.close()
 

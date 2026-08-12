@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Literal, Protocol
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
@@ -147,6 +147,62 @@ class ModelResponse(BaseModel):
         return self.raw_text or self.content
 
 
+def normalize_usage(response: ModelResponse | Mapping[str, object]) -> dict[str, object]:
+    """Normalize provider usage without assigning provider-specific costs.
+
+    Providers may call the same counters ``prompt_tokens``/``completion_tokens``
+    or ``input_tokens``/``output_tokens``.  Local exposes only token counts and
+    marks absent counters explicitly so accounting never turns an unknown value
+    into zero.
+    """
+
+    if isinstance(response, ModelResponse):
+        metadata: Mapping[str, object] = response.metadata
+    else:
+        metadata = response
+    raw = metadata.get("usage")
+    usage = raw if isinstance(raw, Mapping) else metadata
+    aliases = {
+        "input_tokens": ("input_tokens", "prompt_tokens", "input_token_count"),
+        "output_tokens": (
+            "output_tokens",
+            "completion_tokens",
+            "output_token_count",
+        ),
+        "total_tokens": ("total_tokens", "total_token_count"),
+        "cached_input_tokens": ("cached_input_tokens", "cache_read_input_tokens"),
+    }
+    normalized: dict[str, object] = {}
+    for target, names in aliases.items():
+        for name in names:
+            value = usage.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                normalized[target] = value
+                break
+    normalized["usage_unknown"] = not any(
+        key in normalized for key in ("input_tokens", "output_tokens", "total_tokens")
+    )
+    return normalized
+
+
+def normalize_error(error: BaseException) -> dict[str, object]:
+    """Return content-free, transport-neutral error metadata."""
+
+    code = getattr(error, "code", None)
+    if not isinstance(code, str) or not code.strip():
+        code = "provider_error"
+    status_code = getattr(error, "status_code", None)
+    return {
+        "code": code,
+        "retryable": bool(
+            isinstance(error, (ProviderTimeoutError, ProviderTransportError, TransientProviderError))
+            or status_code == 429
+            or isinstance(status_code, int) and 500 <= status_code <= 599
+        ),
+        "status_code": status_code if isinstance(status_code, int) else None,
+    }
+
+
 class ProviderError(RuntimeError):
     """Base error with safe, non-payload diagnostics."""
 
@@ -201,6 +257,32 @@ class InferenceProvider(Protocol):
     ) -> ModelResponse: ...
 
 
+class GenerationTransport(Protocol):
+    """Provider-neutral Local transport contract.
+
+    Core-facing code can depend on this interface without knowing endpoint,
+    vendor, model, or response-format details. Concrete transports may still
+    expose ``complete_json`` for the legacy Local executor adapter.
+    """
+
+    provider_kind: str
+
+    def execute_structured(
+        self,
+        task: ModelRequest,
+        profile: object,
+        capabilities: object | None = None,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> ModelResponse: ...
+
+    def probe_capabilities(self, profile: object) -> object: ...
+
+    def normalize_usage(self, response: ModelResponse | Mapping[str, object]) -> dict[str, object]: ...
+
+    def normalize_error(self, error: BaseException) -> dict[str, object]: ...
+
+
 def messages_as_dicts(messages: Iterable[ChatMessage]) -> list[dict[str, str]]:
     """Return a serialization helper without exposing Pydantic internals."""
 
@@ -210,6 +292,7 @@ def messages_as_dicts(messages: Iterable[ChatMessage]) -> list[dict[str, str]]:
 __all__ = [
     "ChatMessage",
     "InferenceProvider",
+    "GenerationTransport",
     "ModelRequest",
     "ModelResponse",
     "ProviderAuthenticationError",
@@ -222,4 +305,6 @@ __all__ = [
     "StructuredOutputMode",
     "TokenParameter",
     "TransientProviderError",
+    "normalize_error",
+    "normalize_usage",
 ]

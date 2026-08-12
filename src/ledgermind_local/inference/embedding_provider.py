@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
+import sqlite3
+import threading
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,6 +36,194 @@ class EmbeddingBatch(BaseModel):
     model_version: str = Field(min_length=1)
     dimensions: int = Field(gt=0)
     purpose: str = Field(min_length=1)
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingBatchRequest:
+    """One semantic-free member of a generic embedding batch."""
+
+    texts: tuple[str, ...]
+    profile: InferenceProfile
+    purpose: EmbeddingPurpose
+    dimensions: int | None = None
+    cache_keys: tuple[str, ...] | None = None
+    cache_namespace: str = ""
+    profile_fingerprint: str | None = None
+    config_fingerprint: str | None = None
+    privacy_class: str = "default"
+    deadline: str | None = None
+
+
+class EmbeddingVectorCache:
+    """Small content-addressed cache shared by compatible embedding tasks."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._vectors: dict[str, tuple[float, ...]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def digest(
+        *,
+        profile_fingerprint: str,
+        namespace: str,
+        content: str,
+    ) -> str:
+        material = "\x1f".join((profile_fingerprint, namespace, content))
+        return "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def get(self, key: str) -> tuple[float, ...] | None:
+        with self._lock:
+            value = self._vectors.get(key)
+            if value is None:
+                self.misses += 1
+                return None
+            self.hits += 1
+            return value
+
+    def put(
+        self,
+        key: str,
+        vector: Sequence[float],
+        *,
+        profile_fingerprint: str = "",
+        namespace: str = "",
+        content_digest: str | None = None,
+    ) -> None:
+        del profile_fingerprint, namespace, content_digest
+        with self._lock:
+            self._vectors[key] = tuple(float(value) for value in vector)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._vectors.clear()
+            self.hits = 0
+            self.misses = 0
+
+    @property
+    def size(self) -> int:
+        with self._lock:
+            return len(self._vectors)
+
+
+class PersistentEmbeddingCache(EmbeddingVectorCache):
+    """SQLite-backed immutable embedding cache owned by Local."""
+
+    def __init__(self, database_path: str | Path) -> None:
+        super().__init__()
+        self._database_path = Path(database_path)
+        self._database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._ensure_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._database_path, timeout=30.0)
+        connection.execute("PRAGMA busy_timeout = 30000")
+        return connection
+
+    def _ensure_schema(self) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS embedding_vector_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    profile_fingerprint TEXT NOT NULL,
+                    cache_namespace TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    dimensions INTEGER NOT NULL CHECK (dimensions > 0),
+                    vector_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS ix_embedding_vector_cache_profile
+                ON embedding_vector_cache (profile_fingerprint, cache_namespace, content_digest)
+                """
+            )
+
+    def get(self, key: str) -> tuple[float, ...] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT vector_json FROM embedding_vector_cache WHERE cache_key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                self.misses += 1
+                return None
+            try:
+                values = json.loads(str(row[0]))
+                vector = tuple(float(value) for value in values)
+                if not vector or not all(math.isfinite(value) for value in vector):
+                    raise ValueError("invalid cached vector")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                connection.execute(
+                    "DELETE FROM embedding_vector_cache WHERE cache_key = ?",
+                    (key,),
+                )
+                self.misses += 1
+                return None
+            self.hits += 1
+            return vector
+
+    def put(
+        self,
+        key: str,
+        vector: Sequence[float],
+        *,
+        profile_fingerprint: str = "",
+        namespace: str = "",
+        content_digest: str | None = None,
+    ) -> None:
+        values = tuple(float(value) for value in vector)
+        if not values or not all(math.isfinite(value) for value in values):
+            raise ValueError("embedding cache vectors must be finite and non-empty")
+        payload = json.dumps(list(values), allow_nan=False, separators=(",", ":"))
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO embedding_vector_cache (
+                    cache_key, profile_fingerprint, cache_namespace,
+                    content_digest, dimensions, vector_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    profile_fingerprint = excluded.profile_fingerprint,
+                    cache_namespace = excluded.cache_namespace,
+                    content_digest = excluded.content_digest,
+                    dimensions = excluded.dimensions,
+                    vector_json = excluded.vector_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    key,
+                    profile_fingerprint,
+                    namespace,
+                    content_digest or key,
+                    len(values),
+                    payload,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def clear(self) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM embedding_vector_cache")
+            self.hits = 0
+            self.misses = 0
+
+    @property
+    def size(self) -> int:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM embedding_vector_cache"
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
+
+
+# The shorter name is useful to callers that treat this as a Local-owned
+# embedding cache rather than a vector implementation detail.
+EmbeddingCache = EmbeddingVectorCache
 
 
 class EmbeddingError(RuntimeError):
@@ -71,6 +266,7 @@ class EmbeddingProvider:
         max_texts: int = 64,
         max_text_chars: int = 8_000,
         identity_config: Mapping[str, object] | None = None,
+        cache: EmbeddingVectorCache | None = None,
     ) -> None:
         if max_texts < 1:
             raise ValueError("max_texts must be positive")
@@ -80,6 +276,7 @@ class EmbeddingProvider:
         self.max_texts = max_texts
         self.max_text_chars = max_text_chars
         self._identity_config = dict(identity_config or {})
+        self.cache = cache
 
     def describe_profile(self, profile: InferenceProfile) -> EmbeddingProfileIdentity:
         """Resolve opaque embedding identity without sending any text."""
@@ -135,46 +332,137 @@ class EmbeddingProvider:
         cancellation_token: CancellationToken | None = None,
     ) -> EmbeddingBatch:
         """Embed ``texts`` through the local backend and validate the batch."""
+        return self.embed_many(
+            (
+                EmbeddingBatchRequest(
+                    texts=tuple(texts),
+                    profile=profile,
+                    purpose=purpose,
+                ),
+            ),
+            cancellation_token=cancellation_token,
+        )[0]
+
+    def embed_many(
+        self,
+        requests: Sequence[EmbeddingBatchRequest],
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> tuple[EmbeddingBatch, ...]:
+        """Embed compatible task members in one provider batch.
+
+        Compatibility is technical: profile identity, model endpoint,
+        requested dimensions and cache namespace must agree. ``purpose`` is
+        retained only in the returned metadata; it never changes grouping.
+        """
         token = cancellation_token or CancellationToken()
         token.raise_if_cancelled()
-        if profile is None:
-            raise EmbeddingRequestError("embedding profile is required")
-        try:
-            validate_embedding_purpose(purpose)
-        except ValueError as exc:
-            raise EmbeddingRequestError(str(exc)) from exc
-        if not texts:
+        if not requests:
             raise EmbeddingRequestError("embedding batch must not be empty")
-        if len(texts) > self.max_texts:
+        first = requests[0]
+        if first.profile is None:
+            raise EmbeddingRequestError("embedding profile is required")
+        for request in requests:
+            if request.profile is None:
+                raise EmbeddingRequestError("embedding profile is required")
+            try:
+                validate_embedding_purpose(request.purpose)
+            except ValueError as exc:
+                raise EmbeddingRequestError(str(exc)) from exc
+            if not request.texts:
+                raise EmbeddingRequestError("embedding batch must not be empty")
+            if request.cache_keys is not None and len(request.cache_keys) != len(request.texts):
+                raise EmbeddingRequestError("embedding cache_keys must match texts")
+            if (
+                request.profile.model != first.profile.model
+                or request.profile.base_url != first.profile.base_url
+                or request.profile.provider_kind != first.profile.provider_kind
+                or request.dimensions != first.dimensions
+                or request.cache_namespace != first.cache_namespace
+                or request.profile_fingerprint != first.profile_fingerprint
+                or request.config_fingerprint != first.config_fingerprint
+                or request.privacy_class != first.privacy_class
+                or request.deadline != first.deadline
+            ):
+                raise EmbeddingRequestError("embedding tasks are not technically compatible")
+            for text in request.texts:
+                if len(text) > self.max_text_chars:
+                    raise EmbeddingTextTooLargeError(
+                        f"embedding text of {len(text)} characters exceeds "
+                        f"limit {self.max_text_chars}"
+                    )
+
+        all_texts = tuple(text for request in requests for text in request.texts)
+        if len(all_texts) > self.max_texts:
             raise EmbeddingBatchTooLargeError(
-                f"embedding batch of {len(texts)} texts exceeds limit {self.max_texts}"
+                f"embedding batch of {len(all_texts)} texts exceeds limit {self.max_texts}"
             )
-        for text in texts:
-            if len(text) > self.max_text_chars:
-                raise EmbeddingTextTooLargeError(
-                    f"embedding text of {len(text)} characters exceeds "
-                    f"limit {self.max_text_chars}"
-                )
 
         vectorizer = self._vectorizer_factory()
+        identity = self._profile_identity(
+            first.profile,
+            vectorizer,
+            self._vectorizer_dimension(vectorizer),
+        )
+        keys: list[str | None] = []
+        cache_metadata: list[tuple[str, str]] = []
+        cached_vectors: list[tuple[float, ...] | None] = []
+        for request in requests:
+            for index, text in enumerate(request.texts):
+                explicit = request.cache_keys[index] if request.cache_keys is not None else ""
+                namespace = request.cache_namespace or request.purpose
+                key = EmbeddingVectorCache.digest(
+                    profile_fingerprint=identity.profile_fingerprint,
+                    namespace=namespace,
+                    content=explicit or text,
+                )
+                keys.append(key)
+                cache_metadata.append((namespace, explicit or text))
+                cached_vectors.append(self.cache.get(key) if self.cache is not None else None)
+        missing_indices = [index for index, vector in enumerate(cached_vectors) if vector is None]
+
         try:
             token.raise_if_cancelled()
-            raw_vectors = list(vectorizer.encode(texts))
-            if len(raw_vectors) != len(texts):
+            if missing_indices:
+                raw_missing = list(vectorizer.encode(tuple(all_texts[index] for index in missing_indices)))
+            else:
+                raw_missing = []
+            if len(raw_missing) != len(missing_indices):
                 raise EmbeddingModelError("embedding backend returned a partial result")
-            vectors = self._validated_vectors(vectorizer, raw_vectors)
-            identity = self._profile_identity(
-                profile,
-                vectorizer,
-                len(vectors[0]) if vectors else self._vectorizer_dimension(vectorizer),
-            )
-            return EmbeddingBatch(
-                vectors=tuple(vectors),
-                model=profile.model,
-                model_version=identity.profile_fingerprint,
-                dimensions=len(vectors[0]) if vectors else 0,
-                purpose=purpose,
-            )
+            vectors = [
+                list(vector) if vector is not None else list(raw_missing.pop(0))
+                for vector in cached_vectors
+            ]
+            validated = self._validated_vectors(vectorizer, vectors)
+            if self.cache is not None:
+                for key, vector, original, metadata in zip(
+                    keys, validated, cached_vectors, cache_metadata, strict=True
+                ):
+                    if original is None and key is not None:
+                        namespace, content_digest = metadata
+                        self.cache.put(
+                            key,
+                            vector,
+                            profile_fingerprint=identity.profile_fingerprint,
+                            namespace=namespace,
+                            content_digest=content_digest,
+                        )
+            dimension = len(validated[0]) if validated else identity.dimensions or 0
+            result: list[EmbeddingBatch] = []
+            offset = 0
+            for request in requests:
+                size = len(request.texts)
+                result.append(
+                    EmbeddingBatch(
+                        vectors=tuple(validated[offset : offset + size]),
+                        model=first.profile.model,
+                        model_version=identity.profile_fingerprint,
+                        dimensions=dimension,
+                        purpose=request.purpose,
+                    )
+                )
+                offset += size
+            return tuple(result)
         finally:
             close = getattr(vectorizer, "close", None)
             if callable(close):
@@ -245,6 +533,8 @@ class EmbeddingProvider:
 
 __all__ = [
     "EmbeddingBatch",
+    "EmbeddingBatchRequest",
+    "EmbeddingCache",
     "EmbeddingBatchTooLargeError",
     "EmbeddingDimensionMismatchError",
     "EmbeddingError",
@@ -253,6 +543,8 @@ __all__ = [
     "EmbeddingProfileIdentity",
     "EmbeddingProfileReadiness",
     "EmbeddingProvider",
+    "PersistentEmbeddingCache",
+    "EmbeddingVectorCache",
     "EmbeddingPurpose",
     "EmbeddingRequestError",
     "EmbeddingTextTooLargeError",

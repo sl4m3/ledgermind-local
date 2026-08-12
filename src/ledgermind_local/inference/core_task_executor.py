@@ -12,7 +12,11 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from ..embedding_purpose import EmbeddingPurpose
 from .cancellation import CancellationToken
-from .embedding_provider import EmbeddingBatch, EmbeddingProvider
+from .embedding_provider import (
+    EmbeddingBatch,
+    EmbeddingBatchRequest,
+    EmbeddingProvider,
+)
 from .profile_slots import ProfileResolver, ProfileSlot
 from .profiles import StructuredOutputMode
 from .providers.base import ChatMessage, ProviderCancelledError, ProviderTimeoutError
@@ -57,6 +61,12 @@ class EmbeddingRequestSpec(BaseModel):
     purpose: EmbeddingPurpose
     subject_refs: tuple[str, ...] | None = Field(default=None, max_length=512)
     dimensions: int | None = Field(default=None, gt=0, le=100_000)
+    profile_fingerprint: str | None = Field(default=None, max_length=200)
+    config_fingerprint: str | None = Field(default=None, max_length=200)
+    privacy_class: str = Field(default="default", min_length=1, max_length=100)
+    cache_namespace: str = Field(default="", max_length=200)
+    cache_keys: tuple[str, ...] | None = Field(default=None, max_length=512)
+    deadline: str | None = Field(default=None, max_length=64)
 
 
 class GenericExecutionTask(BaseModel):
@@ -93,6 +103,10 @@ class EgressAuditRecord(BaseModel):
     input_bytes: int = Field(ge=0)
     output_bytes: int = Field(ge=0)
     status: str = Field(min_length=1)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    usage_unknown: bool = True
 
 
 class GenericExecutionResult(BaseModel):
@@ -184,6 +198,25 @@ class CoreTaskExecutor:
             return self._execute_embed_texts(task, cancellation_token)
         return self._unknown_kind_result(task)
 
+    def execute_batch(
+        self,
+        tasks: tuple[GenericExecutionTask, ...] | list[GenericExecutionTask],
+        cancellation_token: CancellationToken | None = None,
+    ) -> tuple[GenericExecutionResult, ...]:
+        """Execute a compatible task batch without interpreting its operation.
+
+        Only the technical ``embed_texts`` shape is batched. Generation stays
+        one task per call because its structured contract and output cannot be
+        merged safely by Local.
+        """
+
+        normalized = tuple(tasks)
+        if not normalized:
+            return ()
+        if all(task.task_kind == "embed_texts" for task in normalized):
+            return self._execute_embed_texts_batch(normalized, cancellation_token)
+        return tuple(self.execute(task, cancellation_token) for task in normalized)
+
     def _execute_generate_json(
         self, task: GenericExecutionTask, token: CancellationToken | None
     ) -> GenericExecutionResult:
@@ -224,6 +257,10 @@ class CoreTaskExecutor:
             input_bytes=input_bytes,
             output_bytes=result.response_bytes,
             status="completed",
+            input_tokens=_usage_int(result.normalized_usage, "input_tokens"),
+            output_tokens=_usage_int(result.normalized_usage, "output_tokens"),
+            total_tokens=_usage_int(result.normalized_usage, "total_tokens"),
+            usage_unknown=bool(result.normalized_usage.get("usage_unknown", True)),
         )
         return GenericExecutionResult(
             task_id=task.task_id,
@@ -237,7 +274,14 @@ class CoreTaskExecutor:
             structured_output_mode=result.structured_output_mode,
             contract_digest=result.contract_digest,
             tool_name=result.tool_name,
-            metadata=result.metadata,
+            metadata={
+                **result.metadata,
+                "parsed_json": result.parsed_json,
+                "raw_text": result.raw_text,
+                "provider_request_id": result.provider_request_id,
+                "finish_reason": result.finish_reason,
+                "transport_error": None,
+            },
         )
 
     def _execute_embed_texts(
@@ -255,15 +299,26 @@ class CoreTaskExecutor:
                 _memory_space_id(task), task.profile_slot
             )
             batch = self._run_bounded(
-                lambda: self._embedding_provider.embed(
-                    spec.texts,
-                    profile,
-                    spec.purpose,
+                lambda: self._embedding_provider.embed_many(
+                    (
+                        EmbeddingBatchRequest(
+                            texts=spec.texts,
+                            profile=profile,
+                            purpose=spec.purpose,
+                            dimensions=spec.dimensions,
+                            cache_keys=spec.cache_keys,
+                            cache_namespace=(spec.cache_namespace or spec.privacy_class),
+                            profile_fingerprint=spec.profile_fingerprint,
+                            config_fingerprint=spec.config_fingerprint,
+                            privacy_class=spec.privacy_class,
+                            deadline=spec.deadline,
+                        ),
+                    ),
                     cancellation_token=token,
                 ),
                 self.embed_texts_timeout_seconds,
                 token,
-            )
+            )[0]
         except Exception as exc:  # noqa: BLE001 - classify any provider failure
             return self._failure_result(
                 task,
@@ -288,6 +343,7 @@ class CoreTaskExecutor:
             input_bytes=input_bytes,
             output_bytes=_embedding_bytes(batch),
             status="completed",
+            usage_unknown=True,
         )
         return GenericExecutionResult(
             task_id=task.task_id,
@@ -298,6 +354,126 @@ class CoreTaskExecutor:
             embedding_result=batch,
             egress_audit=audit,
         )
+
+    def _execute_embed_texts_batch(
+        self,
+        tasks: tuple[GenericExecutionTask, ...],
+        token: CancellationToken | None,
+    ) -> tuple[GenericExecutionResult, ...]:
+        specs = [task.embedding_request for task in tasks]
+        if any(spec is None for spec in specs):
+            return tuple(
+                self._failed_result(task, error_code="invalid_request", input_bytes=0)
+                for task in tasks
+            )
+        typed_specs = cast(list[EmbeddingRequestSpec], specs)
+        profiles = []
+        try:
+            for task in tasks:
+                profiles.append(
+                    self._profile_resolver.resolve_profile(
+                        _memory_space_id(task), task.profile_slot
+                    )
+                )
+            first_profile = profiles[0]
+            if any(
+                (
+                    profile.profile_id,
+                    profile.model,
+                    profile.base_url,
+                    profile.provider_kind,
+                    spec.profile_fingerprint,
+                    spec.config_fingerprint,
+                    spec.dimensions,
+                    spec.privacy_class,
+                    spec.cache_namespace,
+                    spec.deadline,
+                )
+                != (
+                    first_profile.profile_id,
+                    first_profile.model,
+                    first_profile.base_url,
+                    first_profile.provider_kind,
+                    typed_specs[0].profile_fingerprint,
+                    typed_specs[0].config_fingerprint,
+                    typed_specs[0].dimensions,
+                    typed_specs[0].privacy_class,
+                    typed_specs[0].cache_namespace,
+                    typed_specs[0].deadline,
+                )
+                for profile, spec in zip(profiles[1:], typed_specs[1:], strict=True)
+            ):
+                return tuple(self.execute(task, token) for task in tasks)
+            requests = tuple(
+                EmbeddingBatchRequest(
+                    texts=spec.texts,
+                    profile=profile,
+                    purpose=spec.purpose,
+                    dimensions=spec.dimensions,
+                    cache_keys=spec.cache_keys,
+                    cache_namespace=(spec.cache_namespace or spec.privacy_class),
+                    profile_fingerprint=spec.profile_fingerprint,
+                    config_fingerprint=spec.config_fingerprint,
+                    privacy_class=spec.privacy_class,
+                    deadline=spec.deadline,
+                )
+                for spec, profile in zip(typed_specs, profiles, strict=True)
+            )
+            batches = self._run_bounded(
+                lambda: self._embedding_provider.embed_many(
+                    requests,
+                    cancellation_token=token,
+                ),
+                self.embed_texts_timeout_seconds,
+                token,
+            )
+            results: list[GenericExecutionResult] = []
+            for task, spec, profile, batch in zip(
+                tasks, typed_specs, profiles, batches, strict=True
+            ):
+                input_bytes = sum(len(text.encode("utf-8")) for text in spec.texts)
+                if spec.dimensions is not None and batch.dimensions != spec.dimensions:
+                    results.append(
+                        self._failed_result(
+                            task,
+                            error_code="embedding_dimension_mismatch",
+                            input_bytes=input_bytes,
+                            profile_id=profile.profile_id,
+                        )
+                    )
+                    continue
+                results.append(
+                    GenericExecutionResult(
+                        task_id=task.task_id,
+                        task_kind=task.task_kind,
+                        operation=task.operation,
+                        operation_input=task.operation_input,
+                        status="completed",
+                        embedding_result=batch,
+                        egress_audit=EgressAuditRecord(
+                            task_id=task.task_id,
+                            task_kind=task.task_kind,
+                            profile_id=profile.profile_id,
+                            provider="local",
+                            model=batch.model,
+                            input_bytes=input_bytes,
+                            output_bytes=_embedding_bytes(batch),
+                            status="completed",
+                            usage_unknown=True,
+                        ),
+                    )
+                )
+            return tuple(results)
+        except Exception as exc:  # noqa: BLE001 - preserve one terminal result per task
+            return tuple(
+                self._failure_result(
+                    task,
+                    exc,
+                    input_bytes=sum(len(text.encode("utf-8")) for text in spec.texts),
+                    profile_id=(profile.profile_id if profile is not None else None),
+                )
+                for task, spec, profile in zip(tasks, typed_specs, profiles or [None] * len(tasks), strict=True)
+            )
 
     def _run_bounded(
         self,
@@ -408,6 +584,7 @@ class CoreTaskExecutor:
             status=status,
             egress_audit=audit,
             error_code=error_code,
+            metadata={"error_category": _error_category(error_code)},
         )
 
     @staticmethod
@@ -423,6 +600,40 @@ class CoreTaskExecutor:
 def _memory_space_id(task: GenericExecutionTask) -> str:
     value = task.lease.get("memory_space_id") if task.lease else None
     return value if isinstance(value, str) else ""
+
+
+def _error_category(error_code: str) -> str:
+    if error_code in {
+        "provider_timeout",
+        "provider_transport_error",
+        "provider_unavailable",
+        "transport_error",
+        "transient_provider_error",
+        "timeout",
+    }:
+        return "transport_failure"
+    if error_code in {"invalid_json_response", "invalid_provider_response"}:
+        return "json_parse_failure"
+    if error_code in {"invalid_model_output", "schema_shape_failure"}:
+        return "schema_shape_failure"
+    if error_code in {
+        "semantic_validation_failure",
+        "semantic_output_invalid",
+        "semantic_repair_rejected",
+    }:
+        return "semantic_validation_failure"
+    if error_code in {"language_fidelity_failure", "language_mismatch"}:
+        return "language_fidelity_failure"
+    if error_code in {
+        "grounding_failure",
+        "claim_grounding_failure",
+        "unknown_anchor_ref",
+        "unknown_candidate_id",
+    }:
+        return "grounding_failure"
+    if error_code in {"authentication_error", "configuration_error", "secret_missing"}:
+        return "transport_failure"
+    return "transport_failure" if error_code.startswith("provider_") else "schema_shape_failure"
 
 
 def _model_request_bytes(spec: ModelRequestSpec) -> int:
@@ -454,11 +665,17 @@ def _resolved_profile_id(exc: Exception) -> str | None:
     return None
 
 
+def _usage_int(usage: dict[str, object], key: str) -> int | None:
+    value = usage.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 __all__ = [
     "CoreExecutorError",
     "CoreTaskExecutor",
     "EgressAuditRecord",
     "EmbeddingPurpose",
+    "EmbeddingBatchRequest",
     "EmbeddingRequestSpec",
     "ExecutionCancelledError",
     "ExecutionStatus",

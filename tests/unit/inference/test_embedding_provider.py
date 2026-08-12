@@ -13,6 +13,7 @@ from ledgermind_local.inference.embedding_provider import (
     EmbeddingProvider,
     EmbeddingRequestError,
     EmbeddingTextTooLargeError,
+    PersistentEmbeddingCache,
 )
 from ledgermind_local.inference.profiles import InferenceProfile
 from ledgermind_local.inference.providers.base import ProviderCancelledError
@@ -194,3 +195,42 @@ def test_embed_validates_constructor_limits() -> None:
         _provider(_FakeVectorizer(dimension=2, fingerprint="m1"), max_texts=0)
     with pytest.raises(ValueError):
         _provider(_FakeVectorizer(dimension=2, fingerprint="m1"), max_text_chars=0)
+
+
+def test_persistent_embedding_cache_survives_restart_and_is_profile_scoped(tmp_path) -> None:
+    class _CountingVectorizer(_FakeVectorizer):
+        def __init__(self) -> None:
+            super().__init__(dimension=2, fingerprint="m1")
+            self.calls = 0
+
+        def encode(self, texts: Sequence[str]) -> list[list[float]]:
+            self.calls += 1
+            return super().encode(texts)
+
+    database = tmp_path / "rounds.db"
+    first_vectorizer = _CountingVectorizer()
+    first = EmbeddingProvider(
+        vectorizer_factory=lambda: first_vectorizer,
+        cache=PersistentEmbeddingCache(database),
+    )
+    first.embed(["stable facet text"], _profile(), "facet_catalog")
+    assert first_vectorizer.calls == 1
+
+    restarted_vectorizer = _CountingVectorizer()
+    restarted = EmbeddingProvider(
+        vectorizer_factory=lambda: restarted_vectorizer,
+        cache=PersistentEmbeddingCache(database),
+    )
+    restarted.embed(["stable facet text"], _profile(), "facet_catalog")
+    assert restarted_vectorizer.calls == 0
+    assert restarted.cache is not None
+    assert restarted.cache.hits == 1
+
+    other_profile = _profile().model_copy(update={"model": "other-embed-model"})
+    isolated_vectorizer = _CountingVectorizer()
+    isolated = EmbeddingProvider(
+        vectorizer_factory=lambda: isolated_vectorizer,
+        cache=PersistentEmbeddingCache(database),
+    )
+    isolated.embed(["stable facet text"], other_profile, "facet_catalog")
+    assert isolated_vectorizer.calls == 1

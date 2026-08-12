@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from datetime import datetime, timezone
+import json
 from typing import cast
 
 from .profiles import (
@@ -12,6 +13,7 @@ from .profiles import (
     ProbeStatus,
     ProviderCapabilities,
     StructuredOutputMode,
+    generation_profile_fingerprint,
 )
 
 
@@ -50,17 +52,44 @@ class InferenceProfileStore:
 
     @staticmethod
     def _capabilities_from_row(row: sqlite3.Row) -> ProviderCapabilities:
+        columns = set(row.keys())
+        detected: dict[str, object] = {}
+        raw_detected = row["detected_capabilities_json"] if "detected_capabilities_json" in columns else "{}"
+        if isinstance(raw_detected, str):
+            try:
+                decoded = json.loads(raw_detected)
+            except (TypeError, ValueError):
+                decoded = {}
+            if isinstance(decoded, dict):
+                detected = decoded
         return ProviderCapabilities(
             profile_id=row["profile_id"],
+            profile_fingerprint=(row["profile_fingerprint"] if "profile_fingerprint" in columns else ""),
+            transport=(row["transport"] if "transport" in columns else "openai_compatible"),
+            model=(row["model"] if "model" in columns else ""),
             structured_output_mode=row["structured_output_mode"],
             json_schema_supported=bool(row["json_schema_supported"]),
             tool_call_supported=bool(row["tool_call_supported"]),
             json_object_supported=bool(row["json_object_supported"]),
             prompt_only_supported=bool(row["prompt_only_supported"]),
+            structured_json_schema=bool(row["structured_json_schema"]) if "structured_json_schema" in columns else False,
+            structured_json_object=bool(row["structured_json_object"]) if "structured_json_object" in columns else False,
+            tool_calling=bool(row["tool_calling"]) if "tool_calling" in columns else False,
+            plain_json_prompt=bool(row["plain_json_prompt"]) if "plain_json_prompt" in columns else False,
+            native_schema_strictness=bool(row["native_schema_strictness"]) if "native_schema_strictness" in columns else False,
+            max_input_tokens_known=row["max_input_tokens_known"] if "max_input_tokens_known" in columns else None,
+            max_output_tokens_known=row["max_output_tokens_known"] if "max_output_tokens_known" in columns else None,
+            supports_batch_embeddings=bool(row["supports_batch_embeddings"]) if "supports_batch_embeddings" in columns else False,
+            embedding_max_batch=row["embedding_max_batch"] if "embedding_max_batch" in columns else None,
+            detected_capabilities=detected,
             probe_contract_digest=row["probe_contract_digest"],
             probe_status=row["probe_status"],
             last_probed_at=row["last_probed_at"],
             last_error_code=row["last_error_code"],
+            probed_at=(row["probed_at"] if "probed_at" in columns else None),
+            expires_at=(row["expires_at"] if "expires_at" in columns else None),
+            probe_result=(row["probe_result"] if "probe_result" in columns else row["probe_status"]),
+            last_error=(row["last_error"] if "last_error" in columns else row["last_error_code"]),
         )
 
     def get(self, profile_id: str) -> InferenceProfile | None:
@@ -86,6 +115,8 @@ class InferenceProfileStore:
 
     def upsert(self, profile: InferenceProfile) -> InferenceProfile:
         now = _now()
+        previous = self.get(profile.profile_id)
+        previous_capabilities = self.get_capabilities(profile.profile_id)
         values = profile.model_dump()
         self._connection.execute(
             """
@@ -133,14 +164,56 @@ class InferenceProfileStore:
         result = self.get(profile.profile_id)
         if result is None:
             raise RuntimeError("inference profile upsert did not produce a row")
+        if previous is not None and previous != result and previous_capabilities is not None:
+            old_fingerprint = previous_capabilities.profile_fingerprint
+            new_fingerprint = generation_profile_fingerprint(result)
+            if old_fingerprint and old_fingerprint != new_fingerprint:
+                self.invalidate_capabilities(
+                    result.profile_id,
+                    reason="profile_fingerprint_changed",
+                )
         return result
 
-    def get_capabilities(self, profile_id: str) -> ProviderCapabilities | None:
+    def get_capabilities(
+        self,
+        profile_id: str,
+        *,
+        profile_fingerprint: str | None = None,
+        fresh_only: bool = False,
+        now: str | None = None,
+    ) -> ProviderCapabilities | None:
         row = self._connection.execute(
             "SELECT * FROM inference_provider_capabilities WHERE profile_id = ?",
             (profile_id,),
         ).fetchone()
-        return self._capabilities_from_row(row) if row is not None else None
+        if row is None:
+            return None
+        capabilities = self._capabilities_from_row(row)
+        if profile_fingerprint is not None and capabilities.profile_fingerprint not in {
+            "",
+            profile_fingerprint,
+        }:
+            return None
+        if fresh_only and profile_fingerprint is not None and not capabilities.is_fresh(
+            profile_fingerprint=profile_fingerprint,
+            now=now,
+        ):
+            return None
+        return capabilities
+
+    def get_capabilities_for_profile(
+        self,
+        profile: InferenceProfile,
+        *,
+        fresh_only: bool = False,
+        now: str | None = None,
+    ) -> ProviderCapabilities | None:
+        return self.get_capabilities(
+            profile.profile_id,
+            profile_fingerprint=generation_profile_fingerprint(profile),
+            fresh_only=fresh_only,
+            now=now,
+        )
 
     def list_capabilities(self) -> tuple[ProviderCapabilities, ...]:
         rows = self._connection.execute(
@@ -162,6 +235,23 @@ class InferenceProfileStore:
         probe_status: str = "unknown",
         last_probed_at: str | None = None,
         last_error_code: str | None = None,
+        profile_fingerprint: str = "",
+        transport: str = "openai_compatible",
+        model: str = "",
+        detected_capabilities: dict[str, object] | None = None,
+        probed_at: str | None = None,
+        expires_at: str | None = None,
+        probe_result: str | None = None,
+        last_error: str | None = None,
+        structured_json_schema: bool = False,
+        structured_json_object: bool = False,
+        tool_calling: bool = False,
+        plain_json_prompt: bool = False,
+        native_schema_strictness: bool = False,
+        max_input_tokens_known: int | None = None,
+        max_output_tokens_known: int | None = None,
+        supports_batch_embeddings: bool = False,
+        embedding_max_batch: int | None = None,
     ) -> ProviderCapabilities:
         """Persist a content-free capability observation for a profile."""
 
@@ -170,27 +260,55 @@ class InferenceProfileStore:
                 raise ValueError("profile_id is required for capability persistence")
             capabilities = ProviderCapabilities(
                 profile_id=profile_id,
+                profile_fingerprint=profile_fingerprint,
+                transport=transport,
+                model=model,
                 structured_output_mode=cast(StructuredOutputMode, structured_output_mode),
                 json_schema_supported=json_schema_supported,
                 tool_call_supported=tool_call_supported,
                 json_object_supported=json_object_supported,
                 prompt_only_supported=prompt_only_supported,
+                structured_json_schema=structured_json_schema,
+                structured_json_object=structured_json_object,
+                tool_calling=tool_calling,
+                plain_json_prompt=plain_json_prompt,
+                native_schema_strictness=native_schema_strictness,
+                max_input_tokens_known=max_input_tokens_known,
+                max_output_tokens_known=max_output_tokens_known,
+                supports_batch_embeddings=supports_batch_embeddings,
+                embedding_max_batch=embedding_max_batch,
+                detected_capabilities=detected_capabilities or {},
                 probe_contract_digest=probe_contract_digest,
                 probe_status=cast(ProbeStatus, probe_status),
                 last_probed_at=last_probed_at,
                 last_error_code=last_error_code,
+                probed_at=probed_at,
+                expires_at=expires_at,
+                probe_result=cast(ProbeStatus, probe_result or probe_status),
+                last_error=last_error or last_error_code,
             )
         elif profile_id is not None and profile_id != capabilities.profile_id:
             raise ValueError("profile_id does not match capabilities")
 
         values = capabilities.model_dump(mode="python")
+        detected_json = json.dumps(
+            values.get("detected_capabilities", {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         self._connection.execute(
             """
             INSERT INTO inference_provider_capabilities (
                 profile_id, structured_output_mode, json_schema_supported,
                 tool_call_supported, json_object_supported, prompt_only_supported,
-                probe_contract_digest, probe_status, last_probed_at, last_error_code
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                probe_contract_digest, probe_status, last_probed_at, last_error_code,
+                profile_fingerprint, transport, model, detected_capabilities_json,
+                probed_at, expires_at, probe_result, last_error,
+                structured_json_schema, structured_json_object, tool_calling,
+                plain_json_prompt, native_schema_strictness, max_input_tokens_known,
+                max_output_tokens_known, supports_batch_embeddings, embedding_max_batch
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(profile_id) DO UPDATE SET
                 structured_output_mode = excluded.structured_output_mode,
                 json_schema_supported = excluded.json_schema_supported,
@@ -200,7 +318,24 @@ class InferenceProfileStore:
                 probe_contract_digest = excluded.probe_contract_digest,
                 probe_status = excluded.probe_status,
                 last_probed_at = excluded.last_probed_at,
-                last_error_code = excluded.last_error_code
+                last_error_code = excluded.last_error_code,
+                profile_fingerprint = excluded.profile_fingerprint,
+                transport = excluded.transport,
+                model = excluded.model,
+                detected_capabilities_json = excluded.detected_capabilities_json,
+                probed_at = excluded.probed_at,
+                expires_at = excluded.expires_at,
+                probe_result = excluded.probe_result,
+                last_error = excluded.last_error,
+                structured_json_schema = excluded.structured_json_schema,
+                structured_json_object = excluded.structured_json_object,
+                tool_calling = excluded.tool_calling,
+                plain_json_prompt = excluded.plain_json_prompt,
+                native_schema_strictness = excluded.native_schema_strictness,
+                max_input_tokens_known = excluded.max_input_tokens_known,
+                max_output_tokens_known = excluded.max_output_tokens_known,
+                supports_batch_embeddings = excluded.supports_batch_embeddings,
+                embedding_max_batch = excluded.embedding_max_batch
             """,
             (
                 values["profile_id"],
@@ -213,6 +348,23 @@ class InferenceProfileStore:
                 values["probe_status"],
                 values["last_probed_at"],
                 values["last_error_code"],
+                values["profile_fingerprint"],
+                values["transport"],
+                values["model"],
+                detected_json,
+                values["probed_at"],
+                values["expires_at"],
+                values["probe_result"],
+                values["last_error"],
+                int(values["structured_json_schema"]),
+                int(values["structured_json_object"]),
+                int(values["tool_calling"]),
+                int(values["plain_json_prompt"]),
+                int(values["native_schema_strictness"]),
+                values["max_input_tokens_known"],
+                values["max_output_tokens_known"],
+                int(values["supports_batch_embeddings"]),
+                values["embedding_max_batch"],
             ),
         )
         result = self.get_capabilities(capabilities.profile_id)
@@ -223,6 +375,33 @@ class InferenceProfileStore:
     save_capabilities = upsert_capabilities
     get_provider_capabilities = get_capabilities
     save_provider_capabilities = upsert_capabilities
+
+    def invalidate_capabilities(self, profile_id: str, *, reason: str) -> bool:
+        """Make a capability observation unusable without deleting evidence."""
+
+        cursor = self._connection.execute(
+            """
+            UPDATE inference_provider_capabilities
+               SET probe_status = 'unknown', probe_result = 'unknown',
+                   expires_at = ?, last_error_code = ?, last_error = ?
+             WHERE profile_id = ?
+            """,
+            (_now(), reason, reason, profile_id),
+        )
+        return cursor.rowcount == 1
+
+    def record_probe_error(self, profile_id: str, *, error_code: str) -> bool:
+        """Record an outage while retaining a previously valid cache entry."""
+
+        cursor = self._connection.execute(
+            """
+            UPDATE inference_provider_capabilities
+               SET last_error_code = ?, last_error = ?
+             WHERE profile_id = ?
+            """,
+            (error_code, error_code, profile_id),
+        )
+        return cursor.rowcount == 1
 
     def remove(self, profile_id: str) -> bool:
         cursor = self._connection.execute(
@@ -328,6 +507,27 @@ class DatabaseBackedCapabilityStore:
         finally:
             connection.close()
 
+    def get_capabilities_for_profile(
+        self,
+        profile: InferenceProfile,
+        *,
+        fresh_only: bool = False,
+        now: str | None = None,
+    ) -> ProviderCapabilities | None:
+        from ..persistence import open_sqlite_connection
+        from ..persistence import rounds_migrations as migrations
+
+        connection = open_sqlite_connection(self._database_path)
+        try:
+            migrations.apply_migrations(connection)
+            return InferenceProfileStore(connection).get_capabilities_for_profile(
+                profile,
+                fresh_only=fresh_only,
+                now=now,
+            )
+        finally:
+            connection.close()
+
     def upsert_capabilities(
         self, capabilities: ProviderCapabilities
     ) -> ProviderCapabilities:
@@ -340,6 +540,38 @@ class DatabaseBackedCapabilityStore:
             result = InferenceProfileStore(connection).upsert_capabilities(capabilities)
             connection.commit()
             return result
+        finally:
+            connection.close()
+
+    def invalidate_capabilities(self, profile_id: str, *, reason: str) -> bool:
+        from ..persistence import open_sqlite_connection
+        from ..persistence import rounds_migrations as migrations
+
+        connection = open_sqlite_connection(self._database_path)
+        try:
+            migrations.apply_migrations(connection)
+            changed = InferenceProfileStore(connection).invalidate_capabilities(
+                profile_id,
+                reason=reason,
+            )
+            connection.commit()
+            return changed
+        finally:
+            connection.close()
+
+    def record_probe_error(self, profile_id: str, *, error_code: str) -> bool:
+        from ..persistence import open_sqlite_connection
+        from ..persistence import rounds_migrations as migrations
+
+        connection = open_sqlite_connection(self._database_path)
+        try:
+            migrations.apply_migrations(connection)
+            changed = InferenceProfileStore(connection).record_probe_error(
+                profile_id,
+                error_code=error_code,
+            )
+            connection.commit()
+            return changed
         finally:
             connection.close()
 

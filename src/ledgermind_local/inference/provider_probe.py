@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,6 +15,7 @@ from .profiles import (
     InferenceProfile,
     ProviderCapabilities,
     StructuredOutputMode,
+    generation_profile_fingerprint,
 )
 from .providers.base import ChatMessage, InferenceProvider, ModelRequest
 from .providers.openai_compatible import decode_json_content
@@ -79,10 +80,14 @@ class ProviderProbe:
         secret_store: SecretStore,
         capability_store: ProbeCapabilityStore | None = None,
         provider_factory: ProbeProviderFactory | None = None,
+        capability_ttl_seconds: int = 86_400,
     ) -> None:
         self._profile_resolver = profile_resolver
         self._secret_store = secret_store
         self._capability_store = capability_store
+        if capability_ttl_seconds < 1:
+            raise ValueError("capability_ttl_seconds must be positive")
+        self.capability_ttl_seconds = capability_ttl_seconds
         if provider_factory is None:
             from .structured_json_provider import default_provider_factory
 
@@ -97,6 +102,9 @@ class ProviderProbe:
         *,
         mode_override: StructuredOutputMode | None = None,
         mode: StructuredOutputMode | None = None,
+        force: bool = False,
+        reprobe: bool = False,
+        capability_ttl_seconds: int | None = None,
     ) -> ProviderProbeResult:
         if mode_override is not None and mode is not None and mode_override != mode:
             raise ValueError("conflicting probe mode overrides")
@@ -109,6 +117,30 @@ class ProviderProbe:
         contract = _probe_contract(probe_kind)
         contract_digest = str(contract["schema_digest"])
         modes = _probe_modes(profile, override)
+        profile_fingerprint = generation_profile_fingerprint(
+            profile,
+            structured_output_override=override,
+        )
+        cached = self._cached_capabilities(profile.profile_id)
+        if (
+            cached is not None
+            and not force
+            and not reprobe
+            and cached.is_fresh(profile_fingerprint=profile_fingerprint)
+            and cached.probe_contract_digest == contract_digest
+        ):
+            selected = _selected_mode(cached)
+            return ProviderProbeResult(
+                profile_id=profile.profile_id,
+                slot=profile_slot.value,
+                probe_kind=probe_kind,
+                status="passed",
+                selected_mode=selected,
+                attempted_modes=(selected,) if selected != "auto" else (),
+                capabilities=cached,
+                contract_digest=contract_digest,
+                metadata={"mode_order": list(modes), "cache_hit": True},
+            )
 
         try:
             secret = self._secret_store.get(profile.secret_ref)
@@ -119,6 +151,7 @@ class ProviderProbe:
                 contract_digest,
                 modes,
                 "secret_missing",
+                previous=cached,
             )
 
         successful: set[StructuredOutputMode] = set()
@@ -134,6 +167,7 @@ class ProviderProbe:
                 contract_digest,
                 modes,
                 _safe_probe_error_code(exc),
+                previous=cached,
             )
         try:
             for candidate in modes:
@@ -158,19 +192,49 @@ class ProviderProbe:
         status: Literal["passed", "failed"] = (
             "passed" if selected != "auto" else "failed"
         )
+        now = datetime.now(timezone.utc)
+        ttl = self.capability_ttl_seconds if capability_ttl_seconds is None else capability_ttl_seconds
+        if ttl < 1:
+            raise ValueError("capability_ttl_seconds must be positive")
+        timestamp = now.isoformat(timespec="seconds")
         capabilities = ProviderCapabilities(
             profile_id=profile.profile_id,
+            profile_fingerprint=profile_fingerprint,
+            transport=profile.provider_kind,
+            model=profile.model,
             structured_output_mode=selected,
             json_schema_supported="json_schema" in successful,
             tool_call_supported="tool_call" in successful,
             json_object_supported="json_object" in successful,
             prompt_only_supported="prompt_only" in successful,
+            structured_json_schema="json_schema" in successful,
+            structured_json_object="json_object" in successful,
+            tool_calling="tool_call" in successful,
+            plain_json_prompt="prompt_only" in successful,
+            native_schema_strictness="json_schema" in successful,
+            detected_capabilities={
+                "structured_json_schema": "json_schema" in successful,
+                "structured_json_object": "json_object" in successful,
+                "tool_calling": "tool_call" in successful,
+                "plain_json_prompt": "prompt_only" in successful,
+                "native_schema_strictness": "json_schema" in successful,
+            },
             probe_contract_digest=contract_digest,
             probe_status=status,
-            last_probed_at=_now(),
+            last_probed_at=timestamp,
             last_error_code=None if status == "passed" else last_error_code,
+            probed_at=timestamp,
+            expires_at=(now + timedelta(seconds=ttl)).isoformat(timespec="seconds"),
+            probe_result=status,
+            last_error=None if status == "passed" else last_error_code,
         )
-        self._persist(capabilities)
+        if status == "failed" and cached is not None and cached.is_fresh(
+            profile_fingerprint=profile_fingerprint
+        ):
+            self._record_probe_error(profile.profile_id, last_error_code or "probe_failed")
+            capabilities = cached
+        else:
+            self._persist(capabilities)
         return ProviderProbeResult(
             profile_id=profile.profile_id,
             slot=profile_slot.value,
@@ -210,6 +274,22 @@ class ProviderProbe:
             mode_override=mode_override,
         )
 
+    def _cached_capabilities(self, profile_id: str) -> ProviderCapabilities | None:
+        if self._capability_store is None:
+            return None
+        getter = getattr(self._capability_store, "get_capabilities", None)
+        if not callable(getter):
+            return None
+        result = getter(profile_id)
+        return result if isinstance(result, ProviderCapabilities) else None
+
+    def _record_probe_error(self, profile_id: str, error_code: str) -> None:
+        if self._capability_store is None:
+            return
+        recorder = getattr(self._capability_store, "record_probe_error", None)
+        if callable(recorder):
+            recorder(profile_id, error_code=error_code)
+
     def _persist(self, capabilities: ProviderCapabilities) -> None:
         if self._capability_store is not None:
             self._capability_store.upsert_capabilities(capabilities)
@@ -221,14 +301,35 @@ class ProviderProbe:
         contract_digest: str,
         modes: tuple[StructuredOutputMode, ...],
         error_code: str,
+        previous: ProviderCapabilities | None = None,
     ) -> ProviderProbeResult:
+        if previous is not None and previous.probe_status == "passed":
+            self._record_probe_error(profile.profile_id, error_code)
+            return ProviderProbeResult(
+                profile_id=profile.profile_id,
+                slot=slot.value,
+                probe_kind=slot.value,
+                status="failed",
+                attempted_modes=(),
+                capabilities=previous,
+                contract_digest=contract_digest,
+                error_code=error_code,
+                metadata={"mode_order": list(modes), "cache_retained": True},
+            )
         capabilities = ProviderCapabilities(
             profile_id=profile.profile_id,
+            profile_fingerprint=generation_profile_fingerprint(profile),
+            transport=profile.provider_kind,
+            model=profile.model,
             structured_output_mode="auto",
+            plain_json_prompt=False,
             probe_contract_digest=contract_digest,
             probe_status="failed",
             last_probed_at=_now(),
             last_error_code=error_code,
+            probed_at=_now(),
+            probe_result="failed",
+            last_error=error_code,
         )
         self._persist(capabilities)
         return ProviderProbeResult(
@@ -435,6 +536,13 @@ def _safe_probe_error_code(exc: BaseException) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _selected_mode(capabilities: ProviderCapabilities) -> StructuredOutputMode:
+    for candidate in PROBE_MODE_ORDER:
+        if capabilities.supports(candidate):
+            return candidate
+    return capabilities.structured_output_mode
 
 
 __all__ = [

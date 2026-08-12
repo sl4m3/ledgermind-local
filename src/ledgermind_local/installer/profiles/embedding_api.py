@@ -31,6 +31,7 @@ class OpenAICompatibleEmbeddingProvider:
         model: str,
         dimensions: int,
         batch_size: int = 32,
+        max_concurrency: int = 1,
         timeout_seconds: float = 60.0,
         client: httpx.Client | None = None,
     ) -> None:
@@ -51,6 +52,7 @@ class OpenAICompatibleEmbeddingProvider:
         self.model = model
         self.dimensions = dimensions
         self.batch_size = max(int(batch_size), 1)
+        self.max_concurrency = max(int(max_concurrency), 1)
         self.timeout = float(timeout_seconds)
         self._client = client or httpx.Client(timeout=self.timeout)
         self._owns_client = client is None

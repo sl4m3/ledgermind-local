@@ -8,7 +8,7 @@ from pathlib import Path
 from . import migrations as _shared
 
 MIGRATION_DIR = Path(__file__).resolve().parent / "rounds_migrations"
-LOCAL_SCHEMA_VERSION = 8
+LOCAL_SCHEMA_VERSION = 10
 Migration = _shared.Migration
 MigrationError = _shared.MigrationError
 MigrationChecksumError = _shared.MigrationChecksumError

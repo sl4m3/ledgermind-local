@@ -27,6 +27,8 @@ from .base import (
     ProviderTimeoutError,
     ProviderTransportError,
     TransientProviderError,
+    normalize_error,
+    normalize_usage,
 )
 
 DEFAULT_TOOL_NAME = "submit_structured_result"
@@ -304,6 +306,8 @@ class OpenAICompatibleProvider(InferenceProvider):
     build_payload_prompt_only = staticmethod(build_payload_prompt_only)
     parse_content_response = staticmethod(parse_content_response)
     parse_tool_call_response = staticmethod(parse_tool_call_response)
+    normalize_usage = staticmethod(normalize_usage)
+    normalize_error = staticmethod(normalize_error)
 
     def __init__(
         self,
@@ -563,6 +567,39 @@ class OpenAICompatibleProvider(InferenceProvider):
             raise ValueError("conflicting cancellation tokens")
         active_token = cancellation_token or token
         return self._request(request, token=active_token)
+
+    def execute_structured(
+        self,
+        task: ModelRequest,
+        profile: object,
+        capabilities: object | None = None,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> ModelResponse:
+        """Implement the provider-neutral GenerationTransport boundary."""
+
+        del profile, capabilities
+        return self.complete_json(task, cancellation_token=cancellation_token)
+
+    def probe_capabilities(self, profile: object) -> dict[str, object]:
+        """Return transport facts without claiming endpoint feature support.
+
+        Feature support is established by the explicit Local probe. This
+        method exists so provider adapters share a stable boundary; it does
+        not introduce an implicit network probe into ordinary execution.
+        """
+
+        model = getattr(profile, "model", None)
+        return {
+            "transport": self.provider_kind,
+            "model": model if isinstance(model, str) else "",
+            "structured_json_schema": False,
+            "structured_json_object": False,
+            "tool_calling": False,
+            "plain_json_prompt": True,
+            "native_schema_strictness": False,
+            "probe_required": True,
+        }
 
 
 def _raise_if_cancelled(token: CancellationToken | None) -> None:

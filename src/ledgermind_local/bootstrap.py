@@ -25,7 +25,10 @@ from ledgermind_local.core_gateway.security_policy import (
 from ledgermind_local.core_gateway.signing import verify_core_binary
 from ledgermind_local.core_gateway.supervisor import CoreSupervisor
 from ledgermind_local.inference.core_task_executor import CoreTaskExecutor
-from ledgermind_local.inference.embedding_provider import EmbeddingProvider
+from ledgermind_local.inference.embedding_provider import (
+    EmbeddingProvider,
+    PersistentEmbeddingCache,
+)
 from ledgermind_local.inference.gguf_vectorizer import GGUFVectorizer
 from ledgermind_local.inference.openai_vectorizer import OpenAIEmbeddingVectorizer
 from ledgermind_local.inference.profile_slots import (
@@ -83,6 +86,7 @@ def _build_runtime_vectorizer_factory(config: LocalConfig) -> Callable[[], Any]:
             model=config.embedding.model or "",
             dimensions=config.embedding.dimensions,
             batch_size=config.embedding.batch_size,
+            max_concurrency=config.embedding.max_concurrency,
             timeout_seconds=config.embedding.timeout_seconds,
         )
 
@@ -986,7 +990,8 @@ class LocalRuntime:
                     embedding_provider=EmbeddingProvider(
                         vectorizer_factory=_build_runtime_vectorizer_factory(
                             self.config
-                        )
+                        ),
+                        cache=PersistentEmbeddingCache(self.database_path),
                     ),
                     profile_resolver=profile_resolver,
                     generate_json_timeout_seconds=300,

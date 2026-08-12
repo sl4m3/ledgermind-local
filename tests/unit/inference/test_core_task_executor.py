@@ -11,6 +11,7 @@ from ledgermind_local.inference.core_task_executor import (
     EmbeddingRequestSpec,
     GenericExecutionTask,
     ModelRequestSpec,
+    _error_category,
 )
 from ledgermind_local.inference.embedding_provider import EmbeddingProvider
 from ledgermind_local.inference.profile_slots import (
@@ -362,6 +363,19 @@ def test_invalid_json_response_fails_with_structured_code(tmp_path) -> None:
     assert result.error_code == "invalid_json_response"
     assert result.egress_audit.status == "failed"
     assert SECRET_VALUE not in result.egress_audit.model_dump_json()
+
+
+def test_error_taxonomy_keeps_transport_json_shape_semantic_language_and_grounding_distinct() -> None:
+    expected = {
+        "provider_timeout": "transport_failure",
+        "invalid_json_response": "json_parse_failure",
+        "schema_shape_failure": "schema_shape_failure",
+        "semantic_validation_failure": "semantic_validation_failure",
+        "language_fidelity_failure": "language_fidelity_failure",
+        "grounding_failure": "grounding_failure",
+    }
+
+    assert {code: _error_category(code) for code in expected} == expected
 
 
 def test_json_array_response_is_rejected(tmp_path) -> None:

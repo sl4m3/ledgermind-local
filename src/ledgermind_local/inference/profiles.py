@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-ProviderKind = Literal["openai_compatible"]
+ProviderKind = Literal["openai_compatible", "google_genai"]
 StructuredOutputMode = Literal[
     "auto",
     "json_schema",
@@ -133,6 +133,54 @@ def _required_text(value: str, field_name: str) -> str:
     if not normalized:
         raise ValueError(f"{field_name} must not be empty")
     return normalized
+
+
+GENERATION_PROFILE_DIGEST_ALGORITHM = "sha256"
+GENERATION_PROFILE_DIGEST_SCHEMA_VERSION = 1
+
+
+def generation_profile_fingerprint(
+    profile: "InferenceProfile",
+    *,
+    structured_output_override: str | None = None,
+) -> str:
+    """Return the secret-free identity used by the provider capability cache.
+
+    The digest deliberately describes transport/model configuration rather
+    than a credential.  A changed endpoint, model, token parameter or
+    structured-output preference therefore cannot accidentally reuse an old
+    capability observation.
+    """
+
+    from urllib.parse import urlparse
+
+    parsed = urlparse(profile.base_url.strip().rstrip("/"))
+    endpoint = parsed._replace(query="", fragment="").geturl().rstrip("/")
+    material = {
+        "schema_version": GENERATION_PROFILE_DIGEST_SCHEMA_VERSION,
+        "provider_kind": profile.provider_kind,
+        "transport": profile.provider_kind,
+        "endpoint": endpoint,
+        "model": profile.model.strip(),
+        "timeout_seconds": profile.timeout_seconds,
+        "max_retries": profile.max_retries,
+        "max_input_tokens": profile.max_input_tokens,
+        "max_output_tokens": profile.max_output_tokens,
+        "structured_output_preference": (
+            structured_output_override or profile.structured_output_preference
+        ),
+        "token_parameter": profile.token_parameter,
+        "supports_system_role": profile.supports_system_role,
+        "supports_seed": profile.supports_seed,
+    }
+    encoded = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"{GENERATION_PROFILE_DIGEST_ALGORITHM}:{hashlib.sha256(encoded).hexdigest()}"
 
 
 class EmbeddingProfileIdentity(BaseModel):
@@ -260,15 +308,33 @@ class ProviderCapabilities(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     profile_id: str = Field(min_length=1, max_length=200)
+    profile_fingerprint: str = Field(default="", max_length=200)
+    transport: str = Field(default="openai_compatible", max_length=200)
+    model: str = Field(default="", max_length=500)
     structured_output_mode: StructuredOutputMode = "auto"
     json_schema_supported: bool = False
     tool_call_supported: bool = False
     json_object_supported: bool = False
     prompt_only_supported: bool = False
+    # Provider-neutral names used by the normalized capability contract.
+    structured_json_schema: bool = False
+    structured_json_object: bool = False
+    tool_calling: bool = False
+    plain_json_prompt: bool = False
+    native_schema_strictness: bool = False
+    max_input_tokens_known: int | None = Field(default=None, ge=1)
+    max_output_tokens_known: int | None = Field(default=None, ge=1)
+    supports_batch_embeddings: bool = False
+    embedding_max_batch: int | None = Field(default=None, ge=1)
+    detected_capabilities: dict[str, object] = Field(default_factory=dict)
     probe_contract_digest: str | None = Field(default=None, max_length=200)
     probe_status: ProbeStatus = "unknown"
     last_probed_at: str | None = Field(default=None, max_length=64)
     last_error_code: str | None = Field(default=None, max_length=200)
+    probed_at: str | None = Field(default=None, max_length=64)
+    expires_at: str | None = Field(default=None, max_length=64)
+    probe_result: ProbeStatus = "unknown"
+    last_error: str | None = Field(default=None, max_length=200)
 
     @property
     def mode(self) -> StructuredOutputMode:
@@ -278,19 +344,56 @@ class ProviderCapabilities(BaseModel):
         """Return whether a probe recorded support for ``mode``."""
 
         if mode == "json_schema":
-            return self.json_schema_supported
+            return self.json_schema_supported or self.structured_json_schema
         if mode == "tool_call":
-            return self.tool_call_supported
+            return self.tool_call_supported or self.tool_calling
         if mode == "json_object":
-            return self.json_object_supported
+            return self.json_object_supported or self.structured_json_object
         if mode == "prompt_only":
-            return self.prompt_only_supported
+            return self.prompt_only_supported or self.plain_json_prompt
         return False
+
+    @property
+    def detected_capabilities_json(self) -> dict[str, object]:
+        """Compatibility spelling for the persisted normalized payload."""
+
+        return dict(self.detected_capabilities)
+
+    def is_fresh(self, *, profile_fingerprint: str, now: str | None = None) -> bool:
+        """Return whether this observation can be used without a probe."""
+
+        if not profile_fingerprint or (
+            self.profile_fingerprint
+            and self.profile_fingerprint != profile_fingerprint
+        ):
+            return False
+        if self.probe_result != "passed" and self.probe_status != "passed":
+            return False
+        if not self.expires_at:
+            # Legacy rows have no TTL and remain usable until an explicit
+            # reprobe or profile change invalidates them.
+            return True
+        from datetime import datetime, timezone
+
+        try:
+            expiry = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+            current = datetime.fromisoformat(
+                (now or datetime.now(timezone.utc).isoformat()).replace("Z", "+00:00")
+            )
+        except ValueError:
+            return False
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return current < expiry
 
 
 __all__ = [
     "EMBEDDING_PROFILE_DIGEST_ALGORITHM",
     "EMBEDDING_PROFILE_DIGEST_SCHEMA_VERSION",
+    "GENERATION_PROFILE_DIGEST_ALGORITHM",
+    "GENERATION_PROFILE_DIGEST_SCHEMA_VERSION",
     "EmbeddingProfileIdentity",
     "EmbeddingProfileReadiness",
     "InferenceProfile",
@@ -301,4 +404,5 @@ __all__ = [
     "StructuredOutputPreference",
     "TokenParameter",
     "embedding_profile_fingerprint",
+    "generation_profile_fingerprint",
 ]

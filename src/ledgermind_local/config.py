@@ -31,6 +31,8 @@ class EmbeddingConfig(BaseModel):
     model: str | None = None
     dimensions: int = Field(default=0, ge=0)
     batch_size: int = Field(default=32, ge=1, le=4096)
+    max_concurrency: int = Field(default=1, ge=1, le=32)
+    max_wait_seconds: float = Field(default=0.05, ge=0.0, le=60.0)
     timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     secret_ref: str | None = None
 
@@ -168,6 +170,8 @@ class LocalConfig(BaseModel):
     worker_max_attempts: int = Field(default=3, ge=1)
     worker_retry_delay_seconds: float = Field(default=30.0, ge=0.0)
     worker_lease_seconds: float = Field(default=300.0, ge=1.0)
+    generation_concurrency: int = Field(default=1, ge=1, le=32)
+    provider_capability_ttl_seconds: int = Field(default=86_400, ge=1, le=31_536_000)
     inference_secrets_path: str = "secrets.json"
     max_raw_round_bytes: int = Field(default=5_000_000, ge=1)
     raw_round_retention_days: int = Field(default=30, ge=1)
@@ -179,6 +183,24 @@ class LocalConfig(BaseModel):
         """Read alias retained for callers that use the Local database name."""
 
         return self.rounds_database_path
+
+    @property
+    def embedding_batch_size(self) -> int:
+        """Portable name for the Local embedding batch-size setting."""
+
+        return self.embedding.batch_size
+
+    @property
+    def embedding_batch_max_wait_ms(self) -> int:
+        """Portable millisecond view of the embedding batch wait setting."""
+
+        return round(self.embedding.max_wait_seconds * 1000)
+
+    @property
+    def embedding_concurrency(self) -> int:
+        """Portable name for the Local embedding concurrency setting."""
+
+        return self.embedding.max_concurrency
 
     @field_validator("log_level", mode="after")
     @classmethod

@@ -208,12 +208,82 @@ def _context_response(payload: dict[str, object]) -> dict[str, Any]:
     try:
         from ledgermind_protocol.object_facet import RetrievalResponse
 
-        response = RetrievalResponse.model_validate(payload)
+        response = RetrievalResponse.model_validate(_normalize_legacy_context_payload(payload))
     except (ImportError, TypeError, ValueError) as exc:
         raise ValueError("Core retrieval response is not a strict object-facet response") from exc
-    items = [item.model_dump(mode="json") for item in response.items]
+    items = []
+    for item in response.items:
+        rendered = item.model_dump(mode="json")
+        # ContextView intentionally exposes the value-level explanation but
+        # keeps source event ids in Core-owned provenance storage.
+        rendered.pop("source_event_ids", None)
+        items.append(rendered)
     return {
         "schema_version": 2,
         "retrieval_request_id": response.retrieval_request_id,
         "items": items,
     }
+
+
+def _normalize_legacy_context_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Keep the HTTP boundary compatible with older test/core adapters.
+
+    Production Core responses already contain the full truthful score
+    components. Older in-process adapters used a compact component map; it
+    is expanded here only at the compatibility boundary and never written
+    back to Core.
+    """
+
+    normalized = dict(payload)
+    items = []
+    for raw_item in payload.get("items", []):
+        if not isinstance(raw_item, dict):
+            items.append(raw_item)
+            continue
+        item = dict(raw_item)
+        # Old in-process adapters did not expose provenance. Keep that
+        # adapter usable with an explicit compatibility marker; real Core
+        # responses always carry source-owned event ids.
+        if not item.get("source_event_ids"):
+            item["source_event_ids"] = ["legacy:compat"]
+        explanation = item.get("explanation")
+        if isinstance(explanation, dict):
+            explanation = dict(explanation)
+            components = explanation.get("score_components")
+            if isinstance(components, dict) and "semantic" in components:
+                compact = components
+                semantic = float(compact.get("semantic", 0.0))
+                object_score = float(compact.get("object", 0.0))
+                facet = float(compact.get("facet", 0.0))
+                scope_time = float(compact.get("scope_time", 0.0))
+                context = float(compact.get("context", 0.0))
+                recency = float(compact.get("recency", 0.0))
+                support = float(compact.get("support", 0.0))
+                usage = float(compact.get("usage", 0.0))
+                explanation["score_components"] = {
+                    "semantic_similarity": semantic,
+                    "semantic_similarity_raw": semantic,
+                    "semantic_contribution": semantic,
+                    "object_similarity": object_score,
+                    "object_similarity_raw": object_score,
+                    "object_card_cosine": object_score,
+                    "lexical_object_match": object_score,
+                    "object_contribution": object_score,
+                    "facet_compatibility": facet,
+                    "facet_contribution": facet,
+                    "scope_time_compatibility": scope_time,
+                    "scope_time_contribution": scope_time,
+                    "context_compatibility": context,
+                    "context_contribution": context,
+                    "recency_component": recency,
+                    "recency_contribution": recency,
+                    "support_component": support,
+                    "support_contribution": support,
+                    "usage_component": usage,
+                    "usage_contribution": usage,
+                    "final_score": float(item.get("relevance", 0.0)),
+                }
+            item["explanation"] = explanation
+        items.append(item)
+    normalized["items"] = items
+    return normalized

@@ -28,6 +28,7 @@ from ledgermind_local.inference.providers.base import (
     ModelResponse,
     ProviderConfigurationError,
     ProviderResponseError,
+    ProviderTransportError,
 )
 from ledgermind_local.inference.providers.openai_compatible import (
     OpenAICompatibleProvider,
@@ -318,6 +319,75 @@ def test_structured_provider_selects_capability_and_roundtrips_digest_and_fence(
         assert result.contract_digest == CONTRACT["schema_digest"]
         assert result.raw_model_text.startswith("```")
         assert result.metadata["usage"] == {"prompt_tokens": 3}
+        assert result.parsed_json == {"ok": True}
+        assert result.usage == {"prompt_tokens": 3}
+        assert result.transport_error is None
+        assert result.native_schema_valid is True
+    finally:
+        connection.close()
+
+
+def test_parseable_schema_mismatch_is_advisory_and_reaches_core(tmp_path) -> None:
+    connection, store = _store()
+    try:
+        fake = _FakeProvider(content='{"ok":"wrong"}')
+        result = StructuredJsonProvider(
+            profile_resolver=StoreBackedProfileResolver(store),
+            secret_store=_secret_store(tmp_path),
+            provider_factory=lambda _profile, _secret: fake,
+        ).generate_json(
+            memory_space_id="space",
+            messages=(ChatMessage(role="user", content="return"),),
+            max_output_tokens=20,
+            profile_slot=ProfileSlot.OPERATIONAL,
+            output_contract=CONTRACT,
+        )
+
+        assert result.parsed_json == {"ok": "wrong"}
+        assert result.native_schema_valid is False
+        assert result.native_schema_issues
+        assert result.transport_error is None
+    finally:
+        connection.close()
+
+
+def test_provider_outage_retains_fresh_capability_cache(tmp_path) -> None:
+    connection, store = _store()
+    try:
+        cached = store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id="profile",
+                structured_output_mode="tool_call",
+                tool_call_supported=True,
+                probe_contract_digest=CONTRACT["schema_digest"],
+                probe_status="passed",
+                probe_result="passed",
+                expires_at="2099-01-01T00:00:00+00:00",
+            )
+        )
+
+        class OutageProvider(_FakeProvider):
+            def complete_json(self, request: ModelRequest, **_kwargs: object) -> ModelResponse:
+                del request
+                raise ProviderTransportError("provider unavailable")
+
+        with pytest.raises(ProviderTransportError):
+            StructuredJsonProvider(
+                profile_resolver=StoreBackedProfileResolver(store),
+                secret_store=_secret_store(tmp_path),
+                capability_store=store,
+                provider_factory=lambda _profile, _secret: OutageProvider(),
+            ).generate_json(
+                memory_space_id="space",
+                messages=(ChatMessage(role="user", content="return"),),
+                max_output_tokens=20,
+                profile_slot=ProfileSlot.OPERATIONAL,
+                output_contract=CONTRACT,
+            )
+        retained = store.get_capabilities("profile")
+        assert retained is not None
+        assert retained.probe_status == cached.probe_status == "passed"
+        assert retained.expires_at == cached.expires_at
     finally:
         connection.close()
 

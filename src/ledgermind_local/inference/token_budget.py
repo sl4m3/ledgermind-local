@@ -21,6 +21,18 @@ class InputBudgetExceededError(RuntimeError):
         super().__init__("model input token budget exceeded")
 
 
+class OutputBudgetExceededError(RuntimeError):
+    """The requested generation output exceeds the profile allowance."""
+
+    code = "output_budget_exceeded"
+
+    def __init__(self, requested_tokens: int, max_output_tokens: int) -> None:
+        self.requested_tokens = requested_tokens
+        self.max_output_tokens = max_output_tokens
+        self.profile_id: str | None = None
+        super().__init__("model output token budget exceeded")
+
+
 @dataclass(frozen=True, slots=True)
 class TokenBudgetEstimate:
     estimated_tokens: int
@@ -100,6 +112,7 @@ class TokenBudgetEstimator:
 
 __all__ = [
     "InputBudgetExceededError",
+    "OutputBudgetExceededError",
     "TokenBudgetEstimate",
     "TokenBudgetEstimator",
 ]

@@ -263,7 +263,18 @@ class CoreExecutionTask:
                 raise ValueError("embed_texts task has an invalid request shape")
             _strict_mapping(
                 self.embedding_request,
-                {"texts", "purpose", "subject_refs", "dimensions"},
+                {
+                    "texts",
+                    "purpose",
+                    "subject_refs",
+                    "dimensions",
+                    "profile_fingerprint",
+                    "config_fingerprint",
+                    "privacy_class",
+                    "cache_namespace",
+                    "cache_keys",
+                    "deadline",
+                },
                 "embedding_request",
             )
             texts = self.embedding_request.get("texts")
@@ -290,6 +301,22 @@ class CoreExecutionTask:
                 or not 1 <= dimensions <= 100_000
             ):
                 raise TypeError("embedding_request.dimensions must be a positive integer")
+            for key in (
+                "profile_fingerprint",
+                "config_fingerprint",
+                "privacy_class",
+                "cache_namespace",
+                "deadline",
+            ):
+                value = self.embedding_request.get(key)
+                if value is not None and (not isinstance(value, str) or not value.strip()):
+                    raise ValueError(f"embedding_request.{key} must be non-empty text")
+            cache_keys = self.embedding_request.get("cache_keys")
+            if cache_keys is not None:
+                if not isinstance(cache_keys, list) or len(cache_keys) != len(texts):
+                    raise ValueError("embedding_request.cache_keys must align with texts")
+                if any(not isinstance(key, str) or not key.strip() for key in cache_keys):
+                    raise ValueError("embedding_request.cache_keys must contain strings")
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> CoreExecutionTask:

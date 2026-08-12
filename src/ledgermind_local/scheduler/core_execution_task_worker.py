@@ -56,9 +56,14 @@ _SAFE_ERROR_CODES = frozenset(
         "invalid_model_output",
         "invalid_provider_response",
         "invalid_json_response",
+        "schema_shape_failure",
+        "semantic_validation_failure",
+        "language_fidelity_failure",
+        "grounding_failure",
         "invalid_request",
         "secret_missing",
         "input_budget_exceeded",
+        "output_budget_exceeded",
         "authentication_error",
         "configuration_error",
         "cancelled",
@@ -115,7 +120,15 @@ def classify_execution_error(exc: BaseException) -> ExecutionFailureClassificati
     code = getattr(exc, "code", None)
     if code == "input_budget_exceeded":
         return ExecutionFailureClassification("input_budget_exceeded", False, 0)
-    if code in {"invalid_json_response", "invalid_request", "secret_missing"}:
+    if code in {
+        "invalid_json_response",
+        "invalid_request",
+        "secret_missing",
+        "schema_shape_failure",
+        "semantic_validation_failure",
+        "language_fidelity_failure",
+        "grounding_failure",
+    }:
         return ExecutionFailureClassification(str(code), False, 0)
     if isinstance(exc, (ProviderTimeoutError, TimeoutError)):
         return ExecutionFailureClassification("provider_timeout", True)
@@ -233,9 +246,8 @@ class CoreExecutionTaskWorker:
                         },
                     )
                     continue
-                for raw_task in polled.tasks:
-                    processed += 1
-                    self._process_task(raw_task, memory_space_id)
+                processed += len(polled.tasks)
+                self._process_tasks(polled.tasks, memory_space_id)
         finally:
             connection.close()
         return processed
@@ -244,57 +256,105 @@ class CoreExecutionTaskWorker:
         self._closed = True
 
     def _process_task(self, raw_task: dict[str, object], memory_space_id: str) -> None:
-        task_id = str(raw_task.get("task_id", "unknown"))
         try:
             task = _local_execution_task(raw_task, memory_space_id)
             result = self._executor.execute(task)
-            if result.status == "completed":
-                submitted = self._gateway.submit_execution_result(
-                    SubmitExecutionResultCommand(
-                        request_id=self._request_id("submit"),
-                        task_id=task.task_id,
-                        memory_space_id=memory_space_id,
-                        worker_id=self._worker_id,
-                        result=result.model_dump(mode="json"),
-                    )
-                )
-                if not submitted.accepted:
-                    raise TransientCoreError("Core did not accept execution result")
-                return
-            self._gateway.fail_execution_task(
-                FailExecutionTaskCommand(
-                    request_id=self._request_id("fail"),
+            self._deliver_result(task, result, memory_space_id)
+        except Exception as exc:  # noqa: BLE001 - release every leased task
+            self._fail_task(raw_task, memory_space_id, exc)
+
+    def _process_tasks(
+        self, raw_tasks: list[dict[str, object]], memory_space_id: str
+    ) -> None:
+        """Batch only compatible embedding tasks; keep one Core result per task."""
+
+        converted: list[GenericExecutionTask] = []
+        for raw_task in raw_tasks:
+            try:
+                converted.append(_local_execution_task(raw_task, memory_space_id))
+            except Exception as exc:  # noqa: BLE001 - isolate malformed leases
+                self._fail_task(raw_task, memory_space_id, exc)
+        if not converted:
+            return
+        try:
+            results = self._executor.execute_batch(tuple(converted))
+        except Exception as exc:  # noqa: BLE001 - release every leased task
+            for task in converted:
+                self._fail_task(task.model_dump(mode="json"), memory_space_id, exc)
+            return
+        for task, result in zip(converted, results, strict=True):
+            try:
+                self._deliver_result(task, result, memory_space_id)
+            except Exception as exc:  # noqa: BLE001 - isolate delivery failures
+                self._fail_task(task.model_dump(mode="json"), memory_space_id, exc)
+
+    def _deliver_result(
+        self,
+        task: GenericExecutionTask,
+        result: object,
+        memory_space_id: str,
+    ) -> None:
+        if not hasattr(result, "status"):
+            raise ValueError("executor returned an invalid result")
+        status = getattr(result, "status")
+        if status == "completed":
+            submitted = self._gateway.submit_execution_result(
+                SubmitExecutionResultCommand(
+                    request_id=self._request_id("submit"),
                     task_id=task.task_id,
                     memory_space_id=memory_space_id,
                     worker_id=self._worker_id,
-                    error_code=_safe_error_code(result.error_code, result.status),
-                    retryable=result.status in {"timeout", "cancelled"},
-                    retry_after_seconds=60
-                    if result.status in {"timeout", "cancelled"}
-                    else 0,
+                    result=result.model_dump(mode="json"),
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - release every leased task
-            classification = classify_execution_error(exc)
-            logger.warning(
-                "Core execution task failed",
-                extra={
-                    "worker": self._worker_id,
-                    "task_id": task_id,
-                    "error_code": classification.error_code,
-                },
+            if not submitted.accepted:
+                raise TransientCoreError("Core did not accept execution result")
+            return
+        self._gateway.fail_execution_task(
+            FailExecutionTaskCommand(
+                request_id=self._request_id("fail"),
+                task_id=task.task_id,
+                memory_space_id=memory_space_id,
+                worker_id=self._worker_id,
+                error_code=_safe_error_code(result.error_code, result.status),
+                retryable=result.status in {"timeout", "cancelled"},
+                retry_after_seconds=60
+                if result.status in {"timeout", "cancelled"}
+                else 0,
             )
-            self._gateway.fail_execution_task(
-                FailExecutionTaskCommand(
-                    request_id=self._request_id("fail"),
-                    task_id=task_id,
-                    memory_space_id=memory_space_id,
-                    worker_id=self._worker_id,
-                    error_code=classification.error_code,
-                    retryable=classification.retryable,
-                    retry_after_seconds=classification.retry_after_seconds,
-                )
+        )
+
+    def _fail_task(
+        self,
+        raw_task: dict[str, object],
+        memory_space_id: str,
+        exc: BaseException,
+    ) -> None:
+        task_id = str(raw_task.get("task_id", "unknown"))
+        classification = (
+            classify_execution_error(exc)
+            if isinstance(exc, Exception)
+            else ExecutionFailureClassification("execution_error", False, 0)
+        )
+        logger.warning(
+            "Core execution task failed",
+            extra={
+                "worker": self._worker_id,
+                "task_id": task_id,
+                "error_code": classification.error_code,
+            },
+        )
+        self._gateway.fail_execution_task(
+            FailExecutionTaskCommand(
+                request_id=self._request_id("fail"),
+                task_id=task_id,
+                memory_space_id=memory_space_id,
+                worker_id=self._worker_id,
+                error_code=classification.error_code,
+                retryable=classification.retryable,
+                retry_after_seconds=classification.retry_after_seconds,
             )
+        )
 
     def _request_id(self, operation: str) -> str:
         return f"{self._worker_id}:{operation}:{uuid.uuid4()}"
@@ -356,17 +416,59 @@ def _local_execution_task(
         )
     embedding_request = None
     if wire.embedding_request is not None:
-            embedding_request = EmbeddingRequestSpec(
-                texts=tuple(str(text) for text in wire.embedding_request.get("texts", [])),
-                purpose=validate_embedding_purpose(wire.embedding_request["purpose"]),
-                subject_refs=(
-                    tuple(str(subject_ref) for subject_ref in wire.embedding_request["subject_refs"])
-                    if isinstance(wire.embedding_request.get("subject_refs"), list)
-                    else None
-                ),
-                dimensions=(
+        operation_input = wire.operation_input or {}
+
+        def _request_or_operation_input(name: str, *fallback_names: str) -> object:
+            value = wire.embedding_request.get(name)
+            if value is not None:
+                return value
+            for fallback_name in fallback_names:
+                value = operation_input.get(fallback_name)
+                if value is not None:
+                    return value
+            return None
+
+        embedding_request = EmbeddingRequestSpec(
+            texts=tuple(str(text) for text in wire.embedding_request.get("texts", [])),
+            purpose=validate_embedding_purpose(wire.embedding_request["purpose"]),
+            subject_refs=(
+                tuple(str(subject_ref) for subject_ref in wire.embedding_request["subject_refs"])
+                if isinstance(wire.embedding_request.get("subject_refs"), list)
+                else None
+            ),
+            dimensions=(
                 int(wire.embedding_request["dimensions"])
                 if wire.embedding_request.get("dimensions") is not None
+                else None
+            ),
+            profile_fingerprint=(
+                str(value)
+                if (value := _request_or_operation_input(
+                    "profile_fingerprint", "embedding_profile_fingerprint"
+                )) is not None
+                else None
+            ),
+            config_fingerprint=(
+                str(value)
+                if (value := _request_or_operation_input(
+                    "config_fingerprint", "embedding_config_fingerprint"
+                )) is not None
+                else None
+            ),
+            privacy_class=str(
+                _request_or_operation_input("privacy_class") or "default"
+            ),
+            cache_namespace=str(
+                _request_or_operation_input("cache_namespace") or ""
+            ),
+            cache_keys=(
+                tuple(str(key) for key in wire.embedding_request["cache_keys"])
+                if isinstance(wire.embedding_request.get("cache_keys"), list)
+                else None
+            ),
+            deadline=(
+                str(value)
+                if (value := _request_or_operation_input("deadline")) is not None
                 else None
             ),
         )

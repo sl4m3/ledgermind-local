@@ -13,6 +13,7 @@ from .profiles import (
     InferenceProfile,
     ProviderCapabilities,
     StructuredOutputMode,
+    generation_profile_fingerprint,
 )
 from .providers.base import (
     ChatMessage,
@@ -20,14 +21,22 @@ from .providers.base import (
     ModelRequest,
     ModelResponse,
     ProviderConfigurationError,
+    ProviderResponseError,
+    normalize_error,
+    normalize_usage,
 )
 from .providers.openai_compatible import (
     DEFAULT_TOOL_NAME,
     OpenAICompatibleProvider,
     decode_json_content,
 )
+from .providers.google_boundary import GoogleGenerationTransport
 from .secrets import SecretNotFoundError, SecretStore
-from .token_budget import InputBudgetExceededError, TokenBudgetEstimator
+from .token_budget import (
+    InputBudgetExceededError,
+    OutputBudgetExceededError,
+    TokenBudgetEstimator,
+)
 
 ProviderFactory = Callable[[InferenceProfile, str], InferenceProvider]
 _MODE_ORDER: tuple[StructuredOutputMode, ...] = (
@@ -45,17 +54,20 @@ class CapabilityStore(Protocol):
 def default_provider_factory(profile: InferenceProfile, secret: str) -> InferenceProvider:
     """Construct the default generative provider for a resolved profile."""
 
-    if profile.provider_kind != "openai_compatible":
-        raise ProviderConfigurationError("unsupported inference provider kind")
-    return OpenAICompatibleProvider(
-        base_url=profile.base_url,
-        api_key=secret,
-        timeout_seconds=profile.timeout_seconds,
-        max_retries=profile.max_retries,
-        token_parameter=profile.token_parameter,
-        supports_system_role=profile.supports_system_role,
-        supports_seed=profile.supports_seed,
-    )
+    if profile.provider_kind == "google_genai":
+        del secret
+        return GoogleGenerationTransport()
+    if profile.provider_kind == "openai_compatible":
+        return OpenAICompatibleProvider(
+            base_url=profile.base_url,
+            api_key=secret,
+            timeout_seconds=profile.timeout_seconds,
+            max_retries=profile.max_retries,
+            token_parameter=profile.token_parameter,
+            supports_system_role=profile.supports_system_role,
+            supports_seed=profile.supports_seed,
+        )
+    raise ProviderConfigurationError("unsupported inference provider kind")
 
 
 class StructuredJsonResult(BaseModel):
@@ -82,6 +94,7 @@ class StructuredJsonResult(BaseModel):
     tool_name: str | None = Field(default=None, min_length=1, max_length=200)
     metadata: dict[str, object] = Field(default_factory=dict)
     token_usage: dict[str, object] | None = None
+    normalized_usage: dict[str, object] = Field(default_factory=dict)
 
     @property
     def mode(self) -> StructuredOutputMode:
@@ -98,6 +111,43 @@ class StructuredJsonResult(BaseModel):
     @property
     def raw_model_text(self) -> str:
         return self.raw_text
+
+    @property
+    def parsed_json(self) -> dict[str, object]:
+        """Canonical name for the parseable payload sent to Core."""
+
+        return self.data
+
+    @property
+    def usage(self) -> dict[str, object] | None:
+        """Provider usage under the normalized response vocabulary."""
+
+        return self.token_usage
+
+    @property
+    def provider_request_id(self) -> str | None:
+        value = self.metadata.get("provider_request_id", self.metadata.get("request_id"))
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def finish_reason(self) -> str | None:
+        value = self.metadata.get("finish_reason")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def transport_error(self) -> object | None:
+        """Successful normalized responses carry an explicit null error."""
+
+        return self.metadata.get("transport_error")
+
+    @property
+    def native_schema_issues(self) -> list[dict[str, object]]:
+        value = self.metadata.get("local_validation_issues")
+        return value if isinstance(value, list) else []
+
+    @property
+    def native_schema_valid(self) -> bool:
+        return not self.native_schema_issues
 
 
 class StructuredJsonError(RuntimeError):
@@ -165,6 +215,13 @@ class StructuredJsonProvider:
         cancellation_token: CancellationToken | None = None,
     ) -> StructuredJsonResult:
         profile = self._profile_resolver.resolve_profile(memory_space_id, profile_slot)
+        if max_output_tokens > profile.max_output_tokens:
+            error = OutputBudgetExceededError(
+                max_output_tokens,
+                profile.max_output_tokens,
+            )
+            error.profile_id = profile.profile_id
+            raise error
         contract, requested_mode = self._normalize_contract_and_mode(
             response_format=response_format,
             output_contract=output_contract,
@@ -203,10 +260,27 @@ class StructuredJsonProvider:
             ) from exc
 
         provider = self._provider_factory(profile, secret)
+        capabilities = self._load_capabilities(profile)
         try:
-            response = provider.complete_json(
-                request, cancellation_token=cancellation_token
+            execute = getattr(provider, "execute_structured", None)
+            if callable(execute):
+                response = execute(
+                    request,
+                    profile,
+                    capabilities,
+                    cancellation_token=cancellation_token,
+                )
+            else:
+                response = provider.complete_json(
+                    request, cancellation_token=cancellation_token
+                )
+        except Exception as exc:
+            self._invalidate_capability_after_failure(
+                profile,
+                selected_mode=selected_mode,
+                error=exc,
             )
+            raise
         finally:
             close = getattr(provider, "close", None)
             if callable(close):
@@ -264,19 +338,62 @@ class StructuredJsonProvider:
         if resolver_store is not None:
             stores.append(resolver_store)
         for store in stores:
+            profile_getter = getattr(store, "get_capabilities_for_profile", None)
+            if callable(profile_getter):
+                result = profile_getter(profile, fresh_only=True)
+                if isinstance(result, ProviderCapabilities):
+                    return result
             getter = getattr(store, "get_capabilities", None)
             if callable(getter):
                 result = getter(profile.profile_id)
                 if isinstance(result, ProviderCapabilities):
+                    fingerprint = generation_profile_fingerprint(profile)
+                    if result.profile_fingerprint and not result.is_fresh(
+                        profile_fingerprint=fingerprint
+                    ):
+                        continue
                     return result
         database_path = getattr(self._profile_resolver, "database_path", None)
         if database_path is not None:
             from .profile_store import DatabaseBackedCapabilityStore
 
-            return DatabaseBackedCapabilityStore(str(database_path)).get_capabilities(
-                profile.profile_id
-            )
+            store = DatabaseBackedCapabilityStore(str(database_path))
+            getter = getattr(store, "get_capabilities_for_profile", None)
+            if callable(getter):
+                return getter(profile, fresh_only=True)
+            return store.get_capabilities(profile.profile_id)
         return None
+
+    def _invalidate_capability_after_failure(
+        self,
+        profile: InferenceProfile,
+        *,
+        selected_mode: StructuredOutputMode,
+        error: BaseException,
+    ) -> None:
+        """Invalidate only the affected cache entry after a format failure."""
+
+        # Transport outages, authentication failures and timeouts say nothing
+        # about the previously probed structured-output mode. Retain a still
+        # fresh capability observation and let the normal retry/outage policy
+        # report the execution failure. Only an actual provider response
+        # incompatibility can invalidate the selected mode.
+        if selected_mode == "auto" or not isinstance(
+            error, (ProviderResponseError, StructuredJsonResponseError)
+        ):
+            return
+        reason = f"capability_execution_failed:{selected_mode}:{normalize_error(error)['code']}"
+        stores: list[object] = []
+        if self._capability_store is not None:
+            stores.append(self._capability_store)
+        resolver_store = getattr(self._profile_resolver, "profile_store", None)
+        if resolver_store is not None:
+            stores.append(resolver_store)
+        for store in stores:
+            invalidator = getattr(store, "invalidate_capabilities", None)
+            if callable(invalidator):
+                invalidator(profile.profile_id, reason=reason)
+                return
 
     def _select_mode(
         self,
@@ -370,6 +487,23 @@ class StructuredJsonProvider:
             )
         metadata_value = dict(response.metadata)
         token_usage = metadata_value.get("usage")
+        normalized_usage = normalize_usage(response)
+        metadata_value["normalized_usage"] = normalized_usage
+        metadata_value["parsed_json"] = parsed
+        metadata_value["raw_text"] = response.raw_text or response.content
+        provider_request_id = metadata_value.get("request_id")
+        if isinstance(provider_request_id, str) and provider_request_id:
+            metadata_value["provider_request_id"] = provider_request_id
+        finish_reason = metadata_value.get("finish_reason")
+        if not isinstance(finish_reason, str):
+            metadata_value["finish_reason"] = None
+        metadata_value["transport_error"] = None
+        metadata_value["local_validation_issues"] = _advisory_schema_issues(
+            parsed,
+            output_contract.get("json_schema")
+            if isinstance(output_contract, Mapping)
+            else None,
+        )
         return StructuredJsonResult(
             data=parsed,
             raw_text=response.raw_text or response.content,
@@ -389,6 +523,7 @@ class StructuredJsonProvider:
             ),
             metadata=metadata_value,
             token_usage=token_usage if isinstance(token_usage, dict) else None,
+            normalized_usage=normalized_usage,
         )
 
 
@@ -399,6 +534,83 @@ def _contract_digest(contract: Mapping[str, object] | None) -> str | None:
     if digest is None:
         digest = contract.get("contract_digest")
     return digest if isinstance(digest, str) and digest else None
+
+
+def _advisory_schema_issues(
+    value: object,
+    schema: object,
+    *,
+    path: str = "$",
+    limit: int = 16,
+) -> list[dict[str, object]]:
+    """Return bounded diagnostics without making schema mismatch terminal.
+
+    Core owns the authoritative schema/repair/semantic decision.  Local only
+    records a small, provider-neutral advisory report so Lab can distinguish
+    native schema compliance from a parseable response that Core can repair.
+    """
+
+    if not isinstance(schema, Mapping):
+        return []
+    issues: list[dict[str, object]] = []
+
+    def add(issue_path: str, code: str, message: str) -> None:
+        if len(issues) < limit:
+            issues.append({"path": issue_path, "code": code, "message": message})
+
+    schema_type = schema.get("type")
+    if schema_type == "object" and not isinstance(value, Mapping):
+        add(path, "type", "expected object")
+        return issues
+    if schema_type == "array" and not isinstance(value, list):
+        add(path, "type", "expected array")
+        return issues
+    if schema_type == "string" and not isinstance(value, str):
+        add(path, "type", "expected string")
+        return issues
+    if schema_type == "boolean" and not isinstance(value, bool):
+        add(path, "type", "expected boolean")
+        return issues
+    if "const" in schema and value != schema.get("const"):
+        add(path, "const", "value does not match const")
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        add(path, "enum", "value is not in enum")
+    if isinstance(value, Mapping):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for key in required:
+                if isinstance(key, str) and key not in value:
+                    add(f"{path}.{key}", "required", "required field is missing")
+        properties = schema.get("properties")
+        if isinstance(properties, Mapping):
+            for key, child_schema in properties.items():
+                if isinstance(key, str) and key in value:
+                    issues.extend(
+                        _advisory_schema_issues(
+                            value[key],
+                            child_schema,
+                            path=f"{path}.{key}",
+                            limit=max(0, limit - len(issues)),
+                        )
+                    )
+                    if len(issues) >= limit:
+                        break
+    elif isinstance(value, list):
+        item_schema = schema.get("items")
+        if item_schema is not None:
+            for index, item in enumerate(value):
+                issues.extend(
+                    _advisory_schema_issues(
+                        item,
+                        item_schema,
+                        path=f"{path}[{index}]",
+                        limit=max(0, limit - len(issues)),
+                    )
+                )
+                if len(issues) >= limit:
+                    break
+    return issues[:limit]
 
 
 __all__ = [
