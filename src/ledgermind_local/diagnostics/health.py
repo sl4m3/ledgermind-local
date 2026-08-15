@@ -126,9 +126,16 @@ def _runtime_checks(payload: dict[str, object]) -> dict[str, object]:
     checks: dict[str, object] = {}
     for name, component in components.items():
         if isinstance(component, dict):
+            # Most components expose ``ready``; aggregate adapters such as
+            # workers and object_facet expose a semantic ``ok`` computed from
+            # their actual fields.  Do not inspect a nested payload's shape
+            # and accidentally report a ready service as "not ready".
+            component_ok = component.get("ok")
+            if not isinstance(component_ok, bool):
+                component_ok = bool(component.get("ready", False))
             checks[name] = {
-                "ok": bool(component.get("ready", False)),
-                "detail": "ok" if component.get("ready") else "not ready",
+                "ok": component_ok,
+                "detail": "ok" if component_ok else "not ready",
             }
     return checks
 

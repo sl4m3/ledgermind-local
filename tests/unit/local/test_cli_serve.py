@@ -30,13 +30,18 @@ from ledgermind_local.core_gateway import (
     ProcessCoreGateway,
 )
 from ledgermind_local.core_gateway.signing import CoreBinaryVerificationError
+from ledgermind_local.core_gateway.compatibility import (
+    SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
+    SUPPORTED_PROTOCOL_MAX,
+)
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.service_lock import ServiceLockError
 
 
 def _patch_noop_core_runtime(monkeypatch) -> None:
     class DummyGateway:
-        advertised_schema_version = 12
+        advertised_protocol_version = SUPPORTED_PROTOCOL_MAX
+        advertised_schema_version = SUPPORTED_KNOWLEDGE_SCHEMA_MAX
         advertised_operations = frozenset(
             {
                 "health",
@@ -84,8 +89,8 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
             return CoreHealth(
                 healthy=True,
                 backend="fake",
-                protocol_version=1,
-                schema_version=12,
+                protocol_version=SUPPORTED_PROTOCOL_MAX,
+                schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
             )
 
         def run_control_maintenance(self, command: object) -> ControlMaintenanceResult:
@@ -432,27 +437,6 @@ def test_command_serve_applies_migrations_before_starting_server(
         def __exit__(self, exc_type, exc, tb) -> None:
             events.append(f"lock_exit:{self.path}")
 
-    class DummyConnection:
-        row_factory = None
-
-        def __enter__(self) -> Self:
-            events.append("db_connection_enter")
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            events.append("db_connection_exit")
-
-        def execute(self, query: str):
-            class Cursor:
-                def fetchone(self) -> tuple[str]:
-                    return ("ok",)
-
-                def fetchall(self) -> list[object]:
-                    return []
-
-            del query
-            return Cursor()
-
     class DummyServer:
         def __init__(self) -> None:
             self.should_exit = False
@@ -464,33 +448,22 @@ def test_command_serve_applies_migrations_before_starting_server(
         events.append("server_builder")
         return DummyServer()
 
-    dummy_connection = DummyConnection()
+    real_open_db_connection = cli_module.open_sqlite_connection
+    real_apply_migrations = cli_module.migrations.apply_migrations
 
-    def fake_open_db_connection(_path) -> DummyConnection:
+    def fake_open_db_connection(_path):
         events.append("db_connection_open")
-        return dummy_connection
+        return real_open_db_connection(_path)
 
     def fake_apply_migrations(connection) -> None:
         events.append("migrations_applied")
-        assert connection == dummy_connection
-
-    def fake_write_pid(path: Path, pid: int) -> None:
-        events.append(f"pid_write:{path}:{pid}")
-
-    def fake_remove_pid(path: Path) -> None:
-        events.append(f"pid_remove:{path}")
+        real_apply_migrations(connection)
 
     monkeypatch.setattr(cli_module, "ServiceLock", DummyLock)
     monkeypatch.setattr(cli_module, "_build_uvicorn_server", fake_server_builder)
-    monkeypatch.setattr(cli_module, "_write_pid_file", fake_write_pid)
-    monkeypatch.setattr(cli_module, "_remove_pid_file", fake_remove_pid)
     monkeypatch.setattr(cli_module, "open_sqlite_connection", fake_open_db_connection)
 
-    def fake_apply(_: object) -> None:
-        events.append("migrations_applied")
-        assert _ == dummy_connection
-
-    monkeypatch.setattr(cli_module.migrations, "apply_migrations", fake_apply)
+    monkeypatch.setattr(cli_module.migrations, "apply_migrations", fake_apply_migrations)
 
     monkeypatch.setattr(os, "getpid", lambda: 12345)
 
@@ -498,7 +471,7 @@ def test_command_serve_applies_migrations_before_starting_server(
     code = _command_serve(args)
 
     assert code == 0
-    assert "db_connection_enter" in events
+    assert "db_connection_open" in events
     assert "migrations_applied" in events
     assert events.index("migrations_applied") < events.index("server_builder")
 

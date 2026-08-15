@@ -7,6 +7,7 @@ import pytest
 from ledgermind_local.inference.cancellation import CancellationToken
 from ledgermind_local.inference.embedding_provider import (
     EmbeddingBatchTooLargeError,
+    EmbeddingCacheSchemaError,
     EmbeddingDimensionMismatchError,
     EmbeddingModelError,
     EmbeddingNonFiniteError,
@@ -17,6 +18,8 @@ from ledgermind_local.inference.embedding_provider import (
 )
 from ledgermind_local.inference.profiles import InferenceProfile
 from ledgermind_local.inference.providers.base import ProviderCancelledError
+from ledgermind_local.persistence import open_sqlite_connection
+from ledgermind_local.persistence import rounds_migrations
 
 
 class _FakeVectorizer:
@@ -208,6 +211,11 @@ def test_persistent_embedding_cache_survives_restart_and_is_profile_scoped(tmp_p
             return super().encode(texts)
 
     database = tmp_path / "rounds.db"
+    connection = open_sqlite_connection(database)
+    try:
+        rounds_migrations.apply_migrations(connection)
+    finally:
+        connection.close()
     first_vectorizer = _CountingVectorizer()
     first = EmbeddingProvider(
         vectorizer_factory=lambda: first_vectorizer,
@@ -234,3 +242,8 @@ def test_persistent_embedding_cache_survives_restart_and_is_profile_scoped(tmp_p
     )
     isolated.embed(["stable facet text"], other_profile, "facet_catalog")
     assert isolated_vectorizer.calls == 1
+
+
+def test_persistent_embedding_cache_does_not_create_unversioned_schema(tmp_path) -> None:
+    with pytest.raises(EmbeddingCacheSchemaError, match="apply Local migrations"):
+        PersistentEmbeddingCache(tmp_path / "unmigrated.db")

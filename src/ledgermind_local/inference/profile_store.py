@@ -21,6 +21,19 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _extra_body_from_row(row: sqlite3.Row) -> dict[str, object]:
+    if "extra_body_json" not in row.keys():
+        return {}
+    raw = row["extra_body_json"]
+    if not isinstance(raw, str):
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
 class InferenceProfileStore:
     """Repository over the profile tables in Local's rounds database."""
 
@@ -42,6 +55,7 @@ class InferenceProfileStore:
                 "max_retries": row["max_retries"],
                 "max_input_tokens": row["max_input_tokens"],
                 "max_output_tokens": row["max_output_tokens"],
+                "extra_body": _extra_body_from_row(row),
                 "structured_output_preference": row["structured_output_preference"],
                 "token_parameter": row["token_parameter"],
                 "supports_system_role": bool(row["supports_system_role"]),
@@ -118,14 +132,21 @@ class InferenceProfileStore:
         previous = self.get(profile.profile_id)
         previous_capabilities = self.get_capabilities(profile.profile_id)
         values = profile.model_dump()
+        extra_body_json = json.dumps(
+            values["extra_body"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
         self._connection.execute(
             """
             INSERT INTO inference_profiles (
                 profile_id, provider_kind, base_url, model, secret_ref,
                 timeout_seconds, max_retries, max_input_tokens, max_output_tokens,
-                structured_output_preference, token_parameter,
+                extra_body_json, structured_output_preference, token_parameter,
                 supports_system_role, supports_seed, enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(profile_id) DO UPDATE SET
                 provider_kind = excluded.provider_kind,
                 base_url = excluded.base_url,
@@ -135,6 +156,7 @@ class InferenceProfileStore:
                 max_retries = excluded.max_retries,
                 max_input_tokens = excluded.max_input_tokens,
                 max_output_tokens = excluded.max_output_tokens,
+                extra_body_json = excluded.extra_body_json,
                 structured_output_preference = excluded.structured_output_preference,
                 token_parameter = excluded.token_parameter,
                 supports_system_role = excluded.supports_system_role,
@@ -152,6 +174,7 @@ class InferenceProfileStore:
                 values["max_retries"],
                 values["max_input_tokens"],
                 values["max_output_tokens"],
+                extra_body_json,
                 values["structured_output_preference"],
                 values["token_parameter"],
                 int(values["supports_system_role"]),
@@ -390,6 +413,27 @@ class InferenceProfileStore:
         )
         return cursor.rowcount == 1
 
+    def record_capability_fallback(
+        self,
+        profile_id: str,
+        *,
+        failed_mode: StructuredOutputMode,
+        successful_mode: StructuredOutputMode,
+        error_code: str,
+    ) -> bool:
+        """Persist a successful bounded mode downgrade as fresh evidence."""
+
+        capabilities = self.get_capabilities(profile_id)
+        if capabilities is None:
+            return False
+        updated = capabilities.after_successful_fallback(
+            failed_mode=failed_mode,
+            successful_mode=successful_mode,
+            error_code=error_code,
+        )
+        self.upsert_capabilities(updated)
+        return True
+
     def record_probe_error(self, profile_id: str, *, error_code: str) -> bool:
         """Record an outage while retaining a previously valid cache entry."""
 
@@ -507,6 +551,17 @@ class DatabaseBackedCapabilityStore:
         finally:
             connection.close()
 
+    def list_capabilities(self) -> tuple[ProviderCapabilities, ...]:
+        from ..persistence import open_sqlite_connection
+        from ..persistence import rounds_migrations as migrations
+
+        connection = open_sqlite_connection(self._database_path)
+        try:
+            migrations.apply_migrations(connection)
+            return InferenceProfileStore(connection).list_capabilities()
+        finally:
+            connection.close()
+
     def get_capabilities_for_profile(
         self,
         profile: InferenceProfile,
@@ -553,6 +608,31 @@ class DatabaseBackedCapabilityStore:
             changed = InferenceProfileStore(connection).invalidate_capabilities(
                 profile_id,
                 reason=reason,
+            )
+            connection.commit()
+            return changed
+        finally:
+            connection.close()
+
+    def record_capability_fallback(
+        self,
+        profile_id: str,
+        *,
+        failed_mode: StructuredOutputMode,
+        successful_mode: StructuredOutputMode,
+        error_code: str,
+    ) -> bool:
+        from ..persistence import open_sqlite_connection
+        from ..persistence import rounds_migrations as migrations
+
+        connection = open_sqlite_connection(self._database_path)
+        try:
+            migrations.apply_migrations(connection)
+            changed = InferenceProfileStore(connection).record_capability_fallback(
+                profile_id,
+                failed_mode=failed_mode,
+                successful_mode=successful_mode,
+                error_code=error_code,
             )
             connection.commit()
             return changed

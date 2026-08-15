@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from collections.abc import Mapping
 from urllib.parse import urlparse
 
@@ -16,6 +17,7 @@ import httpx
 
 from ..cancellation import CancellationToken
 from ..profiles import TokenParameter
+from ..provider_telemetry import record_http_attempt
 from .base import (
     InferenceProvider,
     ModelRequest,
@@ -279,10 +281,17 @@ def _safe_metadata(
             metadata[key] = value
     usage = envelope.get("usage")
     if isinstance(usage, dict):
-        safe_usage: dict[str, int] = {}
+        safe_usage: dict[str, object] = {}
         for key, value in usage.items():
             if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool):
                 safe_usage[key] = value
+            elif (
+                key in {"reported_cost", "cost", "cost_usd"}
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value >= 0
+            ):
+                safe_usage[key] = float(value)
         if safe_usage:
             metadata["usage"] = safe_usage
     choices = envelope.get("choices")
@@ -325,6 +334,8 @@ class OpenAICompatibleProvider(InferenceProvider):
         token_parameter: TokenParameter = "max_tokens",
         supports_system_role: bool = True,
         supports_seed: bool = False,
+        extra_body: Mapping[str, object] | None = None,
+        profile_fingerprint: str | None = None,
         client: httpx.Client | None = None,
     ) -> None:
         normalized_url = base_url.strip().rstrip("/")
@@ -386,6 +397,8 @@ class OpenAICompatibleProvider(InferenceProvider):
         self.token_parameter = token_parameter
         self.supports_system_role = bool(supports_system_role)
         self.supports_seed = bool(supports_seed)
+        self.extra_body = dict(extra_body or {})
+        self.profile_fingerprint = profile_fingerprint
         self.timeout = httpx.Timeout(
             self.timeout_seconds,
             connect=timeout_values["connect_timeout_seconds"],
@@ -432,15 +445,30 @@ class OpenAICompatibleProvider(InferenceProvider):
         _raise_if_cancelled(token)
         prepared = self._prepare_request(request)
         payload = prepared.to_openai_payload()
+        # Provider-specific controls are kept outside the Core request
+        # contract.  Core-generated transport fields remain authoritative so
+        # an option blob cannot weaken the JSON contract or redirect a task.
+        for key, value in self.extra_body.items():
+            if key not in payload:
+                payload[key] = value
         request_bytes = len(
             json.dumps(
                 payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
         )
+        from ..provider_telemetry import current_operation
+
+        operation = current_operation() or prepared.metadata.get(
+            "_ledgermind_operation", "capability_probe"
+        )
+        profile_fingerprint = prepared.metadata.get(
+            "_ledgermind_profile_fingerprint", self.profile_fingerprint
+        )
         attempts = 0
         for attempt in range(1, self.max_retries + 2):
             _raise_if_cancelled(token)
             attempts = attempt
+            started = time.perf_counter()
             try:
                 response = self._client.post(
                     f"{self.base_url}/chat/completions",
@@ -452,16 +480,55 @@ class OpenAICompatibleProvider(InferenceProvider):
                     timeout=self.timeout,
                 )
             except httpx.TimeoutException as exc:
+                record_http_attempt(
+                    kind="generation",
+                    operation=operation,
+                    provider_profile_fingerprint=profile_fingerprint,
+                    transport=self.provider_kind,
+                    model=prepared.model,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    status="timeout",
+                    retry_index=attempt - 1,
+                    metadata=prepared.metadata,
+                )
                 if attempt <= self.max_retries:
                     self._sleep_before_retry(attempt, token=token)
                     continue
                 raise ProviderTimeoutError("provider request timed out") from exc
             except httpx.RequestError as exc:
+                record_http_attempt(
+                    kind="generation",
+                    operation=operation,
+                    provider_profile_fingerprint=profile_fingerprint,
+                    transport=self.provider_kind,
+                    model=prepared.model,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    status="transport_error",
+                    retry_index=attempt - 1,
+                    metadata=prepared.metadata,
+                )
                 if attempt <= self.max_retries:
                     self._sleep_before_retry(attempt, token=token)
                     continue
                 raise ProviderTransportError("provider transport failed") from exc
 
+            request_id = response.headers.get("x-request-id") or response.headers.get(
+                "request-id"
+            ) or f"local-{uuid.uuid4().hex}"
+            if response.status_code >= 400:
+                record_http_attempt(
+                    kind="generation",
+                    operation=operation,
+                    provider_profile_fingerprint=profile_fingerprint,
+                    transport=self.provider_kind,
+                    model=prepared.model,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    status="failed",
+                    request_id=request_id,
+                    http_status=response.status_code,
+                    retry_index=attempt - 1,
+                    metadata=prepared.metadata,
+                )
             if response.status_code in {401, 403}:
                 raise ProviderAuthenticationError("provider authentication failed")
             if response.status_code == 429 or 500 <= response.status_code <= 599:
@@ -478,14 +545,79 @@ class OpenAICompatibleProvider(InferenceProvider):
 
             response_bytes = len(response.content)
             if response_bytes > self.max_response_bytes:
+                record_http_attempt(
+                    kind="generation",
+                    operation=operation,
+                    provider_profile_fingerprint=profile_fingerprint,
+                    transport=self.provider_kind,
+                    model=prepared.model,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    status="failed",
+                    request_id=request_id,
+                    http_status=response.status_code,
+                    retry_index=attempt - 1,
+                    metadata=prepared.metadata,
+                )
                 raise ProviderResponseError("provider response exceeds size limit")
-            return self._parse_response(
-                response,
-                request=prepared,
-                attempts=attempts,
-                request_bytes=request_bytes,
-                response_bytes=response_bytes,
+            try:
+                result = self._parse_response(
+                    response,
+                    request=prepared,
+                    attempts=attempts,
+                    request_bytes=request_bytes,
+                    response_bytes=response_bytes,
+                )
+            except Exception:
+                record_http_attempt(
+                    kind="generation",
+                    operation=operation,
+                    provider_profile_fingerprint=profile_fingerprint,
+                    transport=self.provider_kind,
+                    model=prepared.model,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    status="invalid_response",
+                    request_id=request_id,
+                    http_status=response.status_code,
+                    retry_index=attempt - 1,
+                    metadata=prepared.metadata,
+                )
+                raise
+            normalized_usage = normalize_usage(result)
+            record_http_attempt(
+                kind="generation",
+                operation=operation,
+                provider_profile_fingerprint=profile_fingerprint,
+                transport=self.provider_kind,
+                model=result.model,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                status="completed",
+                request_id=request_id,
+                http_status=response.status_code,
+                input_tokens=(
+                    normalized_usage.get("input_tokens")
+                    if isinstance(normalized_usage.get("input_tokens"), int)
+                    else None
+                ),
+                output_tokens=(
+                    normalized_usage.get("output_tokens")
+                    if isinstance(normalized_usage.get("output_tokens"), int)
+                    else None
+                ),
+                total_tokens=(
+                    normalized_usage.get("total_tokens")
+                    if isinstance(normalized_usage.get("total_tokens"), int)
+                    else None
+                ),
+                reported_cost=(
+                    normalized_usage.get("reported_cost")
+                    if isinstance(normalized_usage.get("reported_cost"), (int, float))
+                    else None
+                ),
+                usage_unknown=bool(normalized_usage.get("usage_unknown", True)),
+                retry_index=attempt - 1,
+                metadata=prepared.metadata,
             )
+            return result
 
         raise ProviderTransportError("provider request did not complete")
 

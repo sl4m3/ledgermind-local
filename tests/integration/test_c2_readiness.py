@@ -11,6 +11,10 @@ from ledgermind_local.core_gateway.contracts import (
     CoreHealth,
     ObjectFacetStatistics,
 )
+from ledgermind_local.core_gateway.compatibility import (
+    SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
+    SUPPORTED_PROTOCOL_MAX,
+)
 from ledgermind_local.inference.profile_store import InferenceProfileStore
 from ledgermind_local.inference.profiles import InferenceProfile
 from ledgermind_local.paths import ServicePaths
@@ -19,8 +23,16 @@ from ledgermind_local.persistence import rounds_migrations as migrations
 
 
 class _Gateway:
-    def __init__(self, *, schema_version: int = 12) -> None:
+    def __init__(
+        self,
+        *,
+        schema_version: int = SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
+        object_count: int = 0,
+        integrity_finding_count: int = 0,
+    ) -> None:
         self.schema_version = schema_version
+        self.object_count = object_count
+        self.integrity_finding_count = integrity_finding_count
 
     def require_capabilities(self, *capabilities: str) -> None:
         del capabilities
@@ -29,7 +41,7 @@ class _Gateway:
         return CoreHealth(
             healthy=True,
             backend="fake",
-            protocol_version=1,
+            protocol_version=SUPPORTED_PROTOCOL_MAX,
             schema_version=self.schema_version,
         )
 
@@ -50,13 +62,13 @@ class _Gateway:
     def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics:
         del request_id
         return ObjectFacetStatistics(
-            object_count=0,
+            object_count=self.object_count,
             active_value_count=0,
             superseded_value_count=0,
             operational_backlog=0,
             background_backlog=0,
             embedding_backlog=0,
-            integrity_finding_count=0,
+            integrity_finding_count=self.integrity_finding_count,
         )
 
     def close(self) -> None:
@@ -163,5 +175,23 @@ def test_full_readiness_requires_schema_twelve(tmp_path: Path) -> None:
         report = runtime.health_report()
         assert report["full_ready"] is False
         assert report["components"]["core"]["schema_version"] == 10
+    finally:
+        runtime.stop()
+
+
+def test_full_readiness_is_consistent_with_object_facet_component(tmp_path: Path) -> None:
+    runtime = _runtime(
+        tmp_path, gateway=_Gateway(object_count=1, integrity_finding_count=1)
+    )
+    _seed_profiles(runtime.database_path)
+
+    runtime.start()
+    try:
+        report = runtime.health_report()
+        assert report["full_ready"] is False
+        assert report["readiness_reason"] == "object_facet_not_ready"
+        assert report["components"]["object_facet"]["ok"] is False
+        assert report["components"]["object_facet"]["initialization_pending"] is False
+        assert report["components"]["workers"]["ok"] is True
     finally:
         runtime.stop()

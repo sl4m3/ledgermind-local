@@ -135,6 +135,42 @@ def _required_text(value: str, field_name: str) -> str:
     return normalized
 
 
+def _validate_provider_extra_body(value: object) -> dict[str, object]:
+    """Validate secret-free provider wire extensions stored with a profile."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("extra_body must be a mapping")
+
+    def walk(node: object) -> None:
+        if isinstance(node, Mapping):
+            for key, child in node.items():
+                if not isinstance(key, str) or not key.strip():
+                    raise ValueError("extra_body keys must be non-empty strings")
+                if _is_sensitive_config_key(key):
+                    raise ValueError("extra_body must not contain secret-like keys")
+                walk(child)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child)
+        elif node is not None and not isinstance(node, (str, bool, int, float)):
+            raise ValueError("extra_body must contain JSON-compatible values")
+
+    walk(value)
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("extra_body must contain JSON-compatible values") from exc
+    if len(encoded.encode("utf-8")) > 100_000:
+        raise ValueError("extra_body is too large")
+    return dict(value)
+
+
 GENERATION_PROFILE_DIGEST_ALGORITHM = "sha256"
 GENERATION_PROFILE_DIGEST_SCHEMA_VERSION = 1
 
@@ -166,6 +202,7 @@ def generation_profile_fingerprint(
         "max_retries": profile.max_retries,
         "max_input_tokens": profile.max_input_tokens,
         "max_output_tokens": profile.max_output_tokens,
+        "extra_body": profile.extra_body,
         "structured_output_preference": (
             structured_output_override or profile.structured_output_preference
         ),
@@ -280,6 +317,9 @@ class InferenceProfile(BaseModel):
     max_retries: int = Field(default=2, ge=0, le=5)
     max_input_tokens: int = Field(default=12_000, ge=1, le=200_000)
     max_output_tokens: int = Field(default=2_000, ge=1, le=50_000)
+    # Provider-specific, non-secret wire controls stay in Local and never
+    # enter the Core task contract.
+    extra_body: dict[str, object] = Field(default_factory=dict)
     structured_output_preference: StructuredOutputPreference = "auto"
     token_parameter: TokenParameter = "max_tokens"
     supports_system_role: bool = True
@@ -300,6 +340,11 @@ class InferenceProfile(BaseModel):
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("base_url must be an absolute http(s) URL")
         return normalized
+
+    @field_validator("extra_body")
+    @classmethod
+    def _validate_extra_body(cls, value: dict[str, object]) -> dict[str, object]:
+        return _validate_provider_extra_body(value)
 
 
 class ProviderCapabilities(BaseModel):
@@ -352,6 +397,61 @@ class ProviderCapabilities(BaseModel):
         if mode == "prompt_only":
             return self.prompt_only_supported or self.plain_json_prompt
         return False
+
+    def after_successful_fallback(
+        self,
+        *,
+        failed_mode: StructuredOutputMode,
+        successful_mode: StructuredOutputMode,
+        error_code: str,
+    ) -> "ProviderCapabilities":
+        """Record a bounded runtime downgrade without forcing a new probe.
+
+        A provider response incompatibility is stronger evidence than the
+        original capability probe for the failed transport mode.  If Local
+        completes the same request through its one bounded fallback, retain
+        the cache as fresh, select the working mode on the next request, and
+        keep the failure as secret-free diagnostic metadata.
+        """
+
+        if failed_mode == "auto" or successful_mode == "auto":
+            raise ValueError("fallback modes must be concrete")
+        if failed_mode == successful_mode:
+            raise ValueError("fallback modes must be different")
+        mode_fields: dict[str, tuple[str, ...]] = {
+            "json_schema": ("json_schema_supported", "structured_json_schema"),
+            "tool_call": ("tool_call_supported", "tool_calling"),
+            "json_object": ("json_object_supported", "structured_json_object"),
+            "prompt_only": ("prompt_only_supported", "plain_json_prompt"),
+        }
+        values = self.model_dump(mode="python")
+        for field in mode_fields[failed_mode]:
+            values[field] = False
+        for field in mode_fields[successful_mode]:
+            values[field] = True
+        if failed_mode == "json_schema":
+            values["native_schema_strictness"] = False
+        elif successful_mode == "json_schema":
+            values["native_schema_strictness"] = True
+        detected = dict(self.detected_capabilities)
+        detected.update(
+            {
+                "structured_json_schema": values["structured_json_schema"],
+                "structured_json_object": values["structured_json_object"],
+                "tool_calling": values["tool_calling"],
+                "plain_json_prompt": values["plain_json_prompt"],
+                "native_schema_strictness": values["native_schema_strictness"],
+            }
+        )
+        values["detected_capabilities"] = detected
+        values["structured_output_mode"] = successful_mode
+        reason = (
+            f"capability_execution_failed:{failed_mode}:"
+            f"{error_code}"
+        )
+        values["last_error_code"] = reason
+        values["last_error"] = reason
+        return type(self).model_validate(values)
 
     @property
     def detected_capabilities_json(self) -> dict[str, object]:

@@ -5,6 +5,7 @@ from typing import Any
 from ledgermind_local.config import LocalConfig
 from ledgermind_local.paths import ServicePaths
 
+from .compatibility import compatibility_reason
 from .isolation import IsolationCapabilities, IsolationPlan, IsolationRequirements
 from .security_policy import (
     build_core_isolation_requirements,
@@ -103,6 +104,8 @@ def build_core_doctor_report(
             "detail": "Core was not launched",
             "protocol_version": None,
             "schema_version": None,
+            "knowledge_schema_version": None,
+            "compatibility_reason": "core_unreachable",
         },
         "environment": _environment_report([], unavailable_capabilities),
     }
@@ -168,6 +171,13 @@ def build_core_doctor_report(
                 "detail": health.get("detail"),
                 "protocol_version": health.get("protocol_version"),
                 "schema_version": health.get("schema_version"),
+                "knowledge_schema_version": (
+                    supervisor.handshake_result or {}
+                ).get("knowledge_schema_version"),
+                "compatibility_reason": compatibility_reason(
+                    health.get("protocol_version"),
+                    (supervisor.handshake_result or {}).get("knowledge_schema_version"),
+                ),
             }
             handshake = supervisor.handshake_result or {}
             report["version"] = handshake.get("version")
@@ -189,8 +199,7 @@ def build_core_doctor_report(
         binary.is_file()
         and signature_allows_launch
         and report["health"]["healthy"]
-        and report["health"]["protocol_version"] == 1
-        and report["health"]["schema_version"] is not None
+        and report["health"]["compatibility_reason"] is None
         and report["environment"]["unexpected_count"] == 0
         and report["environment"]["secret_like_count"] == 0
         and not report["sandbox"]["missing_requirements"]

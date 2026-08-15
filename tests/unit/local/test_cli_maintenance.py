@@ -20,6 +20,7 @@ from ledgermind_local.core_gateway.maintenance import (
     RollbackRestoreResult,
     sha256_file,
 )
+from ledgermind_local.core_gateway.compatibility import SUPPORTED_KNOWLEDGE_SCHEMA_MAX
 from ledgermind_local.maintenance.core_backup import CoreBackupService
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
@@ -42,7 +43,7 @@ class _CliCoreGateway:
             relative_path="exchange/outgoing/core-snapshot.bin",
             sha256=sha256_file(source),
             size_bytes=source.stat().st_size,
-            schema_version=12,
+            schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
         )
 
     def validate_backup(self, command: object) -> BackupManifest:
@@ -51,7 +52,7 @@ class _CliCoreGateway:
             relative_path=command.relative_path,  # type: ignore[attr-defined]
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=12,
+            schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
         )
 
     def prepare_restore(self, command: object) -> PrepareRestoreResult:
@@ -60,7 +61,7 @@ class _CliCoreGateway:
             relative_path=command.relative_path,  # type: ignore[attr-defined]
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=12,
+            schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
             restore_token="test-restore-token",
             requires_restart=True,
         )
@@ -71,7 +72,7 @@ class _CliCoreGateway:
             relative_path=command.relative_path,  # type: ignore[attr-defined]
             sha256=command.sha256,  # type: ignore[attr-defined]
             size_bytes=20,
-            schema_version=12,
+            schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
             state="applied_pending_commit",
         )
 

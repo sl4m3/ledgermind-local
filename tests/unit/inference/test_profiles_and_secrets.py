@@ -44,6 +44,15 @@ def test_inference_profile_rejects_invalid_provider_and_limits() -> None:
             secret_ref="ref",
         )
 
+    with pytest.raises(ValueError, match="secret-like"):
+        InferenceProfile(
+            profile_id="p",
+            base_url="https://provider.example/v1",
+            model="model",
+            secret_ref="ref",
+            extra_body={"api_key": "must-not-be-stored"},
+        )
+
     with pytest.raises(ValueError, match="max_output_tokens"):
         InferenceProfile(
             profile_id="p",

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import math
+import time
+import uuid
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+from ...inference.provider_telemetry import record_http_attempt
 
 
 class EmbeddingProviderError(RuntimeError):
@@ -34,6 +38,7 @@ class OpenAICompatibleEmbeddingProvider:
         max_concurrency: int = 1,
         timeout_seconds: float = 60.0,
         client: httpx.Client | None = None,
+        profile_fingerprint: str | None = None,
     ) -> None:
         normalized = endpoint.strip().rstrip("/")
         parsed = urlparse(normalized)
@@ -54,8 +59,26 @@ class OpenAICompatibleEmbeddingProvider:
         self.batch_size = max(int(batch_size), 1)
         self.max_concurrency = max(int(max_concurrency), 1)
         self.timeout = float(timeout_seconds)
+        self._profile_fingerprint = profile_fingerprint
+        self._operation = "embedding"
+        self._operation_item_counts: dict[str, int] | None = None
         self._client = client or httpx.Client(timeout=self.timeout)
         self._owns_client = client is None
+
+    def set_telemetry_context(
+        self,
+        *,
+        operation: str,
+        profile_fingerprint: str,
+        operation_item_counts: dict[str, int] | None = None,
+    ) -> None:
+        self._operation = str(operation)
+        self._profile_fingerprint = str(profile_fingerprint)
+        self._operation_item_counts = (
+            {str(key): int(value) for key, value in operation_item_counts.items()}
+            if operation_item_counts is not None
+            else None
+        )
 
     def close(self) -> None:
         if self._owns_client:
@@ -69,6 +92,7 @@ class OpenAICompatibleEmbeddingProvider:
                 "embedding batch exceeds configured batch_size"
             )
         payload: dict[str, Any] = {"model": self.model, "input": list(texts)}
+        started = time.perf_counter()
         try:
             response = self._client.post(
                 self.endpoint,
@@ -80,9 +104,60 @@ class OpenAICompatibleEmbeddingProvider:
                 timeout=self.timeout,
             )
         except httpx.TimeoutException as exc:
+            record_http_attempt(
+                kind="embedding",
+                operation=self._operation,
+                provider_profile_fingerprint=self._profile_fingerprint,
+                transport="openai_compatible",
+                model=self.model,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                status="timeout",
+                batch_item_count=len(texts),
+                operation_item_counts=self._operation_item_counts,
+            )
             raise EmbeddingProviderTimeoutError("embedding request timed out") from exc
         except httpx.RequestError as exc:
+            record_http_attempt(
+                kind="embedding",
+                operation=self._operation,
+                provider_profile_fingerprint=self._profile_fingerprint,
+                transport="openai_compatible",
+                model=self.model,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                status="transport_error",
+                batch_item_count=len(texts),
+                operation_item_counts=self._operation_item_counts,
+            )
             raise EmbeddingProviderError("embedding request failed") from exc
+        request_id = response.headers.get("x-request-id") or response.headers.get(
+            "request-id"
+        ) or f"local-{uuid.uuid4().hex}"
+        response_payload: object | None = None
+        try:
+            response_payload = response.json()
+        except ValueError:
+            response_payload = None
+        usage = response_payload.get("usage") if isinstance(response_payload, dict) else None
+        input_tokens = usage.get("prompt_tokens", usage.get("input_tokens")) if isinstance(usage, dict) else None
+        output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+        total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+        record_http_attempt(
+            kind="embedding",
+            operation=self._operation,
+            provider_profile_fingerprint=self._profile_fingerprint,
+            transport="openai_compatible",
+            model=self.model,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            status="completed" if response.status_code < 400 else "failed",
+            request_id=request_id,
+            http_status=response.status_code,
+            input_tokens=input_tokens if isinstance(input_tokens, int) else None,
+            output_tokens=output_tokens if isinstance(output_tokens, int) else None,
+            total_tokens=total_tokens if isinstance(total_tokens, int) else None,
+            usage_unknown=not isinstance(usage, dict),
+            batch_item_count=len(texts),
+            operation_item_counts=self._operation_item_counts,
+        )
         if response.status_code in {401, 403}:
             raise EmbeddingProviderAuthenticationError(
                 "embedding authentication failed"
@@ -92,7 +167,7 @@ class OpenAICompatibleEmbeddingProvider:
                 f"embedding provider returned {response.status_code}"
             )
         try:
-            envelope = response.json()
+            envelope = response_payload
         except ValueError as exc:
             raise EmbeddingProviderError("embedding response is not JSON") from exc
         data = envelope.get("data") if isinstance(envelope, dict) else None

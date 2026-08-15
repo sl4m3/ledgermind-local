@@ -19,6 +19,7 @@ from .embedding_provider import (
 )
 from .profile_slots import ProfileResolver, ProfileSlot
 from .profiles import StructuredOutputMode
+from .provider_telemetry import record_task
 from .providers.base import ChatMessage, ProviderCancelledError, ProviderTimeoutError
 from .structured_json_provider import StructuredJsonProvider
 
@@ -226,6 +227,39 @@ class CoreTaskExecutor:
                 task, error_code="invalid_request", input_bytes=0
             )
         input_bytes = _model_request_bytes(spec)
+        telemetry_operation = _telemetry_operation(task)
+        structured_metadata = task.structured_generation or {}
+        attempt_kind = (
+            str(structured_metadata.get("attempt_kind"))
+            if isinstance(structured_metadata, dict)
+            and structured_metadata.get("attempt_kind") is not None
+            else "primary"
+        )
+        attempt_index = (
+            structured_metadata.get("attempt_number")
+            if isinstance(structured_metadata, dict)
+            else None
+        )
+        root_task_id = (
+            structured_metadata.get("root_task_id")
+            if isinstance(structured_metadata, dict)
+            else None
+        )
+        request_reason = (
+            "semantic_repair"
+            if attempt_kind in {"repair", "empty_recheck"}
+            else ("agent_generation" if telemetry_operation == "agent_generation" else "primary")
+        )
+        record_task(
+            kind="generation",
+            operation=telemetry_operation,
+            task_count=1,
+            task_id=task.task_id,
+            root_task_id=root_task_id or task.task_id,
+            attempt_index=attempt_index if isinstance(attempt_index, int) else 0,
+            request_reason=request_reason,
+            structured_output_mode=spec.mode,
+        )
         try:
             result = self._run_bounded(
                 lambda: self._json_provider.generate_json(
@@ -236,6 +270,14 @@ class CoreTaskExecutor:
                     mode=spec.mode,
                     tool_name=spec.tool_name,
                     metadata=spec.metadata,
+                    telemetry_context={
+                        "task_id": task.task_id,
+                        "root_task_id": root_task_id or task.task_id,
+                        "attempt_index": attempt_index if isinstance(attempt_index, int) else 0,
+                        "request_reason": request_reason,
+                        "attempt_kind": attempt_kind,
+                    },
+                    telemetry_operation=telemetry_operation,
                     seed=spec.seed,
                     response_format=spec.response_format,
                     profile_slot=task.profile_slot,
@@ -602,6 +644,18 @@ def _memory_space_id(task: GenericExecutionTask) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _telemetry_operation(task: GenericExecutionTask) -> object:
+    """Expose structured repair work separately from its parent operation."""
+
+    structured = task.structured_generation
+    if isinstance(structured, dict) and structured.get("attempt_kind") in {
+        "repair",
+        "empty_recheck",
+    }:
+        return "semantic_repair"
+    return task.operation
+
+
 def _error_category(error_code: str) -> str:
     if error_code in {
         "provider_timeout",
@@ -674,8 +728,8 @@ __all__ = [
     "CoreExecutorError",
     "CoreTaskExecutor",
     "EgressAuditRecord",
-    "EmbeddingPurpose",
     "EmbeddingBatchRequest",
+    "EmbeddingPurpose",
     "EmbeddingRequestSpec",
     "ExecutionCancelledError",
     "ExecutionStatus",

@@ -15,6 +15,9 @@ from ledgermind_local.inference.secrets import SecretStore
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
+from ledgermind_local.production_support import (
+    background_structured_output_preference,
+)
 
 
 def _profile() -> InferenceProfile:
@@ -28,6 +31,19 @@ def _profile() -> InferenceProfile:
         supports_system_role=False,
         supports_seed=True,
     )
+
+
+def test_background_structured_output_preference_prefers_json_schema() -> None:
+    assert (
+        background_structured_output_preference(("json_object", "json_schema", "prompt_only"))
+        == "json_schema"
+    )
+    assert (
+        background_structured_output_preference(("json_object", "prompt_only"))
+        == "json_object"
+    )
+    assert background_structured_output_preference(("prompt_only",)) == "prompt_only"
+    assert background_structured_output_preference(()) == "auto"
 
 
 def test_migration_and_capability_persistence_are_restart_safe(tmp_path) -> None:
@@ -71,7 +87,7 @@ def test_migration_and_capability_persistence_are_restart_safe(tmp_path) -> None
         } <= columns
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone()[0] == 10
+        ).fetchone()[0] == 11
     finally:
         connection.close()
 

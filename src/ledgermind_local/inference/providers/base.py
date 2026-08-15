@@ -179,6 +179,14 @@ def normalize_usage(response: ModelResponse | Mapping[str, object]) -> dict[str,
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 normalized[target] = value
                 break
+    if isinstance(usage, Mapping):
+        for name in ("reported_cost", "cost", "cost_usd"):
+            value = usage.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                normalized["reported_cost"] = float(value)
+                break
+    if "input_tokens" in normalized and "output_tokens" in normalized and "total_tokens" not in normalized:
+        normalized["total_tokens"] = int(normalized["input_tokens"]) + int(normalized["output_tokens"])
     normalized["usage_unknown"] = not any(
         key in normalized for key in ("input_tokens", "output_tokens", "total_tokens")
     )
@@ -291,8 +299,8 @@ def messages_as_dicts(messages: Iterable[ChatMessage]) -> list[dict[str, str]]:
 
 __all__ = [
     "ChatMessage",
-    "InferenceProvider",
     "GenerationTransport",
+    "InferenceProvider",
     "ModelRequest",
     "ModelResponse",
     "ProviderAuthenticationError",

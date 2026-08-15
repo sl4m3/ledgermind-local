@@ -15,6 +15,7 @@ from .profiles import (
     StructuredOutputMode,
     generation_profile_fingerprint,
 )
+from .provider_telemetry import operation_context
 from .providers.base import (
     ChatMessage,
     InferenceProvider,
@@ -25,12 +26,12 @@ from .providers.base import (
     normalize_error,
     normalize_usage,
 )
+from .providers.google_boundary import GoogleGenerationTransport
 from .providers.openai_compatible import (
     DEFAULT_TOOL_NAME,
     OpenAICompatibleProvider,
     decode_json_content,
 )
-from .providers.google_boundary import GoogleGenerationTransport
 from .secrets import SecretNotFoundError, SecretStore
 from .token_budget import (
     InputBudgetExceededError,
@@ -66,6 +67,8 @@ def default_provider_factory(profile: InferenceProfile, secret: str) -> Inferenc
             token_parameter=profile.token_parameter,
             supports_system_role=profile.supports_system_role,
             supports_seed=profile.supports_seed,
+            extra_body=profile.extra_body,
+            profile_fingerprint=generation_profile_fingerprint(profile),
         )
     raise ProviderConfigurationError("unsupported inference provider kind")
 
@@ -211,6 +214,8 @@ class StructuredJsonProvider:
         structured_output_mode: StructuredOutputMode | None = None,
         tool_name: str | None = None,
         metadata: Mapping[str, object] | None = None,
+        telemetry_operation: str | None = None,
+        telemetry_context: Mapping[str, object] | None = None,
         seed: int | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> StructuredJsonResult:
@@ -261,37 +266,209 @@ class StructuredJsonProvider:
 
         provider = self._provider_factory(profile, secret)
         capabilities = self._load_capabilities(profile)
-        try:
-            execute = getattr(provider, "execute_structured", None)
-            if callable(execute):
-                response = execute(
-                    request,
-                    profile,
-                    capabilities,
-                    cancellation_token=cancellation_token,
-                )
-            else:
-                response = provider.complete_json(
-                    request, cancellation_token=cancellation_token
-                )
-        except Exception as exc:
-            self._invalidate_capability_after_failure(
+        fallback_metadata: dict[str, object] = {}
+
+        internal_metadata = dict(telemetry_context or {})
+        task_id = internal_metadata.get("_ledgermind_task_id")
+        root_task_id = internal_metadata.get("_ledgermind_root_task_id")
+        attempt_index = internal_metadata.get("_ledgermind_attempt_index")
+        request_reason = internal_metadata.get("_ledgermind_request_reason", "primary")
+        attempt_kind = internal_metadata.get("_ledgermind_attempt_kind")
+
+        def execute_and_parse(
+            current_request: ModelRequest,
+            current_mode: StructuredOutputMode,
+            *,
+            reason: str,
+            fallback_from: StructuredOutputMode | None = None,
+            fallback_to: StructuredOutputMode | None = None,
+        ) -> StructuredJsonResult:
+            with operation_context(
+                telemetry_operation,
+                task_id=task_id,
+                root_task_id=root_task_id,
+                attempt_index=attempt_index,
+                request_reason=reason,
+                structured_output_mode=current_mode,
+                fallback_from=fallback_from,
+                fallback_to=fallback_to,
+                attempt_kind=attempt_kind,
+            ):
+                execute = getattr(provider, "execute_structured", None)
+                if callable(execute):
+                    response = execute(
+                        current_request,
+                        profile,
+                        capabilities,
+                        cancellation_token=cancellation_token,
+                    )
+                else:
+                    response = provider.complete_json(
+                        current_request, cancellation_token=cancellation_token
+                    )
+            return self._to_result(
                 profile,
-                selected_mode=selected_mode,
-                error=exc,
+                response,
+                output_contract=contract,
+                selected_mode=current_mode,
+                tool_name=tool_name,
             )
-            raise
+
+        try:
+            try:
+                result = execute_and_parse(
+                    request,
+                    selected_mode,
+                    reason=str(request_reason),
+                )
+            except Exception as exc:
+                if not isinstance(
+                    exc, (ProviderResponseError, StructuredJsonResponseError)
+                ):
+                    raise
+                fallback_mode = self._automatic_fallback_mode(
+                    profile,
+                    requested_mode=requested_mode,
+                    response_format=response_format,
+                    selected_mode=selected_mode,
+                )
+                if fallback_mode is None:
+                    self._invalidate_capability_after_failure(
+                        profile,
+                        selected_mode=selected_mode,
+                        error=exc,
+                    )
+                    raise
+                fallback_request = self._build_request(
+                    profile=profile,
+                    messages=messages,
+                    max_output_tokens=max_output_tokens,
+                    output_contract=contract,
+                    mode=fallback_mode,
+                    tool_name=tool_name,
+                    metadata=metadata,
+                    seed=seed,
+                )
+                # Prompt-only fallback appends a short instruction to the
+                # final message, so enforce the same input budget before the
+                # bounded second provider call.
+                try:
+                    self._token_budget_estimator.ensure_within(
+                        fallback_request, profile.max_input_tokens
+                    )
+                except InputBudgetExceededError as budget_error:
+                    budget_error.profile_id = profile.profile_id
+                    self._invalidate_capability_after_failure(
+                        profile,
+                        selected_mode=selected_mode,
+                        error=exc,
+                    )
+                    raise
+                fallback_metadata = {
+                    "structured_output_fallback": True,
+                    "structured_output_fallback_from": selected_mode,
+                    "structured_output_fallback_to": fallback_mode,
+                    "structured_output_fallback_error_code": normalize_error(exc)[
+                        "code"
+                    ],
+                }
+                try:
+                    result = execute_and_parse(
+                        fallback_request,
+                        fallback_mode,
+                        reason="structured_mode_fallback",
+                        fallback_from=selected_mode,
+                        fallback_to=fallback_mode,
+                    )
+                except Exception as fallback_error:
+                    self._invalidate_capability_after_failure(
+                        profile,
+                        selected_mode=selected_mode,
+                        error=exc,
+                    )
+                    self._invalidate_capability_after_failure(
+                        profile,
+                        selected_mode=fallback_mode,
+                        error=fallback_error,
+                    )
+                    raise
+                self._record_capability_fallback(
+                    profile,
+                    failed_mode=selected_mode,
+                    successful_mode=fallback_mode,
+                    error_code=normalize_error(exc)["code"],
+                )
         finally:
             close = getattr(provider, "close", None)
             if callable(close):
                 close()
-        return self._to_result(
-            profile,
-            response,
-            output_contract=contract,
-            selected_mode=selected_mode,
-            tool_name=tool_name,
-        )
+        if fallback_metadata:
+            result = result.model_copy(
+                update={
+                    "metadata": {
+                        **result.metadata,
+                        **fallback_metadata,
+                    }
+                }
+            )
+        return result
+
+    def _record_capability_fallback(
+        self,
+        profile: InferenceProfile,
+        *,
+        failed_mode: StructuredOutputMode,
+        successful_mode: StructuredOutputMode,
+        error_code: str,
+    ) -> None:
+        """Retain a fresh cache after a successful bounded fallback."""
+
+        stores: list[object] = []
+        if self._capability_store is not None:
+            stores.append(self._capability_store)
+        resolver_store = getattr(self._profile_resolver, "profile_store", None)
+        if resolver_store is not None:
+            stores.append(resolver_store)
+        for store in stores:
+            recorder = getattr(store, "record_capability_fallback", None)
+            if callable(recorder):
+                recorder(
+                    profile.profile_id,
+                    failed_mode=failed_mode,
+                    successful_mode=successful_mode,
+                    error_code=error_code,
+                )
+                return
+
+    @staticmethod
+    def _automatic_fallback_mode(
+        profile: InferenceProfile,
+        *,
+        requested_mode: StructuredOutputMode | None,
+        response_format: Mapping[str, object] | None,
+        selected_mode: StructuredOutputMode,
+    ) -> StructuredOutputMode | None:
+        """Return one bounded transport fallback for an automatic choice.
+
+        Capability probes are intentionally small.  A weak or reasoning-heavy
+        model can pass a tiny tool-call probe and then emit ordinary JSON for
+        the production contract.  When Local selected the mode automatically,
+        one retry in a less specialized JSON transport keeps the Core task
+        contract intact without turning semantic failures into open-ended
+        retries.  Explicit operator choices remain fail-closed.
+        """
+
+        if response_format is not None:
+            return None
+        if requested_mode not in (None, "auto"):
+            return None
+        if profile.structured_output_preference != "auto":
+            return None
+        if selected_mode in {"json_schema", "tool_call"}:
+            return "json_object"
+        if selected_mode == "json_object":
+            return "prompt_only"
+        return None
 
     def _normalize_contract_and_mode(
         self,
@@ -342,6 +519,14 @@ class StructuredJsonProvider:
             if callable(profile_getter):
                 result = profile_getter(profile, fresh_only=True)
                 if isinstance(result, ProviderCapabilities):
+                    from .provider_telemetry import record_counter
+
+                    record_counter(
+                        "capability_cache_hits",
+                        operation="capability_cache",
+                        provider_profile_fingerprint=generation_profile_fingerprint(profile),
+                        model=profile.model,
+                    )
                     return result
             getter = getattr(store, "get_capabilities", None)
             if callable(getter):
@@ -352,6 +537,14 @@ class StructuredJsonProvider:
                         profile_fingerprint=fingerprint
                     ):
                         continue
+                    from .provider_telemetry import record_counter
+
+                    record_counter(
+                        "capability_cache_hits",
+                        operation="capability_cache",
+                        provider_profile_fingerprint=fingerprint,
+                        model=profile.model,
+                    )
                     return result
         database_path = getattr(self._profile_resolver, "database_path", None)
         if database_path is not None:

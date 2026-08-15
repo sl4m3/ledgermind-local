@@ -29,7 +29,13 @@ def test_inference_profile_migration_creates_profile_binding_and_audit_tables(
                 "PRAGMA table_info(inference_profiles)"
             ).fetchall()
         }
-        assert {"profile_id", "provider_kind", "secret_ref", "enabled"}.issubset(
+        assert {
+            "profile_id",
+            "provider_kind",
+            "secret_ref",
+            "extra_body_json",
+            "enabled",
+        }.issubset(
             columns
         )
         assert "secret_value" not in columns

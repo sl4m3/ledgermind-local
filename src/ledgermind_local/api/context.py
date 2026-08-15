@@ -49,6 +49,9 @@ class ContextRetrieveRequest(BaseModel):
     repository_id: str | None = Field(default=None, min_length=1, max_length=200)
     task_id: str | None = Field(default=None, min_length=1, max_length=200)
     conversation_id: str | None = Field(default=None, min_length=1, max_length=200)
+    query_language: str | None = Field(default=None, min_length=1, max_length=32)
+    target_id: str | None = Field(default=None, min_length=1, max_length=200)
+    target_alias: str | None = Field(default=None, min_length=1, max_length=200)
     related_object_ids: list[str] | None = None
     requested_facets: list[str] | None = None
     explanation_level: Literal["compact", "none"] = "compact"
@@ -60,8 +63,13 @@ class ContextItemResponse(BaseModel):
     value_id: str
     primary_object_id: str
     object_name: str
+    target_id: str | None = None
+    target_name: str | None = None
+    target_breadcrumb: list[str] = Field(default_factory=list, max_length=16)
     facet: str
     content: str
+    content_language: str | None = None
+    conditions: list[dict[str, str]] = Field(default_factory=list)
     relevance: float = Field(ge=0.0, le=1.0)
     explanation: dict[str, object]
 
@@ -137,6 +145,9 @@ def create_context_router(
                     repository_id=payload.repository_id,
                     task_id=payload.task_id,
                     conversation_id=payload.conversation_id,
+                    query_language=payload.query_language,
+                    target_id=payload.target_id,
+                    target_alias=payload.target_alias,
                     related_object_ids=tuple(payload.related_object_ids or ()),
                     requested_facets=tuple(payload.requested_facets or ()),
                     explanation_level=payload.explanation_level,

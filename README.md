@@ -109,7 +109,10 @@ signature/public-key для binary, собранного этим же Docker bu
 
 Legacy contract payloads are migrated once before Local workers start. Legacy
 runtime routes, operation names and aliases are not supported; new capture
-arrives through Integrations.
+arrives through Integrations. Local executes Core-owned generic tasks and does
+not own `HypothesisCandidate`, `MemoryObject`, `Target`, `Facet`, Merge, or
+Replace semantics. The application Core coordinator owns those decisions;
+Local only transports provider work and reports opaque results.
 
 ## Universal Hermes installer
 

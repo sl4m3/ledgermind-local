@@ -19,11 +19,15 @@ from ledgermind_local.core_gateway import (
     ProcessCoreGateway,
     RunControlMaintenanceCommand,
 )
+from ledgermind_local.core_gateway.compatibility import (
+    compatibility_reason,
+    knowledge_schema_supported,
+)
 from ledgermind_local.core_gateway.security_policy import (
     build_core_isolation_requirements,
 )
 from ledgermind_local.core_gateway.signing import verify_core_binary
-from ledgermind_local.core_gateway.supervisor import CoreSupervisor
+from ledgermind_local.core_gateway.supervisor import CoreSupervisor, CoreSupervisorError
 from ledgermind_local.inference.core_task_executor import CoreTaskExecutor
 from ledgermind_local.inference.embedding_provider import (
     EmbeddingProvider,
@@ -46,6 +50,7 @@ from ledgermind_local.maintenance.core_backup import CoreBackupService
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
+from ledgermind_local.persistence.migrations import MigrationError
 from ledgermind_local.persistence.contract_migration import migrate_contract_payloads
 from ledgermind_local.raw_rounds import RawRoundIngestHandler
 from ledgermind_local.scheduler import (
@@ -58,6 +63,11 @@ from ledgermind_local.scheduler.worker_state import WorkerState, WorkerStateSnap
 from ledgermind_local.service_lock import ServiceLock
 
 logger = logging.getLogger(__name__)
+
+# Core model-task execution is bounded at 300 seconds.  Keep a grace window
+# on the Core lease so a slow reasoning provider cannot be claimed twice while
+# Local is still completing the first request.
+MIN_CORE_MODEL_TASK_LEASE_SECONDS = 360
 
 
 def _build_runtime_vectorizer_factory(config: LocalConfig) -> Callable[[], Any]:
@@ -226,6 +236,7 @@ class LocalRuntime:
         self._stop_requested = False
         self._migrations_applied = False
         self._core_ready = False
+        self._core_protocol_version: int | None = None
         self._core_schema_version: int | None = None
         self._core_error_code: str | None = None
         self._component_errors: dict[str, str] = {}
@@ -242,6 +253,7 @@ class LocalRuntime:
         self._shutdown_timed_out_workers: list[str] = []
         self._control_maintenance: dict[str, object] | None = None
         self._object_facet_statistics: dict[str, object] | None = None
+        self._object_facet_bootstrap_pending = False
 
     @property
     def started(self) -> bool:
@@ -327,6 +339,7 @@ class LocalRuntime:
         self._worker_observations.clear()
         self._core_error_code = None
         self._core_ready = False
+        self._core_protocol_version = None
         self._core_schema_version = None
         self._required_core_capabilities = ()
         self._restore_status = None
@@ -335,6 +348,7 @@ class LocalRuntime:
         self._shutdown_timed_out_workers = []
         self._control_maintenance = None
         self._object_facet_statistics = None
+        self._object_facet_bootstrap_pending = False
         self._migrations_applied = False
         self._context_gateway = None
         self._backup_service = None
@@ -511,7 +525,12 @@ class LocalRuntime:
 
         return {
             "ready": self._core_ready,
+            "ok": self._core_ready,
+            "protocol_version": self._core_protocol_version,
             "schema_version": self._core_schema_version,
+            "compatibility_reason": compatibility_reason(
+                self._core_protocol_version, self._core_schema_version
+            ),
             "required": list(self._required_core_capabilities),
             "advertised_operations": _safe_strings(advertised_operations),
             "advertised_capabilities": _safe_strings(advertised_capabilities),
@@ -561,12 +580,24 @@ class LocalRuntime:
         isolation = self._isolation_report()
         capabilities = self._capabilities_report()
         profile_slots = self._profile_slots_report()
+        if self._object_facet_bootstrap_pending:
+            # The initial control pass schedules the static facet catalogue,
+            # while workers drain it asynchronously.  Refresh the bounded
+            # control projection on the health path so the prewarm finding is
+            # closed after the queue reaches zero; otherwise readiness would
+            # wait forever on a stale cached finding.
+            self._refresh_object_facet_health()
         statistics = dict(self._object_facet_statistics or {})
         core_report = {
             "ready": self._core_ready,
+            "ok": self._core_ready,
             "available": self.core_gateway is not None,
             "error_code": self._core_error_code,
+            "protocol_version": self._core_protocol_version,
             "schema_version": self._core_schema_version,
+            "compatibility_reason": compatibility_reason(
+                self._core_protocol_version, self._core_schema_version
+            ),
             "isolation": isolation,
             "capabilities": capabilities,
         }
@@ -586,7 +617,7 @@ class LocalRuntime:
         restore = dict(self._restore_status or {"ready": True, "state": "clean"})
         restore_ready = bool(restore.get("ready", False))
         capabilities_ready = bool(capabilities.get("ready", False))
-        schema_ready = self._core_schema_version == 12
+        schema_ready = knowledge_schema_supported(self._core_schema_version)
         control_ready = not bool(self._component_errors.get("control"))
         statistics_ready = not bool(self._component_errors.get("statistics"))
         terminal_worker_failure = any(
@@ -610,6 +641,48 @@ class LocalRuntime:
             capabilities_payload = dict(capabilities_payload)
             capabilities_payload.pop("detail", None)
             isolation_report["capabilities"] = capabilities_payload
+        object_facet_empty = bool(
+            statistics.get("object_count") == 0
+            and statistics.get("active_value_count") == 0
+            and statistics.get("superseded_value_count") == 0
+        )
+        object_facet_no_work = all(
+            not _is_positive_int(statistics.get(name))
+            for name in (
+                "operational_backlog",
+                "background_backlog",
+                "embedding_backlog",
+            )
+        )
+        object_facet_initializing = bool(
+            statistics_ready
+            and not legacy_digest_upgrade_required
+            and object_facet_empty
+            and object_facet_no_work
+            and (
+                _is_positive_int(statistics.get("integrity_finding_count"))
+                or _is_positive_int(statistics.get("missing_card_embeddings"))
+                or _is_positive_int(statistics.get("missing_facet_embeddings"))
+            )
+        )
+        object_facet_ready = bool(
+            statistics_ready
+            and not legacy_digest_upgrade_required
+            and (
+                all(
+                    not _is_positive_int(statistics.get(name))
+                    for name in (
+                        "integrity_finding_count",
+                        "missing_card_embeddings",
+                        "missing_facet_embeddings",
+                        "operational_backlog",
+                        "background_backlog",
+                        "embedding_backlog",
+                    )
+                )
+                or object_facet_initializing
+            )
+        )
         full_ready = bool(
             capture_ready
             and self._core_ready
@@ -620,10 +693,23 @@ class LocalRuntime:
             and inference_ready
             and control_ready
             and statistics_ready
+            and object_facet_ready
             and restore_ready
             and not legacy_digest_upgrade_required
             and not terminal_worker_failure
             and not self._shutdown_incomplete
+        )
+        readiness_reason = self._readiness_reason(
+            schema_ready=schema_ready,
+            capabilities_ready=capabilities_ready,
+            profile_slots=profile_slots,
+            workers_ready=workers_ready,
+            inference_ready=inference_ready,
+            control_ready=control_ready,
+            statistics_ready=statistics_ready,
+            object_facet_ready=object_facet_ready,
+            object_facet_initializing=object_facet_initializing,
+            restore_ready=restore_ready,
         )
         core_report["isolation"] = isolation_report
         degraded_workers = any(
@@ -633,19 +719,39 @@ class LocalRuntime:
             for report in worker_reports.values()
         )
         degraded = bool(
-            degraded_workers or self._shutdown_incomplete or not restore_ready
+            degraded_workers
+            or self._shutdown_incomplete
+            or not restore_ready
+            or object_facet_initializing
         )
+        workers_component = dict(worker_reports)
+        workers_component.update({"ready": workers_ready, "ok": workers_ready})
+        control_component = {
+            "ready": control_ready,
+            "ok": control_ready,
+            **dict(self._control_maintenance or {"status": "unavailable"}),
+        }
+        control_component["ready"] = control_ready
+        control_component["ok"] = control_ready
+        restore_component = dict(restore)
+        restore_component.setdefault("ready", restore_ready)
+        restore_component["ok"] = restore_ready
         return {
             "status": "ready"
             if full_ready
             else ("capture-ready" if capture_ready else "unavailable"),
             "capture_ready": capture_ready,
             "full_ready": full_ready,
+            "readiness_reason": readiness_reason,
+            "degraded_reason": (
+                "facet_catalogue_preload" if object_facet_initializing else None
+            ),
             "degraded": degraded,
             "shutdown": shutdown,
             "components": {
                 "capture": {
                     "ready": capture_ready,
+                    "ok": capture_ready,
                     "migrations_applied": self._migrations_applied,
                     "service_lock_held": self._lock_acquired,
                     "raw_round_writer": self._raw_round_handler is not None,
@@ -653,17 +759,25 @@ class LocalRuntime:
                 "core": core_report,
                 "isolation": isolation_report,
                 "capabilities": capabilities,
-                "restore": restore,
+                "restore": restore_component,
                 "inference": {
                     "ready": inference_ready,
+                    "ok": inference_ready,
                     "profile_slots": profile_slots,
                 },
-                "control": {
-                    "ready": control_ready,
-                    **dict(self._control_maintenance or {"status": "unavailable"}),
+                "control": control_component,
+                "object_facet": {
+                    **statistics,
+                    "ready": object_facet_ready,
+                    "ok": object_facet_ready,
+                    "initialization_pending": object_facet_initializing,
+                    "degraded_reason": (
+                        "facet_catalogue_preload"
+                        if object_facet_initializing
+                        else None
+                    ),
                 },
-                "object_facet": statistics,
-                "workers": worker_reports,
+                "workers": workers_component,
                 "retention": retention_report,
             },
             "workers": worker_reports,
@@ -679,6 +793,55 @@ class LocalRuntime:
             "legacy_digest_upgrade_required": legacy_digest_upgrade_required,
             "terminal_worker_failure": terminal_worker_failure,
         }
+
+    def _readiness_reason(
+        self,
+        *,
+        schema_ready: bool,
+        capabilities_ready: bool,
+        profile_slots: Mapping[str, object],
+        workers_ready: bool,
+        inference_ready: bool,
+        control_ready: bool,
+        statistics_ready: bool,
+        object_facet_ready: bool,
+        object_facet_initializing: bool,
+        restore_ready: bool,
+    ) -> str | None:
+        """Return one stable blocker code for status/doctor consumers."""
+
+        if not self._migrations_applied:
+            return "local_db_migration_incomplete"
+        if self._core_error_code:
+            return self._core_error_code
+        if self.core_gateway is None or not self._core_ready:
+            return "core_unreachable"
+        compatibility = compatibility_reason(
+            self._core_protocol_version, self._core_schema_version
+        )
+        if compatibility is not None:
+            return compatibility
+        if not schema_ready:
+            return "core_knowledge_schema_incompatible"
+        if not capabilities_ready:
+            return "core_capability_missing"
+        if not bool(profile_slots.get("ready", False)):
+            return "provider_profile_invalid"
+        if not workers_ready or not inference_ready:
+            return "worker_not_ready"
+        if not control_ready or not statistics_ready:
+            return "control_integrity_not_ready"
+        if not object_facet_ready:
+            return (
+                "object_facet_initializing"
+                if object_facet_initializing
+                else "object_facet_not_ready"
+            )
+        if not restore_ready:
+            return "restore_inconsistent"
+        if self._shutdown_incomplete:
+            return "shutdown_incomplete"
+        return None
 
     def _acquire_service_lock(self) -> None:
         if self._service_lock is None:
@@ -850,6 +1013,11 @@ class LocalRuntime:
                     health_schema, bool
                 ):
                     self._core_schema_version = health_schema
+                health_protocol = getattr(health_result, "protocol_version", None)
+                if isinstance(health_protocol, int) and not isinstance(
+                    health_protocol, bool
+                ):
+                    self._core_protocol_version = health_protocol
             else:
                 self._core_ready = True
             advertised_schema = getattr(
@@ -859,7 +1027,15 @@ class LocalRuntime:
                 advertised_schema, bool
             ):
                 self._core_schema_version = advertised_schema
+            advertised_protocol = getattr(
+                self.core_gateway, "advertised_protocol_version", None
+            )
+            if isinstance(advertised_protocol, int) and not isinstance(
+                advertised_protocol, bool
+            ):
+                self._core_protocol_version = advertised_protocol
             if not self._core_ready:
+                self._core_error_code = "core_unreachable"
                 raise RuntimeError("Core health check failed")
             self._backup_service = CoreBackupService(
                 gateway=self.core_gateway,
@@ -868,7 +1044,7 @@ class LocalRuntime:
             )
         except Exception as exc:  # noqa: BLE001 - capture remains available
             self._core_ready = False
-            self._core_error_code = _safe_error_code(exc)
+            self._core_error_code = self._core_error_code or _safe_error_code(exc)
             gateway = self.core_gateway
             if gateway is not None:
                 close = getattr(gateway, "close", None)
@@ -886,6 +1062,33 @@ class LocalRuntime:
         if gateway is None:
             return
         run_control = getattr(gateway, "run_control_maintenance", None)
+        get_statistics = getattr(gateway, "get_object_facet_statistics", None)
+
+        def refresh_statistics() -> None:
+            if not callable(get_statistics):
+                self._component_errors["statistics"] = "unsupported"
+                return
+            try:
+                result = get_statistics(f"local-stats:{os.getpid()}:{uuid.uuid4()}")
+                self._object_facet_statistics = {
+                    name: getattr(result, name)
+                    for name in (
+                        "object_count",
+                        "active_value_count",
+                        "superseded_value_count",
+                        "operational_backlog",
+                        "background_backlog",
+                        "embedding_backlog",
+                        "integrity_finding_count",
+                        "missing_card_embeddings",
+                        "missing_facet_embeddings",
+                        "legacy_digest_upgrade_required",
+                    )
+                    if hasattr(result, name)
+                }
+            except Exception as exc:  # noqa: BLE001 - diagnostics must not crash startup
+                self._component_errors["statistics"] = _safe_error_code(exc)
+
         if not callable(run_control):
             self._component_errors["control"] = "unsupported"
         else:
@@ -908,30 +1111,95 @@ class LocalRuntime:
                     "error_code": _safe_error_code(exc),
                 }
                 self._component_errors["control"] = _safe_error_code(exc)
-        get_statistics = getattr(gateway, "get_object_facet_statistics", None)
-        if not callable(get_statistics):
-            self._component_errors["statistics"] = "unsupported"
-        else:
+
+        refresh_statistics()
+
+        # A control pass can observe a missing facet vector before the
+        # lifecycle scheduler has drained the already-queued embedding task.
+        # Once all embedding and contour backlogs are empty, one bounded
+        # reconciliation pass closes that stale projection without hiding a
+        # still-live finding.
+        statistics = self._object_facet_statistics or {}
+        if callable(run_control) and all(
+            statistics.get(name, 0) == 0
+            for name in (
+                "operational_backlog",
+                "background_backlog",
+                "embedding_backlog",
+                "missing_card_embeddings",
+                "missing_facet_embeddings",
+            )
+        ) and statistics.get("integrity_finding_count", 0) > 0:
             try:
-                result = get_statistics(f"local-stats:{os.getpid()}:{uuid.uuid4()}")
-                self._object_facet_statistics = {
-                    name: getattr(result, name)
-                    for name in (
-                        "object_count",
-                        "active_value_count",
-                        "superseded_value_count",
-                        "operational_backlog",
-                        "background_backlog",
-                        "embedding_backlog",
-                        "integrity_finding_count",
-                        "missing_card_embeddings",
-                        "missing_facet_embeddings",
-                        "legacy_digest_upgrade_required",
+                embedding_profiles = self._embedding_profiles_by_memory_space()
+                result = run_control(
+                    RunControlMaintenanceCommand(
+                        f"local-control-reconcile:{os.getpid()}:{uuid.uuid4()}",
+                        embedding_profiles=embedding_profiles,
                     )
-                    if hasattr(result, name)
+                )
+                self._control_maintenance = {
+                    "status": getattr(result, "status", "completed"),
+                    "ready": True,
                 }
-            except Exception as exc:  # noqa: BLE001 - diagnostics must not crash startup
-                self._component_errors["statistics"] = _safe_error_code(exc)
+                refresh_statistics()
+            except Exception as exc:  # noqa: BLE001 - readiness remains observable
+                self._control_maintenance = {
+                    "status": "failed",
+                    "ready": False,
+                    "error_code": _safe_error_code(exc),
+                }
+                self._component_errors["control"] = _safe_error_code(exc)
+
+        statistics = self._object_facet_statistics or {}
+        self._object_facet_bootstrap_pending = bool(
+            statistics.get("object_count") == 0
+            and statistics.get("active_value_count") == 0
+            and statistics.get("superseded_value_count") == 0
+            and any(
+                _is_positive_int(statistics.get(name))
+                for name in (
+                    "missing_card_embeddings",
+                    "missing_facet_embeddings",
+                    "operational_backlog",
+                    "background_backlog",
+                    "embedding_backlog",
+                )
+            )
+        )
+
+    def run_control_maintenance(self) -> dict[str, object]:
+        """Run a fresh control pass and return content-free maintenance evidence.
+
+        Startup performs the same pass before workers begin processing model
+        tasks.  Operators and lifecycle certification also need an explicit
+        post-drain pass: embedding jobs may resolve a finding that was valid at
+        startup, and the cached health projection must then be refreshed.
+        """
+
+        self._refresh_object_facet_health()
+        maintenance = dict(self._control_maintenance or {})
+        statistics = dict(self._object_facet_statistics or {})
+        return {
+            "status": maintenance.get("status", "unavailable"),
+            "ready": bool(maintenance.get("ready", False)),
+            "statistics": {
+                name: statistics.get(name)
+                for name in (
+                    "object_count",
+                    "active_value_count",
+                    "superseded_value_count",
+                    "operational_backlog",
+                    "background_backlog",
+                    "embedding_backlog",
+                    "integrity_finding_count",
+                    "missing_card_embeddings",
+                    "missing_facet_embeddings",
+                    "legacy_digest_upgrade_required",
+                )
+                if name in statistics
+            },
+        }
 
     def _start_workers(self) -> None:
         for name in self._WORKER_ORDER:
@@ -998,7 +1266,10 @@ class LocalRuntime:
                     embed_texts_timeout_seconds=300,
                 ),
                 worker_id="local-execution-tasks",
-                lease_seconds=int(self.config.worker_lease_seconds),
+                lease_seconds=max(
+                    int(self.config.worker_lease_seconds),
+                    MIN_CORE_MODEL_TASK_LEASE_SECONDS,
+                ),
             )
         raise ValueError(f"unknown Local worker: {name}")
 
@@ -1086,6 +1357,7 @@ class LocalRuntime:
         except Exception as exc:  # noqa: BLE001 - readiness must expose the blocker
             return {
                 "ready": False,
+                "ok": False,
                 "missing_profile_slots_by_memory_space": {},
                 "error_code": _safe_error_code(exc),
             }
@@ -1095,23 +1367,24 @@ class LocalRuntime:
                 close()
         return {
             "ready": not missing,
+            "ok": not missing,
             "missing_profile_slots_by_memory_space": missing,
         }
 
     def _isolation_report(self) -> dict[str, object]:
         gateway = self.core_gateway
         if gateway is None:
-            return {"ready": False, "missing": (), "capabilities": {}}
+            return {"ready": False, "ok": False, "missing": (), "capabilities": {}}
         capabilities = getattr(gateway, "isolation_capabilities", None)
         if capabilities is None:
-            return {"ready": True, "missing": (), "capabilities": {}}
+            return {"ready": True, "ok": True, "missing": (), "capabilities": {}}
         as_dict = getattr(capabilities, "as_dict", None)
         payload = as_dict() if callable(as_dict) else {}
         missing = build_core_isolation_requirements(
             self.config.core_security,
             verify_core_signature=self.config.verify_core_signature,
         ).missing(capabilities)
-        return {"ready": not missing, "missing": missing, "capabilities": payload}
+        return {"ready": not missing, "ok": not missing, "missing": missing, "capabilities": payload}
 
     def _cleanup_after_failed_start(self) -> None:
         self.request_stop()
@@ -1156,6 +1429,19 @@ class LocalRuntime:
 
 
 def _safe_error_code(error: BaseException) -> str:
+    code = getattr(error, "reason_code", None)
+    if not isinstance(code, str):
+        code = getattr(error, "code", None)
+    if isinstance(code, str) and code.strip():
+        if code == "profile_missing":
+            return "provider_profile_invalid"
+        return code
+    if isinstance(error, (CoreSupervisorError, ConnectionError, TimeoutError)):
+        return "core_unreachable"
+    if isinstance(error, MigrationError):
+        return "local_db_migration_incomplete"
+    if "migration" in str(error).casefold():
+        return "local_db_migration_incomplete"
     return type(error).__name__ or "RuntimeError"
 
 
@@ -1280,4 +1566,9 @@ def initialize_local_layout(
         return paths, cfg, token
 
     existing_token = paths.token_file.read_text(encoding="utf-8")
-    return paths, cfg, existing_token
+    normalized_token = existing_token.strip()
+    if not normalized_token:
+        raise ValueError("Local API token file must contain a non-empty token")
+    if normalized_token != existing_token:
+        _atomic_write_text(paths.token_file, normalized_token, mode=0o600)
+    return paths, cfg, normalized_token

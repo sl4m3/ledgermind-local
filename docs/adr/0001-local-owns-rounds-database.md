@@ -1,6 +1,7 @@
 # ADR 0001: Local владеет rounds.db
 
-- **Статус:** accepted
+- **Статус:** superseded
+- **Superseded by:** ADR 0005: Local executes Core-owned tasks
 - **Дата:** 2026-08-03
 
 Local service владеет `rounds.db` и всеми данными локальной обработки:

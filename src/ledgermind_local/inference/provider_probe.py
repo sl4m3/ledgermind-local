@@ -29,6 +29,10 @@ PROBE_MODE_ORDER: tuple[StructuredOutputMode, ...] = (
     "prompt_only",
 )
 PROBE_TOOL_NAME = "submit_structured_result"
+# Reasoning-capable models may spend more than the JSON body itself before
+# emitting content.  A 64-token probe can therefore report a false transport
+# failure even when the same profile can complete the production contract.
+PROBE_MAX_OUTPUT_TOKENS = 768
 _SAFE_PROBE_ERROR_CODES = frozenset(
     {
         "authentication_error",
@@ -389,6 +393,19 @@ def _probe_contract(probe_kind: str) -> dict[str, object]:
                 "content": {"type": "string"},
                 "source_event_ids": {"type": "array", "items": {"type": "string"}},
                 "scope_text": {"type": ["string", "null"]},
+                "content_language": {"type": ["string", "null"]},
+                "conditions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "source_event_id": {"type": "string"},
+                            "surface_text": {"type": "string"},
+                        },
+                        "required": ["source_event_id", "surface_text"],
+                    },
+                },
                 "valid_from": {"type": ["string", "null"]},
                 "valid_to": {"type": ["string", "null"]},
             },
@@ -432,6 +449,8 @@ def _probe_contract(probe_kind: str) -> dict[str, object]:
                     "content": "Project uses PostgreSQL",
                     "source_event_ids": ["event-user"],
                     "scope_text": None,
+                    "content_language": None,
+                    "conditions": [],
                     "valid_from": None,
                     "valid_to": None,
                 }
@@ -515,7 +534,7 @@ def _probe_request(
                 ),
             ),
         ),
-        max_output_tokens=min(profile.max_output_tokens, 64),
+        max_output_tokens=min(profile.max_output_tokens, PROBE_MAX_OUTPUT_TOKENS),
         output_contract=dict(contract),
         mode=mode,
         tool_name=PROBE_TOOL_NAME,
@@ -547,6 +566,7 @@ def _selected_mode(capabilities: ProviderCapabilities) -> StructuredOutputMode:
 
 __all__ = [
     "PROBE_MODE_ORDER",
+    "PROBE_MAX_OUTPUT_TOKENS",
     "PROBE_TOOL_NAME",
     "ProviderProbe",
     "ProviderProbeResult",

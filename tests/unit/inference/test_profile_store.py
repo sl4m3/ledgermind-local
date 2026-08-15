@@ -44,6 +44,23 @@ def test_profile_store_upserts_and_lists_without_secret_values(tmp_path) -> None
         connection.close()
 
 
+def test_profile_store_roundtrips_secret_free_provider_options(tmp_path) -> None:
+    connection = _connection(tmp_path / "local.db")
+    try:
+        profile = _profile().model_copy(
+            update={"extra_body": {"reasoning": {"effort": "none", "exclude": True}}}
+        )
+        store = InferenceProfileStore(connection)
+        store.upsert(profile)
+        assert store.get(profile.profile_id) == profile
+        assert connection.execute(
+            "SELECT extra_body_json FROM inference_profiles WHERE profile_id = ?",
+            (profile.profile_id,),
+        ).fetchone()[0] == '{"reasoning":{"effort":"none","exclude":true}}'
+    finally:
+        connection.close()
+
+
 def test_profile_store_binds_technical_slots_and_records_safe_audit(tmp_path) -> None:
     connection = _connection(tmp_path / "local.db")
     try:

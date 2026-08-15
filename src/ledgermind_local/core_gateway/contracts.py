@@ -30,12 +30,19 @@ class CoreCapabilityError(CoreGatewayError):
         missing_capabilities: tuple[str, ...] = (),
         expected_schema_version: int | None = None,
         advertised_schema_version: int | None = None,
+        reason_code: str = "core_capability_missing",
+        expected_protocol_version: int | None = None,
+        advertised_protocol_version: int | None = None,
     ) -> None:
+        self.reason_code = reason_code
+        self.code = reason_code
         self.requested = requested
         self.missing_operations = missing_operations
         self.missing_capabilities = missing_capabilities
         self.expected_schema_version = expected_schema_version
         self.advertised_schema_version = advertised_schema_version
+        self.expected_protocol_version = expected_protocol_version
+        self.advertised_protocol_version = advertised_protocol_version
         details: list[str] = []
         if missing_operations:
             details.append("operations=" + ",".join(missing_operations))
@@ -46,6 +53,12 @@ class CoreCapabilityError(CoreGatewayError):
                 "schema="
                 + f"{advertised_schema_version or 'unavailable'}"
                 + f" (required {expected_schema_version})"
+            )
+        if expected_protocol_version is not None:
+            details.append(
+                "protocol="
+                + f"{advertised_protocol_version or 'unavailable'}"
+                + f" (required {expected_protocol_version})"
             )
         suffix = "; ".join(details) if details else "no advertised support"
         super().__init__(f"Core capability validation failed: {suffix}")
@@ -666,6 +679,9 @@ class RetrieveContextCommand:
     repository_id: str | None = None
     task_id: str | None = None
     conversation_id: str | None = None
+    query_language: str | None = None
+    target_id: str | None = None
+    target_alias: str | None = None
     related_object_ids: tuple[str, ...] = ()
     requested_facets: tuple[str, ...] = ()
     explanation_level: str = "compact"
@@ -685,6 +701,12 @@ class RetrieveContextCommand:
             raise ValueError("query_embedding must contain finite values")
         _required(self.embedding_model_id, "embedding_model_id")
         _required(self.embedding_model_version, "embedding_model_version")
+        if self.query_language is not None:
+            _required(self.query_language, "query_language")
+        if self.target_id is not None:
+            _required(self.target_id, "target_id")
+        if self.target_alias is not None:
+            _required(self.target_alias, "target_alias")
         if not 1 <= self.limit <= 100:
             raise ValueError("limit must be between 1 and 100")
         if self.repository_id is not None and self.project_id is None:
@@ -709,6 +731,9 @@ class RetrieveContextCommand:
             "repository_id": self.repository_id,
             "task_id": self.task_id,
             "conversation_id": self.conversation_id,
+            "query_language": self.query_language,
+            "target_id": self.target_id,
+            "target_alias": self.target_alias,
             "related_object_ids": list(self.related_object_ids),
             "requested_facets": list(self.requested_facets),
             "explanation_level": self.explanation_level,
@@ -798,6 +823,9 @@ class ControlMaintenanceResult:
     missing_card_embeddings: int
     missing_facet_embeddings: int
     integrity_errors: int
+    diagnostic_rows_deleted: int = 0
+    terminal_task_rows_deleted: int = 0
+    cleanup_candidate_count: int = 0
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> ControlMaintenanceResult:
@@ -813,6 +841,9 @@ class ControlMaintenanceResult:
                 "missing_card_embeddings",
                 "missing_facet_embeddings",
                 "integrity_errors",
+                "diagnostic_rows_deleted",
+                "terminal_task_rows_deleted",
+                "cleanup_candidate_count",
             },
             "control maintenance result",
         )
@@ -840,6 +871,15 @@ class ControlMaintenanceResult:
                 payload.get("missing_facet_embeddings"), "missing_facet_embeddings"
             ),
             integrity_errors=_non_negative_int(payload.get("integrity_errors"), "integrity_errors"),
+            diagnostic_rows_deleted=_non_negative_int(
+                payload.get("diagnostic_rows_deleted", 0), "diagnostic_rows_deleted"
+            ),
+            terminal_task_rows_deleted=_non_negative_int(
+                payload.get("terminal_task_rows_deleted", 0), "terminal_task_rows_deleted"
+            ),
+            cleanup_candidate_count=_non_negative_int(
+                payload.get("cleanup_candidate_count", 0), "cleanup_candidate_count"
+            ),
         )
 
     def to_payload(self) -> dict[str, object]:
@@ -853,6 +893,9 @@ class ControlMaintenanceResult:
             "missing_card_embeddings": self.missing_card_embeddings,
             "missing_facet_embeddings": self.missing_facet_embeddings,
             "integrity_errors": self.integrity_errors,
+            "diagnostic_rows_deleted": self.diagnostic_rows_deleted,
+            "terminal_task_rows_deleted": self.terminal_task_rows_deleted,
+            "cleanup_candidate_count": self.cleanup_candidate_count,
         }
 
 
@@ -868,6 +911,13 @@ class ObjectFacetStatistics:
     missing_card_embeddings: int | None = None
     missing_facet_embeddings: int | None = None
     legacy_digest_upgrade_required: bool = False
+    knowledge_row_count: int = 0
+    execution_row_count: int = 0
+    diagnostic_row_count: int = 0
+    legacy_row_count: int = 0
+    database_bytes: int = 0
+    oldest_diagnostic: str | None = None
+    diagnostic_cleanup_candidate_count: int = 0
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> ObjectFacetStatistics:
@@ -884,6 +934,13 @@ class ObjectFacetStatistics:
                 "missing_card_embeddings",
                 "missing_facet_embeddings",
                 "legacy_digest_upgrade_required",
+                "knowledge_row_count",
+                "execution_row_count",
+                "diagnostic_row_count",
+                "legacy_row_count",
+                "database_bytes",
+                "oldest_diagnostic",
+                "diagnostic_cleanup_candidate_count",
             },
             "object-facet statistics",
         )
@@ -918,6 +975,30 @@ class ObjectFacetStatistics:
             missing_card_embeddings=optional_count("missing_card_embeddings"),
             missing_facet_embeddings=optional_count("missing_facet_embeddings"),
             legacy_digest_upgrade_required=legacy,
+            knowledge_row_count=_non_negative_int(
+                payload.get("knowledge_row_count", 0), "knowledge_row_count"
+            ),
+            execution_row_count=_non_negative_int(
+                payload.get("execution_row_count", 0), "execution_row_count"
+            ),
+            diagnostic_row_count=_non_negative_int(
+                payload.get("diagnostic_row_count", 0), "diagnostic_row_count"
+            ),
+            legacy_row_count=_non_negative_int(
+                payload.get("legacy_row_count", 0), "legacy_row_count"
+            ),
+            database_bytes=_non_negative_int(
+                payload.get("database_bytes", 0), "database_bytes"
+            ),
+            oldest_diagnostic=(
+                None
+                if payload.get("oldest_diagnostic") is None
+                else str(payload["oldest_diagnostic"])
+            ),
+            diagnostic_cleanup_candidate_count=_non_negative_int(
+                payload.get("diagnostic_cleanup_candidate_count", 0),
+                "diagnostic_cleanup_candidate_count",
+            ),
         )
 
 

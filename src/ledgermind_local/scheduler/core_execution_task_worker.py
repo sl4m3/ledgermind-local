@@ -259,7 +259,7 @@ class CoreExecutionTaskWorker:
         try:
             task = _local_execution_task(raw_task, memory_space_id)
             result = self._executor.execute(task)
-            self._deliver_result(task, result, memory_space_id)
+            self._deliver_result_with_structured_retry(task, result, memory_space_id)
         except Exception as exc:  # noqa: BLE001 - release every leased task
             self._fail_task(raw_task, memory_space_id, exc)
 
@@ -284,9 +284,62 @@ class CoreExecutionTaskWorker:
             return
         for task, result in zip(converted, results, strict=True):
             try:
-                self._deliver_result(task, result, memory_space_id)
+                self._deliver_result_with_structured_retry(task, result, memory_space_id)
             except Exception as exc:  # noqa: BLE001 - isolate delivery failures
                 self._fail_task(task.model_dump(mode="json"), memory_space_id, exc)
+
+    def _deliver_result_with_structured_retry(
+        self,
+        task: GenericExecutionTask,
+        result: object,
+        memory_space_id: str,
+    ) -> None:
+        """Give one structured generation a chance after a remote Core reject.
+
+        Local still dispatches only by technical task kind. A remote Core
+        rejection can mean that a weak provider returned a schema-valid but
+        Core-invalid structured answer; one bounded fresh generation is safe
+        recovery. Local never inspects the opaque operation or edits the
+        answer. Local-side wire validation errors are not retried.
+        """
+
+        # A provider can return a transiently malformed JSON/schema response
+        # even when the transport succeeded.  Treat one such result as a
+        # bounded structured-output recovery, just like a Core-side contract
+        # rejection.  This branch is failure-only: a successful normal task
+        # still consumes exactly one provider call.
+        if (
+            task.task_kind == "generate_json"
+            and getattr(result, "status", None) == "failed"
+            and getattr(result, "error_code", None)
+            in {
+                "invalid_provider_response",
+                "invalid_json_response",
+                "invalid_model_output",
+                "schema_shape_failure",
+            }
+        ):
+            logger.warning(
+                "retrying structured generation after provider shape failure",
+                extra={"worker": self._worker_id, "task_id": task.task_id},
+            )
+            retry_result = self._executor.execute(task)
+            if getattr(retry_result, "status", None) == "completed":
+                self._deliver_result(task, retry_result, memory_space_id)
+                return
+            result = retry_result
+
+        try:
+            self._deliver_result(task, result, memory_space_id)
+        except DomainRejectedError as exc:
+            if task.task_kind != "generate_json" or exc.code == "invalid_execution_result":
+                raise
+            logger.warning(
+                "retrying structured generation after remote Core rejection",
+                extra={"worker": self._worker_id, "task_id": task.task_id},
+            )
+            retry_result = self._executor.execute(task)
+            self._deliver_result(task, retry_result, memory_space_id)
 
     def _deliver_result(
         self,
@@ -296,7 +349,7 @@ class CoreExecutionTaskWorker:
     ) -> None:
         if not hasattr(result, "status"):
             raise ValueError("executor returned an invalid result")
-        status = getattr(result, "status")
+        status = result.status
         if status == "completed":
             submitted = self._gateway.submit_execution_result(
                 SubmitExecutionResultCommand(

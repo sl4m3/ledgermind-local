@@ -21,7 +21,11 @@ from ledgermind_local.inference.profiles import (
     InferenceProfile,
     ProviderCapabilities,
 )
-from ledgermind_local.inference.provider_probe import ProviderProbe
+from ledgermind_local.inference.provider_probe import (
+    PROBE_MAX_OUTPUT_TOKENS,
+    ProviderProbe,
+    _probe_request,
+)
 from ledgermind_local.inference.providers.base import (
     ChatMessage,
     ModelRequest,
@@ -256,6 +260,40 @@ def test_json_schema_is_rejected_before_http_when_contract_is_missing() -> None:
     provider.close()
 
 
+def test_openai_provider_merges_non_secret_extra_body_without_overriding_contract() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "model",
+                "choices": [{"message": {"content": '{"ok":true}'}}],
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        base_url="https://provider.example/v1",
+        api_key="secret",
+        max_retries=0,
+        extra_body={"reasoning": {"effort": "none", "exclude": True}},
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.complete_json(
+        ModelRequest(
+            model="model",
+            messages=(ChatMessage(role="user", content="return"),),
+            max_output_tokens=10,
+            mode="json_object",
+        )
+    )
+    provider.close()
+
+    assert seen["reasoning"] == {"effort": "none", "exclude": True}
+    assert seen["response_format"] == {"type": "json_object"}
+
+
 def test_probe_auto_order_manual_override_and_capability_persistence(tmp_path) -> None:
     connection, store = _store()
     try:
@@ -284,6 +322,17 @@ def test_probe_auto_order_manual_override_and_capability_persistence(tmp_path) -
         assert manual_result.selected_mode == "prompt_only"
     finally:
         connection.close()
+
+
+def test_reasoning_provider_probe_reserves_bounded_output_headroom() -> None:
+    contract = {
+        "contract_name": "probe",
+        "compact_template": {"ok": True},
+    }
+    request = _probe_request(_profile(), contract, "json_object")
+
+    assert request.max_output_tokens == PROBE_MAX_OUTPUT_TOKENS
+    assert request.max_output_tokens > 64
 
 
 def test_structured_provider_selects_capability_and_roundtrips_digest_and_fence(
@@ -325,6 +374,133 @@ def test_structured_provider_selects_capability_and_roundtrips_digest_and_fence(
         assert result.native_schema_valid is True
     finally:
         connection.close()
+
+
+def test_structured_provider_falls_back_once_after_automatic_mode_rejection(
+    tmp_path,
+) -> None:
+    connection, store = _store()
+    try:
+        store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id="profile",
+                structured_output_mode="tool_call",
+                tool_call_supported=True,
+                probe_contract_digest=CONTRACT["schema_digest"],
+                probe_status="passed",
+                probe_result="passed",
+            )
+        )
+        fake = _FakeProvider(failures={"tool_call"})
+        result = StructuredJsonProvider(
+            profile_resolver=StoreBackedProfileResolver(store),
+            secret_store=_secret_store(tmp_path),
+            capability_store=store,
+            provider_factory=lambda _profile, _secret: fake,
+        ).generate_json(
+            memory_space_id="space",
+            messages=(ChatMessage(role="user", content="return"),),
+            max_output_tokens=20,
+            profile_slot=ProfileSlot.OPERATIONAL,
+            output_contract=CONTRACT,
+        )
+
+        assert [request.mode for request in fake.requests] == [
+            "tool_call",
+            "json_object",
+        ]
+        assert result.structured_output_mode == "json_object"
+        assert result.metadata["structured_output_fallback"] is True
+        assert result.metadata["structured_output_fallback_from"] == "tool_call"
+        assert result.metadata["structured_output_fallback_to"] == "json_object"
+        assert result.metadata["structured_output_fallback_error_code"] == (
+            "invalid_provider_response"
+        )
+        cached = store.get_capabilities("profile")
+        assert cached is not None
+        assert cached.structured_output_mode == "json_object"
+        assert cached.json_schema_supported is False
+        assert cached.tool_call_supported is False
+        assert cached.json_object_supported is True
+        assert cached.probe_status == "passed"
+        assert cached.probe_result == "passed"
+        assert cached.is_fresh(profile_fingerprint="fixture-profile") is True
+    finally:
+        connection.close()
+
+
+def test_successful_fallback_is_reused_after_store_restart(tmp_path) -> None:
+    database = tmp_path / "rounds.db"
+    connection = sqlite3.connect(database, check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    try:
+        migrations.apply_migrations(connection)
+        connection.execute(
+            "INSERT INTO memory_spaces(memory_space_id, source_client, created_at, updated_at) "
+            "VALUES ('space', 'tests', '2026-08-09T00:00:00Z', '2026-08-09T00:00:00Z')"
+        )
+        store = InferenceProfileStore(connection)
+        store.upsert(_profile())
+        store.bind_slot("space", slot="operational", profile_id="profile")
+        store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id="profile",
+                structured_output_mode="tool_call",
+                tool_call_supported=True,
+                probe_contract_digest=CONTRACT["schema_digest"],
+                probe_status="passed",
+                probe_result="passed",
+                expires_at="2099-01-01T00:00:00+00:00",
+            )
+        )
+        first_provider = _FakeProvider(failures={"tool_call"})
+        StructuredJsonProvider(
+            profile_resolver=StoreBackedProfileResolver(store),
+            secret_store=_secret_store(tmp_path),
+            capability_store=store,
+            provider_factory=lambda _profile, _secret: first_provider,
+        ).generate_json(
+            memory_space_id="space",
+            messages=(ChatMessage(role="user", content="return"),),
+            max_output_tokens=20,
+            profile_slot=ProfileSlot.OPERATIONAL,
+            output_contract=CONTRACT,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    restarted = sqlite3.connect(database, check_same_thread=False)
+    restarted.row_factory = sqlite3.Row
+    try:
+        migrations.apply_migrations(restarted)
+        restarted_store = InferenceProfileStore(restarted)
+        cached = restarted_store.get_capabilities("profile")
+        assert cached is not None
+        assert cached.structured_output_mode == "json_object"
+        assert cached.tool_call_supported is False
+        assert cached.json_object_supported is True
+        assert cached.probe_status == "passed"
+        assert cached.is_fresh(profile_fingerprint="fixture-profile") is True
+
+        second_provider = _FakeProvider(failures={"tool_call"})
+        StructuredJsonProvider(
+            profile_resolver=StoreBackedProfileResolver(restarted_store),
+            secret_store=_secret_store(tmp_path),
+            capability_store=restarted_store,
+            provider_factory=lambda _profile, _secret: second_provider,
+        ).generate_json(
+            memory_space_id="space",
+            messages=(ChatMessage(role="user", content="return"),),
+            max_output_tokens=20,
+            profile_slot=ProfileSlot.OPERATIONAL,
+            output_contract=CONTRACT,
+        )
+        assert [request.mode for request in second_provider.requests] == [
+            "json_object"
+        ]
+    finally:
+        restarted.close()
 
 
 def test_parseable_schema_mismatch_is_advisory_and_reaches_core(tmp_path) -> None:

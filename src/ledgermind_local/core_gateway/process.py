@@ -7,6 +7,11 @@ from collections.abc import Iterable, Mapping
 from typing import Any, NoReturn
 
 from .base import CoreGateway
+from .compatibility import (
+    SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
+    SUPPORTED_PROTOCOL_MAX,
+    compatibility_reason,
+)
 from .contracts import (
     ControlMaintenanceResult,
     CoreCapabilityError,
@@ -108,7 +113,9 @@ _CAPABILITY_REQUIREMENTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     ),
 }
 
-CORE_KNOWLEDGE_SCHEMA_VERSION = 12
+# Backwards-compatible import for maintenance callers.  New code should use
+# the compatibility module directly.
+CORE_KNOWLEDGE_SCHEMA_VERSION = SUPPORTED_KNOWLEDGE_SCHEMA_MAX
 
 
 def _validate_retrieval_outcome_payload(payload: Mapping[str, Any]) -> None:
@@ -237,15 +244,21 @@ class ProcessCoreGateway(CoreGateway):
         if not isinstance(raw_flags, Mapping):
             self._fail_closed(TransientCoreError("Core capability flags are malformed"))
         advertised_schema = handshake.get("knowledge_schema_version")
-        if "object_facet" in getattr(self, "_required_capabilities", ()) and (
-            isinstance(advertised_schema, bool)
-            or not isinstance(advertised_schema, int)
-            or advertised_schema != CORE_KNOWLEDGE_SCHEMA_VERSION
-        ):
+        advertised_protocol = handshake.get("protocol_version")
+        reason_code = compatibility_reason(advertised_protocol, advertised_schema)
+        if reason_code is not None:
             self._fail_closed(
                 CoreCapabilityError(
                     requested=requested,
-                    expected_schema_version=CORE_KNOWLEDGE_SCHEMA_VERSION,
+                    reason_code=reason_code,
+                    expected_protocol_version=SUPPORTED_PROTOCOL_MAX,
+                    advertised_protocol_version=(
+                        advertised_protocol
+                        if isinstance(advertised_protocol, int)
+                        and not isinstance(advertised_protocol, bool)
+                        else None
+                    ),
+                    expected_schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
                     advertised_schema_version=(
                         advertised_schema if isinstance(advertised_schema, int) else None
                     ),
@@ -310,6 +323,16 @@ class ProcessCoreGateway(CoreGateway):
         value = handshake.get("knowledge_schema_version")
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
+    @property
+    def advertised_protocol_version(self) -> int | None:
+        """Return the IPC protocol version from the validated handshake."""
+
+        handshake = self._supervisor.handshake_result
+        if not isinstance(handshake, Mapping):
+            return None
+        value = handshake.get("protocol_version")
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
     def health(self) -> CoreHealth:
         try:
             result = self._supervisor.request("health", {})
@@ -323,7 +346,7 @@ class ProcessCoreGateway(CoreGateway):
                 int(result["protocol_version"])
                 if isinstance(result.get("protocol_version"), int)
                 and not isinstance(result.get("protocol_version"), bool)
-                else None
+                else self.advertised_protocol_version
             ),
             schema_version=(
                 int(result["schema_version"])
@@ -354,6 +377,12 @@ class ProcessCoreGateway(CoreGateway):
                     raw_context.pop(name, None)
                 raw_context.pop("context_origin", None)
                 request_payload["resolution_context"] = raw_context
+            if command.embedding_profile is not None:
+                # The active embedding identity is Core-owned metadata, not a
+                # provider credential.  Forward it on every ingest so a Core
+                # process started without a prior control pass can still
+                # schedule subject/value embeddings deterministically.
+                request_payload["embedding_profile"] = dict(command.embedding_profile)
             request = IngestRawRoundRequest.model_validate(request_payload)
         except (ImportError, TypeError, ValueError) as exc:
             raise DomainRejectedError("invalid_raw_round", str(exc)) from exc

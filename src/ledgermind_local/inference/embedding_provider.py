@@ -22,6 +22,7 @@ from .profiles import (
     InferenceProfile,
 )
 from .vectorizer import Vectorizer
+from .provider_telemetry import record_task
 
 VectorizerFactory = Callable[[], Vectorizer]
 
@@ -123,25 +124,44 @@ class PersistentEmbeddingCache(EmbeddingVectorCache):
 
     def _ensure_schema(self) -> None:
         with self._lock, self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS embedding_vector_cache (
-                    cache_key TEXT PRIMARY KEY,
-                    profile_fingerprint TEXT NOT NULL,
-                    cache_namespace TEXT NOT NULL,
-                    content_digest TEXT NOT NULL,
-                    dimensions INTEGER NOT NULL CHECK (dimensions > 0),
-                    vector_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+            table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'embedding_vector_cache'"
+            ).fetchone()
+            if table is None:
+                raise EmbeddingCacheSchemaError(
+                    "embedding_vector_cache is not owned by the runtime; "
+                    "apply Local migrations through 0010 before opening the cache"
                 )
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS ix_embedding_vector_cache_profile
-                ON embedding_vector_cache (profile_fingerprint, cache_namespace, content_digest)
-                """
-            )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(embedding_vector_cache)"
+                ).fetchall()
+            }
+            required = {
+                "cache_key",
+                "profile_fingerprint",
+                "cache_namespace",
+                "content_digest",
+                "dimensions",
+                "vector_json",
+                "created_at",
+            }
+            missing = sorted(required - columns)
+            if missing:
+                raise EmbeddingCacheSchemaError(
+                    "embedding_vector_cache schema is incomplete: "
+                    + ", ".join(missing)
+                )
+            index = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'ix_embedding_vector_cache_profile'"
+            ).fetchone()
+            if index is None:
+                raise EmbeddingCacheSchemaError(
+                    "embedding_vector_cache profile index is missing from migration history"
+                )
 
     def get(self, key: str) -> tuple[float, ...] | None:
         with self._lock, self._connect() as connection:
@@ -254,6 +274,12 @@ class EmbeddingDimensionMismatchError(EmbeddingError):
 
 class EmbeddingModelError(EmbeddingError):
     code = "embedding_model_error"
+
+
+class EmbeddingCacheSchemaError(EmbeddingError):
+    """The Local migration-owned persistent cache schema is unavailable."""
+
+    code = "embedding_cache_schema_error"
 
 
 class EmbeddingProvider:
@@ -421,9 +447,50 @@ class EmbeddingProvider:
                 cached_vectors.append(self.cache.get(key) if self.cache is not None else None)
         missing_indices = [index for index, vector in enumerate(cached_vectors) if vector is None]
 
+        request_start = 0
+        operation_item_counts: dict[str, int] = {}
+        for request in requests:
+            operation_item_counts[request.purpose] = operation_item_counts.get(
+                request.purpose, 0
+            ) + len(request.texts)
+        for request in requests:
+            request_end = request_start + len(request.texts)
+            request_cached = cached_vectors[request_start:request_end]
+            record_task(
+                kind="embedding",
+                operation=request.purpose,
+                provider_profile_fingerprint=identity.profile_fingerprint,
+                model=first.profile.model,
+                task_count=1,
+                item_count=len(request.texts),
+                cache_hits=sum(vector is not None for vector in request_cached),
+                cache_misses=sum(vector is None for vector in request_cached),
+            )
+            request_start = request_end
+
         try:
             token.raise_if_cancelled()
             if missing_indices:
+                set_context = getattr(vectorizer, "set_telemetry_context", None)
+                if callable(set_context):
+                    try:
+                        set_context(
+                            operation=(
+                                requests[0].purpose
+                                if len(operation_item_counts) == 1
+                                else "mixed_embedding_batch"
+                            ),
+                            profile_fingerprint=identity.profile_fingerprint,
+                            operation_item_counts=operation_item_counts,
+                        )
+                    except TypeError:
+                        # Test/local vectorizers may implement the older
+                        # two-field hook; attribution remains exact for the
+                        # real HTTP vectorizer below.
+                        set_context(
+                            operation=requests[0].purpose,
+                            profile_fingerprint=identity.profile_fingerprint,
+                        )
                 raw_missing = list(vectorizer.encode(tuple(all_texts[index] for index in missing_indices)))
             else:
                 raw_missing = []
@@ -535,6 +602,7 @@ __all__ = [
     "EmbeddingBatch",
     "EmbeddingBatchRequest",
     "EmbeddingCache",
+    "EmbeddingCacheSchemaError",
     "EmbeddingBatchTooLargeError",
     "EmbeddingDimensionMismatchError",
     "EmbeddingError",

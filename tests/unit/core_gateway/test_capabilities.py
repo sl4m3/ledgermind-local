@@ -6,6 +6,11 @@ from ledgermind_local.core_gateway.contracts import (
     CoreCapabilityError,
     TransientCoreError,
 )
+from ledgermind_local.core_gateway.compatibility import (
+    SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
+    SUPPORTED_PROTOCOL_MAX,
+)
+from ledgermind_local.core_gateway.contracts import IngestRawRoundCommand
 from ledgermind_local.core_gateway.process import ProcessCoreGateway
 
 _OPERATIONS = [
@@ -33,7 +38,10 @@ class _Supervisor:
     def __init__(self, *, capabilities: dict[str, bool] | None = None) -> None:
         self.started = 0
         self.closed = 0
+        self.requests: list[tuple[str, dict[str, object]]] = []
         self.handshake_result = {
+            "protocol_version": SUPPORTED_PROTOCOL_MAX,
+            "knowledge_schema_version": SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
             "supported_operations": list(_OPERATIONS),
             "capabilities": capabilities
             or {
@@ -47,6 +55,86 @@ class _Supervisor:
 
     def close(self) -> None:
         self.closed += 1
+
+    def request(self, operation: str, payload: dict[str, object], *, request_id: str):
+        del request_id
+        self.requests.append((operation, payload))
+        if operation == "ingest_raw_round":
+            return {
+                "raw_round_id": "core-round-1",
+                "duplicate": False,
+                "status": "accepted",
+            }
+        raise AssertionError(f"unexpected request: {operation}")
+
+
+def test_process_gateway_accepts_current_core_schema() -> None:
+    supervisor = _Supervisor()
+
+    gateway = ProcessCoreGateway(
+        supervisor,  # type: ignore[arg-type]
+        required_capabilities=("base",),
+    )
+
+    assert gateway.advertised_schema_version == SUPPORTED_KNOWLEDGE_SCHEMA_MAX
+
+
+def test_process_gateway_forwards_embedding_profile_on_ingest() -> None:
+    supervisor = _Supervisor()
+    gateway = ProcessCoreGateway(supervisor)  # type: ignore[arg-type]
+    profile = {
+        "embedding_model_id": "embedder",
+        "embedding_model_version": "sha256:" + "a" * 64,
+        "embedding_profile_fingerprint": "sha256:" + "a" * 64,
+        "embedding_profile_model_version": "api:embedder",
+        "embedding_profile_digest_algorithm": "sha256",
+        "embedding_profile_digest_algorithm_schema_version": 1,
+        "embedding_dimensions": 3,
+    }
+
+    result = gateway.ingest_raw_round(
+        IngestRawRoundCommand(
+            command_id="command-1",
+            idempotency_key="sha256:" + "b" * 64,
+            memory_space_id="space-1",
+            raw_round_id="round-1",
+            raw_round={},
+            embedding_profile=profile,
+        )
+    )
+
+    assert result.accepted is True
+    assert supervisor.requests[0][1]["embedding_profile"] == profile
+
+
+def test_process_gateway_fails_closed_with_exact_schema_reason() -> None:
+    supervisor = _Supervisor()
+    supervisor.handshake_result["knowledge_schema_version"] = (
+        SUPPORTED_KNOWLEDGE_SCHEMA_MAX + 1
+    )
+
+    with pytest.raises(CoreCapabilityError) as error:
+        ProcessCoreGateway(
+            supervisor,  # type: ignore[arg-type]
+            required_capabilities=("base",),
+        )
+
+    assert error.value.reason_code == "core_knowledge_schema_incompatible"
+    assert supervisor.closed == 1
+
+
+def test_process_gateway_fails_closed_with_exact_protocol_reason() -> None:
+    supervisor = _Supervisor()
+    supervisor.handshake_result["protocol_version"] = 2
+
+    with pytest.raises(CoreCapabilityError) as error:
+        ProcessCoreGateway(
+            supervisor,  # type: ignore[arg-type]
+            required_capabilities=("base",),
+        )
+
+    assert error.value.reason_code == "core_protocol_incompatible"
+    assert supervisor.closed == 1
 
 
 def test_process_gateway_validates_feature_capability_at_initialization() -> None:

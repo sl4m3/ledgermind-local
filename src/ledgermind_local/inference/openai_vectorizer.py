@@ -53,6 +53,21 @@ class OpenAIEmbeddingVectorizer(Vectorizer):
             vectors.extend([list(vector) for vector in batch])
         return vectors
 
+    def set_telemetry_context(
+        self,
+        *,
+        operation: str,
+        profile_fingerprint: str,
+        operation_item_counts: dict[str, int] | None = None,
+    ) -> None:
+        """Attach the semantic batch label to the next real HTTP request."""
+
+        self._provider.set_telemetry_context(
+            operation=operation,
+            profile_fingerprint=profile_fingerprint,
+            operation_item_counts=operation_item_counts,
+        )
+
     def close(self) -> None:
         self._provider.close()
 

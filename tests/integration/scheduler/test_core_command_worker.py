@@ -74,9 +74,11 @@ class _Gateway:
     def __init__(self, outcomes: tuple[object, ...] = ()) -> None:
         self.outcomes = list(outcomes)
         self.calls: list[str] = []
+        self.commands: list[object] = []
 
     def ingest_raw_round(self, command) -> IngestRawRoundResult:
         self.calls.append(command.command_id)
+        self.commands.append(command)
         outcome = self.outcomes.pop(0) if self.outcomes else IngestRawRoundResult(
             accepted=True,
             duplicate=False,
@@ -108,6 +110,30 @@ def test_core_command_worker_delivers_raw_round_and_clears_payload(tmp_path: Pat
         assert check.execute(
             "SELECT payload_json, payload_bytes FROM raw_round_payloads"
         ).fetchone() == ("{}", 0)
+
+
+def test_core_command_worker_forwards_embedding_identity_to_gateway(tmp_path: Path) -> None:
+    connection, _ = _bootstrap(tmp_path / "rounds.db")
+    connection.close()
+    profile = {
+        "embedding_model_id": "embedder",
+        "embedding_model_version": "sha256:" + "a" * 64,
+        "embedding_profile_fingerprint": "sha256:" + "a" * 64,
+        "embedding_profile_model_version": "api:embedder",
+        "embedding_profile_digest_algorithm": "sha256",
+        "embedding_profile_digest_algorithm_schema_version": 1,
+        "embedding_dimensions": 3,
+    }
+    gateway = _Gateway()
+    result = CoreCommandWorker(
+        database_path=tmp_path / "rounds.db",
+        gateway=gateway,
+        worker_id="core-worker-1",
+        embedding_profile_metadata_factory=lambda _memory_space_id: profile,
+    ).process_once()
+
+    assert result is not None and result.status == "completed"
+    assert gateway.commands[0].embedding_profile == profile
 
 
 def test_core_command_worker_retries_transient_error_and_then_completes(

@@ -26,6 +26,10 @@ from ledgermind_protocol.core_ipc import (
     CoreRequestEnvelope,
     CoreResponseEnvelope,
 )
+from ledgermind_local.core_gateway.compatibility import (
+    SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
+    SUPPORTED_PROTOCOL_MAX,
+)
 
 _CURRENT_OPERATIONS = {
     "handshake",
@@ -126,7 +130,7 @@ def main() -> int:
     malformed_health_response = "--malformed-health-response" in sys.argv
     missing_capabilities = _argument_values("--missing-capability")
     missing_operations = _argument_values("--missing-operation")
-    schema_version = 12
+    schema_version = SUPPORTED_KNOWLEDGE_SCHEMA_MAX
     if "--schema-version" in sys.argv:
         schema_version = int(sys.argv[sys.argv.index("--schema-version") + 1])
     core_data_dir = Path(os.environ.get("LEDGERMIND_CORE_DATA_DIR", "."))
@@ -158,7 +162,7 @@ def main() -> int:
                 CoreResponseEnvelope.ok(
                     request.request_id,
                     {
-                        "protocol_version": 1,
+                        "protocol_version": SUPPORTED_PROTOCOL_MAX,
                         "core_version": "fake-core-1",
                         "knowledge_schema_version": schema_version,
                         "supported_operations": operations,
@@ -189,7 +193,7 @@ def main() -> int:
                     {
                         "healthy": True,
                         "backend": "fake",
-                        "protocol_version": 1,
+                        "protocol_version": SUPPORTED_PROTOCOL_MAX,
                         "schema_version": schema_version,
                     },
                 )

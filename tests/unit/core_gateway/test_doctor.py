@@ -11,6 +11,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ledgermind_local.cli import main
 from ledgermind_local.config import CoreSecurityConfig, LocalConfig
 from ledgermind_local.core_gateway.doctor import build_core_doctor_report
+from ledgermind_local.core_gateway.compatibility import (
+    SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
+    SUPPORTED_PROTOCOL_MAX,
+)
 from ledgermind_local.core_gateway.isolation import IsolationRequirements
 from ledgermind_local.core_gateway.security_policy import (
     build_core_isolation_requirements,
@@ -51,7 +55,7 @@ def read_frame():
 
 def send(request_id, result):
     payload = json.dumps({{
-        'protocol_version': 1,
+        'protocol_version': {SUPPORTED_PROTOCOL_MAX},
         'request_id': request_id,
         'status': 'ok',
         'result': result,
@@ -68,7 +72,8 @@ while True:
     request_id = request['request_id']
     if operation == 'handshake':
         send(request_id, {{
-            'protocol_version': 1,
+            'protocol_version': {SUPPORTED_PROTOCOL_MAX},
+            'knowledge_schema_version': {SUPPORTED_KNOWLEDGE_SCHEMA_MAX},
             'server_name': 'signed-fake-core',
             'version': 'test-core-1',
             'operations': ['handshake', 'health', 'shutdown'],
@@ -77,8 +82,8 @@ while True:
         send(request_id, {{
             'healthy': True,
             'backend': 'rust',
-            'protocol_version': 1,
-            'schema_version': 12,
+            'protocol_version': {SUPPORTED_PROTOCOL_MAX},
+            'schema_version': {SUPPORTED_KNOWLEDGE_SCHEMA_MAX},
             'environment_keys': {json.dumps(list(environment_keys))},
         }})
     elif operation == 'shutdown':
@@ -213,8 +218,8 @@ def test_core_doctor_cli_verifies_binary_and_reports_runtime_without_secrets(
     assert report["signature"]["status"] == "verified"
     assert report["version"] == "test-core-1"
     assert report["server_name"] == "signed-fake-core"
-    assert report["health"]["protocol_version"] == 1
-    assert report["health"]["schema_version"] == 12
+    assert report["health"]["protocol_version"] == SUPPORTED_PROTOCOL_MAX
+    assert report["health"]["schema_version"] == SUPPORTED_KNOWLEDGE_SCHEMA_MAX
     assert report["sandbox"]["level"] in {"full", "partial"}
     assert report["sandbox"]["capabilities"]["binary_signature_verified"] is True
     assert "missing_requirements" in report["sandbox"]

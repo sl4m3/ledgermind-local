@@ -781,13 +781,24 @@ def _command_serve(args: argparse.Namespace) -> int:
         safe_code = (
             error_code if isinstance(error_code, str) and error_code else "unavailable"
         )
-        print(
-            "refusing to serve secure runtime: Core is not full-ready "
-            f"(error_code={safe_code})",
-            file=sys.stderr,
-        )
-        runtime.stop()
-        return 1
+        # The first control pass schedules the static 14-facet catalogue for
+        # embedding.  Keep the secure process alive while that bounded,
+        # content-free bootstrap projection drains; every other not-ready
+        # condition remains a hard startup failure.
+        bootstrap_initializing = report.get("readiness_reason") == "object_facet_initializing"
+        if bootstrap_initializing:
+            print(
+                "secure runtime is serving while Core facet catalogue preload is pending",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "refusing to serve secure runtime: Core is not full-ready "
+                f"(error_code={safe_code})",
+                file=sys.stderr,
+            )
+            runtime.stop()
+            return 1
     if config.core_security.profile == "permissive":
         print(
             "warning: serving with permissive Core security profile; "

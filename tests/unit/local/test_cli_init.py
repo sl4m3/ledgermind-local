@@ -70,6 +70,19 @@ def test_token_file_has_private_permissions_on_posix(tmp_path: Path) -> None:
     assert mode == 0o600
 
 
+def test_existing_token_is_canonicalized_without_trailing_whitespace(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "service"
+    home.mkdir()
+    (home / "server.token").write_text("  preproduction-token\n", encoding="utf-8")
+
+    _paths, _config, token = bootstrap.initialize_local_layout(home=home)
+
+    assert token == "preproduction-token"
+    assert (home / "server.token").read_text(encoding="utf-8") == "preproduction-token"
+
+
 def test_partial_failure_does_not_create_empty_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

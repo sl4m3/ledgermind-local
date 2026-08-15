@@ -12,6 +12,7 @@ from ledgermind_local.core_gateway.maintenance import (
     PrepareRestoreResult,
     sha256_file,
 )
+from ledgermind_local.core_gateway.compatibility import SUPPORTED_KNOWLEDGE_SCHEMA_MAX
 from ledgermind_local.maintenance.core_backup import CoreBackupError, CoreBackupService
 from ledgermind_local.persistence import rounds_migrations
 
@@ -30,7 +31,7 @@ class _Gateway:
             relative_path="exchange/outgoing/core-snapshot.bin",
             sha256=sha256_file(source),
             size_bytes=source.stat().st_size,
-            schema_version=12,
+        schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
         )
 
     def validate_backup(self, command):
@@ -40,7 +41,7 @@ class _Gateway:
             relative_path=command.relative_path,
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=12,
+        schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
         )
 
     def prepare_restore(self, command):
@@ -50,7 +51,7 @@ class _Gateway:
             relative_path=command.relative_path,
             sha256=sha256_file(path),
             size_bytes=path.stat().st_size,
-            schema_version=12,
+        schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
             restore_token="restore-token",
             requires_restart=True,
         )

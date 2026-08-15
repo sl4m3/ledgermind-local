@@ -22,6 +22,7 @@ from ledgermind_protocol.core_ipc import (
 )
 
 from .framing import FrameError, read_frame, write_frame
+from .compatibility import SUPPORTED_PROTOCOL_MAX
 from .isolation import IsolationCapabilities, IsolationRequirements
 from .sandbox import SandboxUnavailableError, build_sandbox_plan
 
@@ -137,7 +138,7 @@ class CoreSupervisor:
                     },
                     timeout=self._startup_timeout,
                 )
-                if int(result.get("protocol_version", 0)) != 1:
+                if int(result.get("protocol_version", 0)) != SUPPORTED_PROTOCOL_MAX:
                     raise CoreSupervisorError(
                         "Core handshake returned unsupported version"
                     )
@@ -314,7 +315,7 @@ class CoreSupervisor:
         if process is None or process.stdin is None or process.stdout is None:
             raise CoreSupervisorCrashed("Core process is not running")
         envelope = CoreRequestEnvelope(
-            protocol_version=1,
+            protocol_version=SUPPORTED_PROTOCOL_MAX,
             request_id=request_id or str(uuid.uuid4()),
             operation=operation,
             payload=payload,
