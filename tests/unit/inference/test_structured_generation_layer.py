@@ -43,7 +43,17 @@ from ledgermind_local.inference.providers.openai_compatible import (
     decode_json_content,
 )
 from ledgermind_local.inference.secrets import SecretStore
-from ledgermind_local.inference.structured_json_provider import StructuredJsonProvider
+from ledgermind_local.inference.strict import (
+    STRICT_JSON_SCHEMA_MODE,
+    canonical_digest,
+    strict_requirement_for_contract,
+    validate_strict_schema_profile,
+)
+from ledgermind_local.inference.structured_json_provider import (
+    StructuredJsonProvider,
+    StructuredJsonRequestError,
+    StructuredJsonResponseError,
+)
 from ledgermind_local.inference.token_budget import InputBudgetExceededError
 from ledgermind_local.persistence import rounds_migrations as migrations
 from ledgermind_local.scheduler.core_execution_task_worker import (
@@ -60,6 +70,19 @@ CONTRACT = {
         "additionalProperties": False,
     },
     "schema_digest": "sha256:" + "a" * 64,
+}
+
+STRICT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+}
+STRICT_CONTRACT = {
+    "contract_name": "strict_technical_result",
+    "schema_version": 1,
+    "json_schema": STRICT_SCHEMA,
+    "schema_digest": canonical_digest(STRICT_SCHEMA),
 }
 
 
@@ -260,6 +283,28 @@ def test_json_schema_is_rejected_before_http_when_contract_is_missing() -> None:
     provider.close()
 
 
+def test_strict_profile_accepts_bounded_local_reference_patterns() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "object_ref": {"type": "string", "pattern": r"^uo[1-8]$"},
+        },
+        "required": ["object_ref"],
+    }
+
+    assert validate_strict_schema_profile(schema) == schema
+
+    invalid = {
+        **schema,
+        "properties": {
+            "object_ref": {"type": "integer", "pattern": r"^uo[1-8]$"}
+        },
+    }
+    with pytest.raises(ValueError, match="pattern"):
+        validate_strict_schema_profile(invalid)
+
+
 def test_openai_provider_merges_non_secret_extra_body_without_overriding_contract() -> None:
     seen: dict[str, object] = {}
 
@@ -305,10 +350,11 @@ def test_probe_auto_order_manual_override_and_capability_persistence(tmp_path) -
             capability_store=store,
             provider_factory=lambda _profile, _secret: auto_provider,
         ).probe("space", ProfileSlot.OPERATIONAL)
-        assert auto_result.attempted_modes == ("json_schema", "tool_call")
-        assert auto_result.selected_mode == "tool_call"
+        assert auto_result.attempted_modes == (STRICT_JSON_SCHEMA_MODE,)
+        assert auto_result.selected_mode == STRICT_JSON_SCHEMA_MODE
         assert store.get_capabilities("profile") == auto_result.capabilities
-        assert auto_result.capabilities.tool_call_supported is True
+        assert auto_result.capabilities.native_schema_strictness is True
+        assert auto_result.capabilities.supports(STRICT_JSON_SCHEMA_MODE) is True
 
         store.upsert(_profile(preference="prompt_only"))
         manual_provider = _FakeProvider()
@@ -318,8 +364,8 @@ def test_probe_auto_order_manual_override_and_capability_persistence(tmp_path) -
             capability_store=store,
             provider_factory=lambda _profile, _secret: manual_provider,
         ).probe("space", "operational")
-        assert manual_result.attempted_modes == ("prompt_only",)
-        assert manual_result.selected_mode == "prompt_only"
+        assert manual_result.attempted_modes == (STRICT_JSON_SCHEMA_MODE,)
+        assert manual_result.selected_mode == STRICT_JSON_SCHEMA_MODE
     finally:
         connection.close()
 
@@ -372,6 +418,123 @@ def test_structured_provider_selects_capability_and_roundtrips_digest_and_fence(
         assert result.usage == {"prompt_tokens": 3}
         assert result.transport_error is None
         assert result.native_schema_valid is True
+    finally:
+        connection.close()
+
+
+def test_strict_semantic_request_is_probe_gated_and_never_falls_back(tmp_path) -> None:
+    connection, store = _store()
+    try:
+        store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id="profile",
+                structured_output_mode=STRICT_JSON_SCHEMA_MODE,
+                structured_json_schema=True,
+                native_schema_strictness=True,
+                probe_contract_digest=STRICT_CONTRACT["schema_digest"],
+                probe_status="passed",
+                probe_result="passed",
+            )
+        )
+        fake = _FakeProvider(failures={STRICT_JSON_SCHEMA_MODE})
+        provider = StructuredJsonProvider(
+            profile_resolver=StoreBackedProfileResolver(store),
+            secret_store=_secret_store(tmp_path),
+            capability_store=store,
+            provider_factory=lambda _profile, _secret: fake,
+        )
+        with pytest.raises(ProviderResponseError):
+            provider.generate_json(
+                memory_space_id="space",
+                messages=(ChatMessage(role="user", content="return"),),
+                max_output_tokens=20,
+                profile_slot=ProfileSlot.OPERATIONAL,
+                output_contract=STRICT_CONTRACT,
+                structured_output_requirement=strict_requirement_for_contract(
+                    STRICT_CONTRACT
+                ),
+                mode=STRICT_JSON_SCHEMA_MODE,
+            )
+        assert [request.mode for request in fake.requests] == [STRICT_JSON_SCHEMA_MODE]
+        assert fake.requests[0].structured_output_requirement is not None
+        assert fake.requests[0].structured_output_requirement["strict"] is True
+    finally:
+        connection.close()
+
+
+def test_strict_semantic_request_requires_a_verified_capability(tmp_path) -> None:
+    connection, store = _store()
+    try:
+        created = False
+
+        def factory(_profile: InferenceProfile, _secret: str) -> _FakeProvider:
+            nonlocal created
+            created = True
+            return _FakeProvider()
+
+        with pytest.raises(
+            StructuredJsonRequestError,
+            match="capability has not been verified",
+        ):
+            StructuredJsonProvider(
+                profile_resolver=StoreBackedProfileResolver(store),
+                secret_store=_secret_store(tmp_path),
+                capability_store=store,
+                provider_factory=factory,
+            ).generate_json(
+                memory_space_id="space",
+                messages=(ChatMessage(role="user", content="return"),),
+                max_output_tokens=20,
+                profile_slot=ProfileSlot.OPERATIONAL,
+                output_contract=STRICT_CONTRACT,
+                structured_output_requirement=strict_requirement_for_contract(
+                    STRICT_CONTRACT
+                ),
+                mode=STRICT_JSON_SCHEMA_MODE,
+            )
+        assert created is False
+    finally:
+        connection.close()
+
+
+def test_malformed_completion_keeps_verified_capability_for_bounded_retry(tmp_path) -> None:
+    connection, store = _store()
+    try:
+        store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id="profile",
+                structured_output_mode=STRICT_JSON_SCHEMA_MODE,
+                structured_json_schema=True,
+                native_schema_strictness=True,
+                probe_contract_digest=STRICT_CONTRACT["schema_digest"],
+                probe_status="passed",
+                probe_result="passed",
+            )
+        )
+        fake = _FakeProvider(content="not-json")
+        provider = StructuredJsonProvider(
+            profile_resolver=StoreBackedProfileResolver(store),
+            secret_store=_secret_store(tmp_path),
+            capability_store=store,
+            provider_factory=lambda _profile, _secret: fake,
+        )
+
+        with pytest.raises(StructuredJsonResponseError):
+            provider.generate_json(
+                memory_space_id="space",
+                messages=(ChatMessage(role="user", content="return"),),
+                max_output_tokens=20,
+                profile_slot=ProfileSlot.OPERATIONAL,
+                output_contract=STRICT_CONTRACT,
+                structured_output_requirement=strict_requirement_for_contract(
+                    STRICT_CONTRACT
+                ),
+                mode=STRICT_JSON_SCHEMA_MODE,
+            )
+        cached = store.get_capabilities("profile")
+        assert cached is not None
+        assert cached.probe_status == "passed"
+        assert cached.is_fresh(profile_fingerprint="fixture-profile") is True
     finally:
         connection.close()
 

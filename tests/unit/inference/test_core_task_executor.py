@@ -29,6 +29,7 @@ from ledgermind_local.inference.structured_json_provider import (
     StructuredJsonProvider,
 )
 from ledgermind_local.persistence import rounds_migrations as migrations
+from ledgermind_local.scheduler.core_execution_task_worker import _core_result_payload
 
 SECRET_VALUE = "TOP_SECRET"
 
@@ -130,6 +131,14 @@ def _memory_store() -> sqlite3.Connection:
     )
     store.upsert(
         InferenceProfile(
+            profile_id="object-resolution-default",
+            base_url="https://provider.example/v1",
+            model="object-resolution-model",
+            secret_ref="object-resolution-main",
+        )
+    )
+    store.upsert(
+        InferenceProfile(
             profile_id="embedding-default",
             base_url="https://provider.example/v1",
             model="embed-model",
@@ -138,6 +147,9 @@ def _memory_store() -> sqlite3.Connection:
     )
     store.bind_slot("space", slot="operational", profile_id="operational-default")
     store.bind_slot("space", slot="background", profile_id="background-default")
+    store.bind_slot(
+        "space", slot="object_resolution", profile_id="object-resolution-default"
+    )
     store.bind_slot(
         "space",
         slot="embedding",
@@ -156,6 +168,7 @@ def _resolver() -> StoreBackedProfileResolver:
 def _secrets(tmp_path) -> SecretStore:
     secrets = SecretStore(tmp_path / "secrets.json")
     secrets.put("provider-main", SECRET_VALUE)
+    secrets.put("object-resolution-main", SECRET_VALUE)
     secrets.put("embed-main", SECRET_VALUE)
     return secrets
 
@@ -263,6 +276,25 @@ def test_generic_json_task_completes_with_output_and_payload_free_audit(
     assert "Extract values." not in dumped
 
 
+def test_object_resolution_task_uses_dedicated_profile_slot_and_model(tmp_path) -> None:
+    fake = _FakeCompleter('{"groups": []}')
+    executor = _executor(tmp_path, json_provider=_json_provider(fake, tmp_path))
+    task = _json_task(completer=fake).model_copy(
+        update={
+            "task_id": "object-resolution-task",
+            "task_kind": "object_resolution",
+            "operation": "object_resolution",
+            "profile_slot": ProfileSlot.OBJECT_RESOLUTION,
+        }
+    )
+
+    result = executor.execute(task)
+
+    assert result.status == "completed"
+    assert result.egress_audit.profile_id == "object-resolution-default"
+    assert result.egress_audit.model == "object-resolution-model"
+
+
 def test_embedding_task_completes_with_vectors_and_audit(tmp_path) -> None:
     embedding_provider = _embedding_provider(
         _FakeVectorizer(dimension=3, fingerprint="m1")
@@ -286,6 +318,19 @@ def test_embedding_task_completes_with_vectors_and_audit(tmp_path) -> None:
     assert audit.status == "completed"
     assert SECRET_VALUE not in audit.model_dump_json()
     assert "hello world" not in audit.model_dump_json()
+
+
+def test_embedding_result_wire_projection_excludes_local_renderer_metadata(tmp_path) -> None:
+    result = _executor(tmp_path).execute(_embed_task(dimensions=4))
+
+    payload = _core_result_payload(result)
+    assert set(payload["embedding_result"]) == {
+        "vectors",
+        "model",
+        "model_version",
+        "dimensions",
+        "purpose",
+    }
 
 
 def test_subject_query_embedding_task_is_accepted_without_domain_interpretation(

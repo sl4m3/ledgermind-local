@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from ledgermind_local.inference.providers.base import (
+    ChatMessage,
     ModelRequest,
     ProviderAuthenticationError,
     ProviderResponseError,
@@ -174,3 +175,45 @@ def test_openai_compatible_provider_limits_response_size() -> None:
     with pytest.raises(ProviderResponseError, match="size"):
         provider.complete_json(_request())
     provider.close()
+
+
+def test_nvidia_strict_adapter_uses_guided_json_without_legacy_response_format() -> None:
+    seen: dict[str, object] = {}
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"model": "test-model", "choices": [{"message": {"content": '{"ok":true}'}}]},
+        )
+
+    provider = OpenAICompatibleProvider(
+        base_url="https://provider.example/v1",
+        api_key="secret",
+        max_retries=0,
+        strict_transport="nvidia_guided_json",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    response = provider.complete_json(
+        ModelRequest(
+            model="test-model",
+            messages=(
+                ChatMessage(role="system", content="Return the object."),
+                ChatMessage(role="user", content="Return JSON."),
+            ),
+            max_output_tokens=100,
+            mode="strict_json_schema",
+            output_contract={"contract_name": "strict_result", "json_schema": schema},
+        )
+    )
+    provider.close()
+
+    assert seen["guided_json"] == schema
+    assert "response_format" not in seen
+    assert json.loads(response.content) == {"ok": True}

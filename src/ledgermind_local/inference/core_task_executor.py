@@ -23,7 +23,7 @@ from .provider_telemetry import record_task
 from .providers.base import ChatMessage, ProviderCancelledError, ProviderTimeoutError
 from .structured_json_provider import StructuredJsonProvider
 
-TaskKind = Literal["generate_json", "embed_texts"]
+TaskKind = Literal["generate_json", "object_resolution", "embed_texts"]
 ExecutionStatus = Literal[
     "completed", "failed", "unknown_task_kind", "cancelled", "timeout"
 ]
@@ -40,6 +40,7 @@ class ModelRequestSpec(BaseModel):
     max_output_tokens: int = Field(gt=0, le=50_000)
     response_format: dict[str, object] | None = None
     output_contract: dict[str, object] | None = None
+    structured_output_requirement: dict[str, object] | None = None
     mode: StructuredOutputMode = Field(
         default="auto",
         validation_alias=AliasChoices("mode", "structured_output_mode"),
@@ -68,6 +69,8 @@ class EmbeddingRequestSpec(BaseModel):
     cache_namespace: str = Field(default="", max_length=200)
     cache_keys: tuple[str, ...] | None = Field(default=None, max_length=512)
     deadline: str | None = Field(default=None, max_length=64)
+    role: Literal["query", "passage"] | None = None
+    renderer_version: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class GenericExecutionTask(BaseModel):
@@ -193,7 +196,7 @@ class CoreTaskExecutor:
         task: GenericExecutionTask,
         cancellation_token: CancellationToken | None = None,
     ) -> GenericExecutionResult:
-        if task.task_kind == "generate_json":
+        if task.task_kind in {"generate_json", "object_resolution"}:
             return self._execute_generate_json(task, cancellation_token)
         if task.task_kind == "embed_texts":
             return self._execute_embed_texts(task, cancellation_token)
@@ -267,6 +270,7 @@ class CoreTaskExecutor:
                     messages=spec.messages,
                     max_output_tokens=spec.max_output_tokens,
                     output_contract=spec.output_contract,
+                    structured_output_requirement=spec.structured_output_requirement,
                     mode=spec.mode,
                     tool_name=spec.tool_name,
                     metadata=spec.metadata,
@@ -354,6 +358,8 @@ class CoreTaskExecutor:
                             config_fingerprint=spec.config_fingerprint,
                             privacy_class=spec.privacy_class,
                             deadline=spec.deadline,
+                            role=spec.role,
+                            renderer_version=spec.renderer_version,
                         ),
                     ),
                     cancellation_token=token,
@@ -430,6 +436,8 @@ class CoreTaskExecutor:
                     spec.privacy_class,
                     spec.cache_namespace,
                     spec.deadline,
+                    spec.role,
+                    spec.renderer_version,
                 )
                 != (
                     first_profile.profile_id,
@@ -442,6 +450,8 @@ class CoreTaskExecutor:
                     typed_specs[0].privacy_class,
                     typed_specs[0].cache_namespace,
                     typed_specs[0].deadline,
+                    typed_specs[0].role,
+                    typed_specs[0].renderer_version,
                 )
                 for profile, spec in zip(profiles[1:], typed_specs[1:], strict=True)
             ):
@@ -458,6 +468,8 @@ class CoreTaskExecutor:
                     config_fingerprint=spec.config_fingerprint,
                     privacy_class=spec.privacy_class,
                     deadline=spec.deadline,
+                    role=spec.role,
+                    renderer_version=spec.renderer_version,
                 )
                 for spec, profile in zip(typed_specs, profiles, strict=True)
             )

@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
 
-from .vectorizer import Vectorizer
+from .vectorizer import EmbeddingRole, Vectorizer, VectorizerRoleError
 
 _EmbeddingModelBuilder: TypeAlias = Callable[[str, int, int], Any]
 
@@ -149,9 +149,18 @@ class GGUFVectorizer(Vectorizer):
                 raise RuntimeError("vector dimension is unknown before first encoding")
         return self._dimension
 
-    def encode(self, texts: Sequence[str]) -> list[list[float]]:
+    def encode(
+        self,
+        texts: Sequence[str],
+        *,
+        role: EmbeddingRole | None = None,
+    ) -> list[list[float]]:
         if not texts:
             return []
+        if role is not None:
+            raise VectorizerRoleError(
+                "GGUF embedding backend does not support query/passage roles"
+            )
 
         model = self._ensure_model()
 

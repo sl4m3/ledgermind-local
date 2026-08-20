@@ -154,6 +154,7 @@ def test_process_core_backend_builds_process_gateway_without_starting_core(
 ) -> None:
     config = LocalConfig(
         config_version=1,
+        semantic_language="ru",
         core_backend="process",
         core_binary_path="bin/fake-core",
         verify_core_signature=False,
@@ -169,6 +170,7 @@ def test_process_core_backend_passes_core_owned_database_to_daemon(
 ) -> None:
     config = LocalConfig(
         config_version=1,
+        semantic_language="ru",
         core_backend="process",
         core_binary_path="bin/ledgermind-core",
         knowledge_database_path="knowledge.db",
@@ -205,6 +207,7 @@ def test_process_core_backend_verifies_signed_binary_before_gateway_creation(
     )
     config = LocalConfig(
         config_version=1,
+        semantic_language="ru",
         core_backend="process",
         core_binary_path="bin/ledgermind-core",
         core_signature_path="bin/ledgermind-core.sig",
@@ -247,7 +250,10 @@ def test_command_serve_rejects_remote_host_without_allow_remote_bind(
     initialize_local_layout(
         home=home,
         config=LocalConfig(
-            config_version=1, bind_host="127.0.0.1", allow_remote_bind=False
+            config_version=1,
+            semantic_language="ru",
+            bind_host="127.0.0.1",
+            allow_remote_bind=False,
         ),
     )
 
@@ -270,7 +276,10 @@ def test_command_serve_rejects_remote_host_without_allow_remote_bind(
 
 def test_command_serve_reports_lock_error(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "service"
-    initialize_local_layout(home=home)
+    initialize_local_layout(
+        home=home,
+        config=LocalConfig(config_version=1, semantic_language="ru"),
+    )
 
     class FailingLock:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -307,7 +316,10 @@ def test_command_serve_allows_remote_host_when_explicitly_enabled(
     initialize_local_layout(
         home=home,
         config=LocalConfig(
-            config_version=1, allow_remote_bind=True, bind_host="127.0.0.1"
+            config_version=1,
+            semantic_language="ru",
+            allow_remote_bind=True,
+            bind_host="127.0.0.1",
         ),
     )
 
@@ -359,7 +371,10 @@ def test_command_serve_writes_pid_and_starts_server(
 ) -> None:
     _patch_noop_core_runtime(monkeypatch)
     home = tmp_path / "service"
-    initialize_local_layout(home=home)
+    initialize_local_layout(
+        home=home,
+        config=LocalConfig(config_version=1, semantic_language="ru"),
+    )
     token = (home / "server.token").read_text(encoding="utf-8").strip()
     assert token
 
@@ -422,7 +437,10 @@ def test_command_serve_applies_migrations_before_starting_server(
 ) -> None:
     _patch_noop_core_runtime(monkeypatch)
     home = tmp_path / "service"
-    initialize_local_layout(home=home)
+    initialize_local_layout(
+        home=home,
+        config=LocalConfig(config_version=1, semantic_language="ru"),
+    )
 
     events: list[str] = []
 
@@ -478,7 +496,10 @@ def test_command_serve_applies_migrations_before_starting_server(
 
 def test_command_serve_fails_when_migrations_fail(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "service"
-    initialize_local_layout(home=home)
+    initialize_local_layout(
+        home=home,
+        config=LocalConfig(config_version=1, semantic_language="ru"),
+    )
 
     events: list[str] = []
 

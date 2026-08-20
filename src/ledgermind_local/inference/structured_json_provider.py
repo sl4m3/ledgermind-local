@@ -15,6 +15,10 @@ from .profiles import (
     StructuredOutputMode,
     generation_profile_fingerprint,
 )
+from .strict import (
+    STRICT_JSON_SCHEMA_MODE,
+    validate_strict_requirement,
+)
 from .provider_telemetry import operation_context
 from .providers.base import (
     ChatMessage,
@@ -41,6 +45,7 @@ from .token_budget import (
 
 ProviderFactory = Callable[[InferenceProfile, str], InferenceProvider]
 _MODE_ORDER: tuple[StructuredOutputMode, ...] = (
+    STRICT_JSON_SCHEMA_MODE,
     "json_schema",
     "tool_call",
     "json_object",
@@ -58,7 +63,7 @@ def default_provider_factory(profile: InferenceProfile, secret: str) -> Inferenc
     if profile.provider_kind == "google_genai":
         del secret
         return GoogleGenerationTransport()
-    if profile.provider_kind == "openai_compatible":
+    if profile.provider_kind in {"openai_compatible", "nvidia_nim"}:
         return OpenAICompatibleProvider(
             base_url=profile.base_url,
             api_key=secret,
@@ -68,6 +73,11 @@ def default_provider_factory(profile: InferenceProfile, secret: str) -> Inferenc
             supports_system_role=profile.supports_system_role,
             supports_seed=profile.supports_seed,
             extra_body=profile.extra_body,
+            strict_transport=(
+                "nvidia_guided_json"
+                if profile.provider_kind == "nvidia_nim"
+                else None
+            ),
             profile_fingerprint=generation_profile_fingerprint(profile),
         )
     raise ProviderConfigurationError("unsupported inference provider kind")
@@ -210,6 +220,7 @@ class StructuredJsonProvider:
         profile_slot: ProfileSlot,
         response_format: Mapping[str, object] | None = None,
         output_contract: Mapping[str, object] | None = None,
+        structured_output_requirement: Mapping[str, object] | None = None,
         mode: StructuredOutputMode | None = None,
         structured_output_mode: StructuredOutputMode | None = None,
         tool_name: str | None = None,
@@ -233,6 +244,21 @@ class StructuredJsonProvider:
             mode=mode,
             structured_output_mode=structured_output_mode,
         )
+        if structured_output_requirement is not None or requested_mode == STRICT_JSON_SCHEMA_MODE:
+            if requested_mode not in {None, "auto", STRICT_JSON_SCHEMA_MODE}:
+                raise StructuredJsonRequestError(
+                    "strict structured output cannot be combined with a legacy mode"
+                )
+            try:
+                structured_output_requirement = validate_strict_requirement(
+                    structured_output_requirement,
+                    contract,
+                )
+            except (TypeError, ValueError) as exc:
+                raise StructuredJsonRequestError(
+                    "strict structured output requirement is invalid"
+                ) from exc
+            requested_mode = STRICT_JSON_SCHEMA_MODE
         selected_mode = self._select_mode(
             profile,
             requested_mode=requested_mode,
@@ -243,6 +269,7 @@ class StructuredJsonProvider:
             messages=messages,
             max_output_tokens=max_output_tokens,
             output_contract=contract,
+            structured_output_requirement=structured_output_requirement,
             mode=selected_mode,
             tool_name=tool_name,
             metadata=metadata,
@@ -264,8 +291,22 @@ class StructuredJsonProvider:
                 "configured provider secret is not present"
             ) from exc
 
-        provider = self._provider_factory(profile, secret)
         capabilities = self._load_capabilities(profile)
+        strict_request = (
+            requested_mode == STRICT_JSON_SCHEMA_MODE
+            or structured_output_requirement is not None
+        )
+        if strict_request and (
+            capabilities is None
+            or not capabilities.is_fresh(
+                profile_fingerprint=generation_profile_fingerprint(profile)
+            )
+            or not capabilities.supports(STRICT_JSON_SCHEMA_MODE)
+        ):
+            raise StructuredJsonRequestError(
+                "strict provider/model capability has not been verified by a successful probe"
+            )
+        provider = self._provider_factory(profile, secret)
         fallback_metadata: dict[str, object] = {}
 
         internal_metadata = dict(telemetry_context or {})
@@ -344,6 +385,7 @@ class StructuredJsonProvider:
                     messages=messages,
                     max_output_tokens=max_output_tokens,
                     output_contract=contract,
+                    structured_output_requirement=structured_output_requirement,
                     mode=fallback_mode,
                     tool_name=tool_name,
                     metadata=metadata,
@@ -571,9 +613,15 @@ class StructuredJsonProvider:
         # fresh capability observation and let the normal retry/outage policy
         # report the execution failure. Only an actual provider response
         # incompatibility can invalidate the selected mode.
-        if selected_mode == "auto" or not isinstance(
-            error, (ProviderResponseError, StructuredJsonResponseError)
-        ):
+        if selected_mode == "auto" or isinstance(error, StructuredJsonResponseError):
+            # The provider returned an HTTP response, but this individual
+            # completion was not parseable as JSON (or exceeded the response
+            # bound).  That is a bounded model-output failure, not evidence
+            # that the probed transport capability has disappeared.  Keep
+            # the capability fresh so the worker's single structured retry
+            # can make another HTTP attempt.
+            return
+        if not isinstance(error, ProviderResponseError):
             return
         reason = f"capability_execution_failed:{selected_mode}:{normalize_error(error)['code']}"
         stores: list[object] = []
@@ -624,6 +672,7 @@ class StructuredJsonProvider:
         messages: Sequence[ChatMessage],
         max_output_tokens: int,
         output_contract: dict[str, object] | None,
+        structured_output_requirement: Mapping[str, object] | None,
         mode: StructuredOutputMode,
         tool_name: str | None,
         metadata: Mapping[str, object] | None,
@@ -631,7 +680,7 @@ class StructuredJsonProvider:
     ) -> ModelRequest:
         if not messages:
             raise StructuredJsonRequestError("messages must not be empty")
-        if mode == "json_schema" and (
+        if mode in {"strict_json_schema", "json_schema"} and (
             not isinstance(output_contract, dict)
             or not isinstance(output_contract.get("json_schema"), dict)
         ):
@@ -644,6 +693,11 @@ class StructuredJsonProvider:
                 messages=tuple(messages),
                 max_output_tokens=max_output_tokens,
                 output_contract=output_contract,
+                structured_output_requirement=(
+                    dict(structured_output_requirement)
+                    if isinstance(structured_output_requirement, Mapping)
+                    else None
+                ),
                 mode=mode,
                 tool_name=tool_name,
                 metadata=dict(metadata or {}),

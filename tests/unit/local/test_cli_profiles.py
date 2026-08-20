@@ -9,6 +9,19 @@ from ledgermind_local.paths import ServicePaths
 
 
 def _add(home, profile_id: str, secret_ref: str = "provider-main") -> int:
+    if not ServicePaths(home).config_file.exists():
+        assert (
+            main(
+                [
+                    "--home",
+                    str(home),
+                    "init",
+                    "--semantic-language",
+                    "ru",
+                ]
+            )
+            == 0
+        )
     return main(
         [
             "--home",
@@ -126,6 +139,9 @@ def test_secrets_cli_reads_stdin_and_never_prints_secret_value(
     tmp_path, monkeypatch, capsys
 ) -> None:
     home = tmp_path / "local"
+    assert (
+        main(["--home", str(home), "init", "--semantic-language", "ru"]) == 0
+    )
     monkeypatch.setattr("sys.stdin", StringIO("TOP_SECRET\n"))
     assert (
         main(

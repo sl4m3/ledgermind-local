@@ -8,10 +8,13 @@ import pytest
 
 from ledgermind_local import bootstrap
 from ledgermind_local.cli import main
+from ledgermind_local.config import LocalConfig
 
 
 def _run_init(home: Path, *args: str) -> int:
-    return main(["--home", str(home), "init", *args])
+    return main(
+        ["--home", str(home), "init", "--semantic-language", "ru", *args]
+    )
 
 
 def test_init_is_idempotent(tmp_path: Path) -> None:
@@ -77,7 +80,10 @@ def test_existing_token_is_canonicalized_without_trailing_whitespace(
     home.mkdir()
     (home / "server.token").write_text("  preproduction-token\n", encoding="utf-8")
 
-    _paths, _config, token = bootstrap.initialize_local_layout(home=home)
+    _paths, _config, token = bootstrap.initialize_local_layout(
+        home=home,
+        config=LocalConfig(config_version=1, semantic_language="ru"),
+    )
 
     assert token == "preproduction-token"
     assert (home / "server.token").read_text(encoding="utf-8") == "preproduction-token"

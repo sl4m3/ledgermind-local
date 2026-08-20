@@ -33,6 +33,7 @@ class ModelRequest(BaseModel):
     max_output_tokens: int = Field(gt=0, le=50_000)
     response_format: dict[str, object] | None = None
     output_contract: dict[str, object] | None = None
+    structured_output_requirement: dict[str, object] | None = None
     mode: StructuredOutputMode = Field(
         default="json_object",
         validation_alias=AliasChoices("mode", "structured_output_mode"),
@@ -62,6 +63,7 @@ class ModelRequest(BaseModel):
         max_output_tokens: int,
         response_format: dict[str, object] | None = None,
         output_contract: dict[str, object] | None = None,
+        structured_output_requirement: dict[str, object] | None = None,
         mode: StructuredOutputMode = "json_object",
         tool_name: str | None = None,
         metadata: dict[str, object] | None = None,
@@ -79,6 +81,7 @@ class ModelRequest(BaseModel):
             max_output_tokens=max_output_tokens,
             response_format=response_format,
             output_contract=output_contract,
+            structured_output_requirement=structured_output_requirement,
             mode=mode,
             tool_name=tool_name,
             metadata=metadata or {},

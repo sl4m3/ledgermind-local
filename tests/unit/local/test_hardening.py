@@ -11,7 +11,7 @@ def test_token_file_has_private_permissions_on_posix(tmp_path: Path) -> None:
     home.mkdir()
     exit_code = _command_init(
         __import__("argparse").Namespace(
-            home=str(home), force=False, rotate_token=False
+            home=str(home), force=False, rotate_token=False, semantic_language="ru"
         )
     )
     assert exit_code == 0

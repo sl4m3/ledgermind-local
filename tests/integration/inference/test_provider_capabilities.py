@@ -87,7 +87,7 @@ def test_migration_and_capability_persistence_are_restart_safe(tmp_path) -> None
         } <= columns
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone()[0] == 11
+        ).fetchone()[0] == 14
     finally:
         connection.close()
 
@@ -152,7 +152,9 @@ def test_ipc_metadata_roundtrip_and_opaque_operation() -> None:
 
 def test_probe_cli_emits_json_and_persists_selected_mode(tmp_path, monkeypatch, capsys) -> None:
     home = tmp_path / "local"
-    assert cli.main(["--home", str(home), "init"]) == 0
+    assert cli.main(
+        ["--home", str(home), "init", "--semantic-language", "ru"]
+    ) == 0
     capsys.readouterr()
     paths = ServicePaths(home)
     connection = open_sqlite_connection(paths.rounds_database_file)

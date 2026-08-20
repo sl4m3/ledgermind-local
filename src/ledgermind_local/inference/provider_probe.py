@@ -17,16 +17,14 @@ from .profiles import (
     StructuredOutputMode,
     generation_profile_fingerprint,
 )
+from .strict import STRICT_JSON_SCHEMA_MODE, strict_requirement_for_contract
 from .providers.base import ChatMessage, InferenceProvider, ModelRequest
 from .providers.openai_compatible import decode_json_content
 from .secrets import SecretNotFoundError, SecretStore
 
 ProbeProviderFactory = Callable[[InferenceProfile, str], InferenceProvider]
 PROBE_MODE_ORDER: tuple[StructuredOutputMode, ...] = (
-    "json_schema",
-    "tool_call",
-    "json_object",
-    "prompt_only",
+    STRICT_JSON_SCHEMA_MODE,
 )
 PROBE_TOOL_NAME = "submit_structured_result"
 # Reasoning-capable models may spend more than the JSON body itself before
@@ -75,7 +73,7 @@ class ProviderProbeResult(BaseModel):
 
 
 class ProviderProbe:
-    """Run a real small operational or background contract through an endpoint."""
+    """Run a real small generation-slot contract through an endpoint."""
 
     def __init__(
         self,
@@ -207,21 +205,31 @@ class ProviderProbe:
             transport=profile.provider_kind,
             model=profile.model,
             structured_output_mode=selected,
-            json_schema_supported="json_schema" in successful,
+            json_schema_supported=(
+                STRICT_JSON_SCHEMA_MODE in successful or "json_schema" in successful
+            ),
             tool_call_supported="tool_call" in successful,
             json_object_supported="json_object" in successful,
             prompt_only_supported="prompt_only" in successful,
-            structured_json_schema="json_schema" in successful,
+            structured_json_schema=(
+                STRICT_JSON_SCHEMA_MODE in successful or "json_schema" in successful
+            ),
             structured_json_object="json_object" in successful,
             tool_calling="tool_call" in successful,
             plain_json_prompt="prompt_only" in successful,
-            native_schema_strictness="json_schema" in successful,
+            native_schema_strictness=(
+                STRICT_JSON_SCHEMA_MODE in successful or "json_schema" in successful
+            ),
             detected_capabilities={
-                "structured_json_schema": "json_schema" in successful,
+                "structured_json_schema": (
+                    STRICT_JSON_SCHEMA_MODE in successful or "json_schema" in successful
+                ),
                 "structured_json_object": "json_object" in successful,
                 "tool_calling": "tool_call" in successful,
                 "plain_json_prompt": "prompt_only" in successful,
-                "native_schema_strictness": "json_schema" in successful,
+                "native_schema_strictness": (
+                    STRICT_JSON_SCHEMA_MODE in successful or "json_schema" in successful
+                ),
             },
             probe_contract_digest=contract_digest,
             probe_status=status,
@@ -275,6 +283,18 @@ class ProviderProbe:
         return self.probe(
             memory_space_id,
             ProfileSlot.BACKGROUND,
+            mode_override=mode_override,
+        )
+
+    def probe_object_resolution(
+        self,
+        memory_space_id: str,
+        *,
+        mode_override: StructuredOutputMode | None = None,
+    ) -> ProviderProbeResult:
+        return self.probe(
+            memory_space_id,
+            ProfileSlot.OBJECT_RESOLUTION,
             mode_override=mode_override,
         )
 
@@ -353,147 +373,42 @@ def _probe_modes(
     profile: InferenceProfile,
     override: StructuredOutputMode | None,
 ) -> tuple[StructuredOutputMode, ...]:
-    if override is not None:
-        if override == "auto":
-            return PROBE_MODE_ORDER
+    if override is not None and override != "auto":
+        # An explicit legacy override remains available for bounded
+        # compatibility diagnostics, but the default/install probe below is
+        # always the real strict transport.
         return (override,)
-    preference = profile.structured_output_preference
-    if preference == "auto":
-        return PROBE_MODE_ORDER
-    return (preference,)
+    return PROBE_MODE_ORDER
 
 
 def _probe_contract(probe_kind: str) -> dict[str, object]:
-    if probe_kind == "operational":
-        object_schema: dict[str, object] = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "mention_ref": {"type": "string"},
-                "resolution": {"enum": ["existing", "new", "ambiguous"]},
-                "existing_object_id": {"type": ["string", "null"]},
-                "new_canonical_name": {"type": ["string", "null"]},
-                "ambiguous_candidate_ids": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": [
-                "mention_ref",
-                "resolution",
-                "existing_object_id",
-                "new_canonical_name",
-                "ambiguous_candidate_ids",
-            ],
-        }
-        value_schema: dict[str, object] = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "primary_mention_ref": {"type": "string"},
-                "related_mention_refs": {"type": "array", "items": {"type": "string"}},
-                "facet": {"type": "string"},
-                "content": {"type": "string"},
-                "source_event_ids": {"type": "array", "items": {"type": "string"}},
-                "scope_text": {"type": ["string", "null"]},
-                "content_language": {"type": ["string", "null"]},
-                "conditions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "source_event_id": {"type": "string"},
-                            "surface_text": {"type": "string"},
-                        },
-                        "required": ["source_event_id", "surface_text"],
-                    },
-                },
-                "valid_from": {"type": ["string", "null"]},
-                "valid_to": {"type": ["string", "null"]},
-            },
-            "required": [
-                "primary_mention_ref",
-                "related_mention_refs",
-                "facet",
-                "content",
-                "source_event_ids",
-                "scope_text",
-                "valid_from",
-                "valid_to",
-            ],
-        }
-        schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "schema_version": {"const": 1},
-                "objects": {"type": "array", "items": object_schema},
-                "values": {"type": "array", "items": value_schema},
-            },
-            "required": ["schema_version", "objects", "values"],
-        }
-        template: dict[str, object] = {
-            "schema_version": 1,
-            "objects": [
-                {
-                    "mention_ref": "mention-001",
-                    "resolution": "new",
-                    "existing_object_id": None,
-                    "new_canonical_name": "PostgreSQL",
-                    "ambiguous_candidate_ids": [],
-                }
-            ],
-            "values": [
-                {
-                    "primary_mention_ref": "mention-001",
-                    "related_mention_refs": [],
-                    "facet": "property",
-                    "content": "Project uses PostgreSQL",
-                    "source_event_ids": ["event-user"],
-                    "scope_text": None,
-                    "content_language": None,
-                    "conditions": [],
-                    "valid_from": None,
-                    "valid_to": None,
-                }
-            ],
-        }
-        contract_name = "operational_extraction"
-    elif probe_kind == "background":
-        result_schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "content": {"type": "string"},
-                "scope_text": {"type": ["string", "null"]},
-                "valid_from": {"type": ["string", "null"]},
-                "valid_to": {"type": ["string", "null"]},
-            },
-            "required": ["content", "scope_text", "valid_from", "valid_to"],
-        }
-        schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "schema_version": {"const": 1},
-                "action": {"enum": ["merge", "replace"]},
-                "source_value_ids": {"type": "array", "items": {"type": "string"}},
-                "result": result_schema,
-            },
-            "required": ["schema_version", "action", "source_value_ids", "result"],
-        }
-        template = {
-            "schema_version": 1,
-            "action": "merge",
-            "source_value_ids": ["value-a", "value-b"],
-            "result": {
-                "content": "Core works offline",
-                "scope_text": None,
-                "valid_from": None,
-                "valid_to": None,
-            },
-        }
-        contract_name = "background_consolidation"
-    else:
+    if probe_kind not in {"operational", "object_resolution", "background"}:
         raise ValueError(f"unsupported structured probe kind: {probe_kind}")
+    # This is intentionally a small, provider-neutral strict probe. It uses
+    # required fields, an enum, a closed object, and a non-empty array so a
+    # successful response proves the actual strict transport rather than only
+    # parseable JSON mode.
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {"type": "integer", "enum": [1]},
+            "state": {"type": "string", "enum": ["ok"]},
+            "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "items": {"type": "integer"},
+            },
+        },
+        "required": ["schema_version", "state", "items"],
+    }
+    template: dict[str, object] = {
+        "schema_version": 1,
+        "state": "ok",
+        "items": [1],
+    }
+    contract_name = f"{probe_kind}_strict_structured_output"
     digest = "sha256:" + hashlib.sha256(
         json.dumps(
             schema,
@@ -519,6 +434,11 @@ def _probe_request(
     contract: Mapping[str, object],
     mode: StructuredOutputMode,
 ) -> ModelRequest:
+    strict_requirement = (
+        strict_requirement_for_contract(contract)
+        if mode == STRICT_JSON_SCHEMA_MODE
+        else None
+    )
     return ModelRequest(
         model=profile.model,
         messages=(
@@ -536,6 +456,7 @@ def _probe_request(
         ),
         max_output_tokens=min(profile.max_output_tokens, PROBE_MAX_OUTPUT_TOKENS),
         output_contract=dict(contract),
+        structured_output_requirement=strict_requirement,
         mode=mode,
         tool_name=PROBE_TOOL_NAME,
         token_parameter=profile.token_parameter,
@@ -558,6 +479,8 @@ def _now() -> str:
 
 
 def _selected_mode(capabilities: ProviderCapabilities) -> StructuredOutputMode:
+    if capabilities.structured_output_mode == STRICT_JSON_SCHEMA_MODE:
+        return STRICT_JSON_SCHEMA_MODE
     for candidate in PROBE_MODE_ORDER:
         if capabilities.supports(candidate):
             return candidate

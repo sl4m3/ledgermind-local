@@ -42,10 +42,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 _LOCAL_ROOT = Path(__file__).resolve().parents[1]
 _WORKSPACE_ROOT = _LOCAL_ROOT.parent
 _LAB_ROOT = _WORKSPACE_ROOT / "ledgermind-lab"
+_INTEGRATIONS_PYTHON_ROOT = _WORKSPACE_ROOT / "ledgermind-integrations" / "python"
 _INTEGRATIONS_PROTOCOL_ROOT = _WORKSPACE_ROOT / "ledgermind-integrations" / "protocol" / "python"
 for _path in (
     _LOCAL_ROOT / "src",
     _LAB_ROOT / "src",
+    _INTEGRATIONS_PYTHON_ROOT / "src",
     _INTEGRATIONS_PROTOCOL_ROOT / "src",
 ):
     if str(_path) not in sys.path:
@@ -58,6 +60,7 @@ from ledgermind_local.config import (  # noqa: E402
     CoreSecurityConfig,
     EmbeddingConfig,
     LocalConfig,
+    ProfileSlotsConfig,
     WorkerConfig,
     WorkerSetConfig,
 )
@@ -121,7 +124,8 @@ def _config_for(
     lab_config: LabConfig,
     port: int,
 ) -> LocalConfig:
-    generation = lab_config.generation
+    operational_profile = lab_config.generation_profile_for_task("user_semantic")
+    generation = lab_config.with_profiles(generation_profile=operational_profile).generation
     embedding = lab_config.embedding
     return LocalConfig(
         config_version=2,
@@ -144,8 +148,9 @@ def _config_for(
             require_environment_sanitized=True,
             require_signature=True,
         ),
+        semantic_language=lab_config.semantic_language,
         workers=WorkerSetConfig(
-            retention=WorkerConfig(enabled=False),
+            retention=WorkerConfig(enabled=True, interval_seconds=300.0),
             core_commands=WorkerConfig(enabled=True, interval_seconds=0.2),
             core_model_tasks=WorkerConfig(enabled=True, interval_seconds=0.2),
         ),
@@ -159,6 +164,12 @@ def _config_for(
         generation_concurrency=1,
         provider_capability_ttl_seconds=86_400,
         inference_secrets_path=str(home / "secrets.json"),
+        profile_slots=ProfileSlotsConfig(
+            operational="generation-operational",
+            object_resolution="generation-object-resolution",
+            background="generation-background",
+            embedding="embedding-api",
+        ),
         embedding=EmbeddingConfig(
             enabled=True,
             provider_mode="api",
@@ -181,14 +192,24 @@ def _seed_local(
     lab_config: LabConfig,
     memory_space_id: str,
 ) -> None:
-    generation = lab_config.generation
+    operational_profile = lab_config.generation_profile_for_task("user_semantic")
+    object_resolution_profile = lab_config.generation_profile_for_task("object_resolution")
+    background_profile = lab_config.generation_profile_for_task("execution_semantic")
+    generation = lab_config.with_profiles(generation_profile=operational_profile).generation
+    object_resolution_generation = lab_config.with_profiles(
+        generation_profile=object_resolution_profile
+    ).generation
+    background_generation = lab_config.with_profiles(
+        generation_profile=background_profile
+    ).generation
     embedding = lab_config.embedding
-    SecretStore(paths.home / "secrets.json").put(
-        "generation-api", generation.token.get_secret_value()
+    secret_store = SecretStore(paths.home / "secrets.json")
+    secret_store.put("generation-api", generation.token.get_secret_value())
+    secret_store.put(
+        "generation-object-resolution-api",
+        object_resolution_generation.token.get_secret_value(),
     )
-    SecretStore(paths.home / "secrets.json").put(
-        "embedding-api", embedding.token.get_secret_value()
-    )
+    secret_store.put("embedding-api", embedding.token.get_secret_value())
     database = paths.resolve_rounds_database_path(config.rounds_database_path)
     connection = open_sqlite_connection(database)
     try:
@@ -203,32 +224,50 @@ def _seed_local(
             (memory_space_id, "hermes-production-gate", now, now),
         )
         store = InferenceProfileStore(connection)
-        reasoning_profile = generation.reasoning.for_provider_model(
-            generation.provider,
-            generation.model,
-        )
-        generation_extra_body = dict(reasoning_profile.extra_body)
-        if (
-            reasoning_profile.reasoning_effort is not None
-            and "reasoning_effort" not in generation_extra_body
+        for profile_id, slot, selected_generation, secret_ref in (
+            ("generation-operational", "operational", generation, "generation-api"),
+            (
+                "generation-object-resolution",
+                "object_resolution",
+                object_resolution_generation,
+                "generation-object-resolution-api",
+            ),
+            ("generation-background", "background", background_generation, "generation-api"),
         ):
-            generation_extra_body["reasoning_effort"] = (
-                reasoning_profile.reasoning_effort
+            reasoning_profile = selected_generation.reasoning.for_provider_model(
+                selected_generation.provider,
+                selected_generation.model,
             )
-        for profile_id, slot in (
-            ("generation-operational", "operational"),
-            ("generation-background", "background"),
-        ):
+            generation_extra_body = dict(reasoning_profile.extra_body)
+            if (
+                reasoning_profile.reasoning_effort is not None
+                and "reasoning_effort" not in generation_extra_body
+            ):
+                generation_extra_body["reasoning_effort"] = reasoning_profile.reasoning_effort
+            if (
+                selected_generation.temperature is not None
+                and "temperature" not in generation_extra_body
+            ):
+                # Keep the production preflight request parameters aligned
+                # with the Lab generation profile.  Otherwise the provider's
+                # default sampling can make a deterministic semantic gate
+                # alternate between an empty and a non-empty result.
+                generation_extra_body["temperature"] = selected_generation.temperature
             store.upsert(
                 InferenceProfile(
                     profile_id=profile_id,
-                    base_url=generation.endpoint,
-                    model=generation.model,
-                    secret_ref="generation-api",
-                    timeout_seconds=min(generation.timeout_seconds, 300.0),
-                    max_retries=generation.max_retries,
+                    provider_kind=(
+                        "nvidia_nim"
+                        if selected_generation.provider == "nvidia"
+                        else "openai_compatible"
+                    ),
+                    base_url=selected_generation.endpoint,
+                    model=selected_generation.model,
+                    secret_ref=secret_ref,
+                    timeout_seconds=min(selected_generation.timeout_seconds, 300.0),
+                    max_retries=selected_generation.max_retries,
                     max_input_tokens=12_000,
-                    max_output_tokens=generation.max_output_tokens,
+                    max_output_tokens=selected_generation.max_output_tokens,
                     extra_body=generation_extra_body,
                     structured_output_preference="auto",
                     token_parameter="max_tokens",
@@ -256,7 +295,7 @@ def _seed_local(
 
 
 def _probe_generation_profiles(*, paths: ServicePaths, database: Path, memory_space_id: str) -> dict[str, Any]:
-    """Warm both generation capability-cache rows with real provider calls."""
+    """Warm all configured generation slots with real provider calls."""
 
     connection = open_sqlite_connection(database)
     try:
@@ -268,9 +307,19 @@ def _probe_generation_profiles(*, paths: ServicePaths, database: Path, memory_sp
             capability_ttl_seconds=86_400,
         )
         results: dict[str, Any] = {}
-        for slot in (ProfileSlot.OPERATIONAL, ProfileSlot.BACKGROUND):
+        for slot in (
+            ProfileSlot.OPERATIONAL,
+            ProfileSlot.OBJECT_RESOLUTION,
+            ProfileSlot.BACKGROUND,
+        ):
             result = probe.probe(memory_space_id, slot, force=False, reprobe=False)
+            profile = resolver.resolve_profile(memory_space_id, slot)
             results[slot.value] = {
+                "profile_id": profile.profile_id,
+                "provider": profile.provider_kind,
+                "model": profile.model,
+                "base_url": profile.base_url,
+                "mode": result.selected_mode,
                 "status": result.status,
                 "selected_mode": result.selected_mode,
                 "cache_hit": bool(result.metadata.get("cache_hit", False)),
@@ -378,6 +427,41 @@ def _core_counts(database: Path, memory_space_id: str) -> dict[str, int]:
         connection.close()
 
 
+def _core_lifecycle_counts(database: Path, memory_space_id: str) -> dict[str, int]:
+    """Return counters that must remain unchanged before materialization."""
+
+    connection = sqlite3.connect(database)
+    try:
+        params = (memory_space_id,)
+        queries = {
+            "memory_objects": (
+                "SELECT count(*) FROM memory_objects WHERE memory_space_id = ?"
+            ),
+            "knowledge_values": (
+                "SELECT count(*) FROM knowledge_values WHERE memory_space_id = ?"
+            ),
+            "operational_semantic_claims": (
+                """
+                SELECT count(*) FROM operational_semantic_claims c
+                JOIN raw_rounds r ON r.raw_round_id = c.raw_round_id
+                WHERE r.memory_space_id = ?
+                """
+            ),
+            "knowledge_resolution_tasks": (
+                """
+                SELECT count(*) FROM model_tasks
+                WHERE memory_space_id = ? AND task_type = 'knowledge_resolution'
+                """
+            ),
+        }
+        return {
+            name: int(connection.execute(query, params).fetchone()[0])
+            for name, query in queries.items()
+        }
+    finally:
+        connection.close()
+
+
 def _core_task_state(database: Path) -> dict[str, Any]:
     """Read live Core task state, independent of Local's startup snapshot.
 
@@ -453,7 +537,7 @@ def _core_generation_task_counts(database: Path, raw_round_id: str) -> dict[str,
     counts = _core_task_counts(database, raw_round_id)
     return {
         task_type: counts.get(task_type, 0)
-        for task_type in ("extract_claims", "resolve_subjects")
+        for task_type in ("user_semantic", "execution_semantic", "object_resolution")
     }
 
 
@@ -604,6 +688,7 @@ def run_gate(
         for path in (
             _LOCAL_ROOT / "src",
             _LAB_ROOT / "src",
+            _INTEGRATIONS_PYTHON_ROOT / "src",
             _INTEGRATIONS_PROTOCOL_ROOT / "src",
         )
     )
@@ -621,6 +706,15 @@ def run_gate(
             "embedding_model": lab_config.embedding.model,
             "embedding_endpoint": lab_config.embedding.endpoint,
             "embedding_dimensions": lab_config.embedding.dimensions,
+            "generation_slots": {
+                slot: {
+                    key: value
+                    for key, value in details.items()
+                    if key in {"profile_id", "provider", "model", "base_url", "mode"}
+                }
+                for slot, details in probe_report.items()
+                if isinstance(details, Mapping)
+            },
         },
         "probe": probe_report,
         "round_a": {},
@@ -632,6 +726,11 @@ def run_gate(
             "core_launched_by_local": True,
             "core_database": str(core_database),
             "secret_store": str(paths.home / "secrets.json"),
+        },
+        "database_audit": {
+            "before": None,
+            "after": None,
+            "delta": None,
         },
     }
     try:
@@ -651,6 +750,8 @@ def run_gate(
 
         _wait_until(ready, timeout=timeout)
         report["readiness"] = latest_details
+        lifecycle_before = _core_lifecycle_counts(core_database, memory_space_id)
+        report["database_audit"]["before"] = lifecycle_before
         if process.poll() is not None:
             raise GateFailure("Local exited after reporting readiness")
 
@@ -708,15 +809,23 @@ def run_gate(
                     for name, expected in expected_core_counts.items()
                 )
                 if round_status in {
+                    "object_resolution_completed",
                     "completed",
                     "completed_with_rejections",
+                    "no_semantic_candidates",
                     "no_values",
                     "failed",
-                } and not counts_match:
-                    raise GateFailure(
-                        "Core round reached a terminal status before the expected "
-                        f"counts: status={round_status}, counts={observed_counts}"
-                    )
+                }:
+                    if round_status != "object_resolution_completed":
+                        raise GateFailure(
+                            "Core round did not stop at object_resolution_completed: "
+                            f"status={round_status}, counts={observed_counts}"
+                        )
+                    if not counts_match:
+                        raise GateFailure(
+                            "Core round reached object_resolution_completed with "
+                            f"unexpected memory counts: {observed_counts}"
+                        )
                 return (
                     status in {200, 503}
                     and payload.get("terminal_worker_failure") is not True
@@ -726,11 +835,9 @@ def run_gate(
                     and task_state["terminal_failures"] == 0
                     and task_counts.get("semantic_repair", 0) == 0
                     and task_counts.get("consolidate_values", 0) == 0
-                    and embedding_counts.get("object_card", 0)
-                    == expected_core_counts["objects"]
-                    and embedding_counts.get("value", 0)
-                    == expected_core_counts["active_values"]
-                    and embedding_counts.get("facet", 0) >= 14
+                    and round_status == "object_resolution_completed"
+                    and embedding_counts.get("semantic_object_candidate_query", 0) > 0
+                    and embedding_counts.get("value", 0) == 0
                     and counts_match
                 )
 
@@ -740,7 +847,7 @@ def run_gate(
         report["round_a"]["submission"] = submit(round_a)
         report["round_a"]["health_after_submit"] = wait_drained(
             raw_round_id=str(report["round_a"]["submission"]["raw_round_id"]),
-            expected_core_counts={"objects": 3, "active_values": 4},
+            expected_core_counts={"objects": 0, "active_values": 0},
         )
         report["round_a"]["local_counts"] = _local_counts(database, memory_space_id)
         report["round_a"]["core_counts"] = _core_counts(core_database, memory_space_id)
@@ -756,16 +863,94 @@ def run_gate(
             core_database, str(round_a_core_raw_round_id)
         )
         if report["round_a"]["generation_task_counts"] != {
-            "extract_claims": 1,
-            "resolve_subjects": 1,
+            "user_semantic": 1,
+            # Round A is the captured Hermes turn without a final assistant
+            # completion.  Core must skip Execution Semantic and continue
+            # through candidate preparation from the staged user pass.
+            "execution_semantic": 0,
+            "object_resolution": 1,
         }:
             raise GateFailure(
                 "Round A generation budget/task shape failed: "
                 f"{report['round_a']['generation_task_counts']}"
             )
 
-        if report["round_a"]["core_counts"]["objects"] != 3 or report["round_a"]["core_counts"]["active_values"] != 4:
+        if report["round_a"]["core_counts"]["objects"] != 0 or report["round_a"]["core_counts"]["active_values"] != 0:
             raise GateFailure(f"Round A counts failed: {report['round_a']['core_counts']}")
+
+        # The startup control pass may legitimately have seen an empty Core
+        # space before Round A created its candidate-query vectors.  Run the
+        # public Local maintenance endpoint once after the staged round so the
+        # Core-owned facet catalogue lifecycle gets an explicit opportunity
+        # to enqueue its 14 vectors before the secure restart check.
+        maintenance_status, maintenance_payload = _http_json(
+            base_url,
+            "/maintenance/control",
+            token=token,
+            method="POST",
+            payload={},
+        )
+        report["round_a"]["control_maintenance"] = {
+            "http_status": maintenance_status,
+            "result": maintenance_payload,
+        }
+        if maintenance_status != 200 or maintenance_payload.get("status") != "completed":
+            raise GateFailure(
+                "post-Round-A control maintenance failed: "
+                f"status={maintenance_status}, payload={maintenance_payload}"
+            )
+
+        # Core may enqueue the built-in facet catalogue work just after the
+        # semantic round reaches its terminal staging boundary.  Require a
+        # short genuinely idle window before restarting Local, otherwise the
+        # secure startup check can race a still-draining Core task queue.
+        facet_grace_until = time.monotonic() + 15.0
+        quiescent_since: float | None = None
+
+        def core_is_quiescent() -> bool:
+            nonlocal quiescent_since
+            if time.monotonic() < facet_grace_until:
+                quiescent_since = None
+                return False
+            # /health/details runs Local's post-drain control refresh.  That
+            # refresh may discover the static facet catalogue only after the
+            # semantic round has created its first object-candidate vectors
+            # and enqueue the facet embedding jobs as a side effect.  Read
+            # the health projection first, then take the authoritative Core
+            # DB snapshot; taking the DB snapshot before the HTTP call lets
+            # this gate approve a stale zero-task state and race restart.
+            status, details = _http_json(base_url, "/health/details", token=token)
+            state = _core_task_state(core_database)
+            embedding_counts = _core_embedding_counts(core_database)
+            object_facet = (
+                details.get("components", {}).get("object_facet", {})
+                if isinstance(details.get("components"), dict)
+                else {}
+            )
+            missing_facet_embeddings = (
+                object_facet.get("missing_facet_embeddings")
+                if isinstance(object_facet, dict)
+                else None
+            )
+            facet_preload_complete = (
+                status == 200
+                and embedding_counts.get("facet", 0) >= 14
+                and missing_facet_embeddings == 0
+            )
+            if state["terminal_failures"]:
+                raise GateFailure(
+                    "Core task queue has terminal failures before restart: "
+                    f"{state}"
+                )
+            if state["pending"] or not facet_preload_complete:
+                quiescent_since = None
+                return False
+            if quiescent_since is None:
+                quiescent_since = time.monotonic()
+            return time.monotonic() - quiescent_since >= 4.0
+
+        _wait_until(core_is_quiescent, timeout=timeout, interval=1.0)
+        report["round_a"]["core_quiescence"] = _core_task_state(core_database)
 
         _terminate(process)
         process = None
@@ -793,7 +978,7 @@ def run_gate(
         report["round_b"]["submission"] = submit(round_b)
         report["round_b"]["health_after_submit"] = wait_drained(
             raw_round_id=str(report["round_b"]["submission"]["raw_round_id"]),
-            expected_core_counts={"objects": 3, "active_values": 6},
+            expected_core_counts={"objects": 0, "active_values": 0},
         )
         report["round_b"]["local_counts"] = _local_counts(database, memory_space_id)
         report["round_b"]["core_counts"] = _core_counts(core_database, memory_space_id)
@@ -809,14 +994,15 @@ def run_gate(
             core_database, str(round_b_core_raw_round_id)
         )
         if report["round_b"]["generation_task_counts"] != {
-            "extract_claims": 1,
-            "resolve_subjects": 1,
+            "user_semantic": 1,
+            "execution_semantic": 1,
+            "object_resolution": 1,
         }:
             raise GateFailure(
                 "Round B generation budget/task shape failed: "
                 f"{report['round_b']['generation_task_counts']}"
             )
-        if report["round_b"]["core_counts"]["objects"] != 3 or report["round_b"]["core_counts"]["active_values"] != 6:
+        if report["round_b"]["core_counts"]["objects"] != 0 or report["round_b"]["core_counts"]["active_values"] != 0:
             raise GateFailure(f"Round B counts failed: {report['round_b']['core_counts']}")
         report["round_b"]["control_findings"] = int(
             (report["round_b"]["health_after_submit"].get("components", {})
@@ -845,8 +1031,11 @@ def run_gate(
         if status != 200:
             raise GateFailure(f"Local retrieval failed with status {status}")
         report["retrieval"] = retrieval
-        if not retrieval.get("items"):
-            raise GateFailure("production retrieval returned no ContextView items")
+        if retrieval.get("items"):
+            raise GateFailure(
+                "production retrieval exposed staged values before the "
+                "object_resolution_completed lifecycle boundary"
+            )
 
         # Hermes is exercised through its real runtime and the same Local API.
         from ledgermind_integrations.adapters.hermes.config import HermesConfig  # noqa: PLC0415
@@ -883,8 +1072,13 @@ def run_gate(
                 turn_id="round-c",
                 user_message="Как связаны язык интерфейса и переключатель страны?",
             )
-            if not context or not context.get("context"):
-                raise GateFailure("Hermes did not receive ledgermind_context")
+            hermes_round = hermes_runtime.get_active_round(
+                "hermes-production-session", "round-c"
+            )
+            if hermes_round is None or hermes_round.context_view is None:
+                raise GateFailure(
+                    "Hermes did not complete a valid ContextView retrieval"
+                )
             hermes_runtime.on_post_llm_call(
                 session_id="hermes-production-session",
                 turn_id="round-c",
@@ -902,12 +1096,25 @@ def run_gate(
             )
             report["hermes"] = {
                 "status": "passed",
-                "context_injected": True,
+                "retrieval_completed": True,
+                "context_injected": bool(context and context.get("context")),
+                "empty_context_accepted": not bool(context and context.get("context")),
                 "captured_round": True,
                 "self_echo_extensions": True,
             }
         finally:
             hermes_runtime.shutdown()
+        lifecycle_after = _core_lifecycle_counts(core_database, memory_space_id)
+        report["database_audit"]["after"] = lifecycle_after
+        report["database_audit"]["delta"] = {
+            key: lifecycle_after[key] - lifecycle_before[key]
+            for key in lifecycle_before
+        }
+        if any(report["database_audit"]["delta"].values()):
+            raise GateFailure(
+                "preproduction crossed the frozen lifecycle boundary: "
+                f"{report['database_audit']['delta']}"
+            )
     finally:
         _terminate(process)
         report["completed_at"] = _utc_now()

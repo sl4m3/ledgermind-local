@@ -6,7 +6,7 @@ import math
 import time
 import uuid
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal, TypeAlias
 from urllib.parse import urlparse
 
 import httpx
@@ -24,6 +24,9 @@ class EmbeddingProviderAuthenticationError(EmbeddingProviderError):
 
 class EmbeddingProviderTimeoutError(EmbeddingProviderError):
     code = "timeout"
+
+
+EmbeddingRole: TypeAlias = Literal["query", "passage"]
 
 
 class OpenAICompatibleEmbeddingProvider:
@@ -84,7 +87,12 @@ class OpenAICompatibleEmbeddingProvider:
         if self._owns_client:
             self._client.close()
 
-    def embed(self, texts: Sequence[str]) -> tuple[tuple[float, ...], ...]:
+    def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        role: EmbeddingRole | None = None,
+    ) -> tuple[tuple[float, ...], ...]:
         if not texts:
             raise ValueError("embedding batch must not be empty")
         if len(texts) > self.batch_size:
@@ -92,6 +100,11 @@ class OpenAICompatibleEmbeddingProvider:
                 "embedding batch exceeds configured batch_size"
             )
         payload: dict[str, Any] = {"model": self.model, "input": list(texts)}
+        # Object retrieval is a dual-encoder contract.  Do not emulate a
+        # missing role by sending a plain embedding request: callers that
+        # need query/passage semantics must fail before reaching this layer.
+        if role is not None:
+            payload["input_type"] = role
         started = time.perf_counter()
         try:
             response = self._client.post(

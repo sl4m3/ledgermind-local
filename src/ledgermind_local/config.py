@@ -124,15 +124,21 @@ def _default_core_security() -> CoreSecurityConfig:
 
 
 class ProfileSlotsConfig(BaseModel):
-    """Optional persisted defaults for the three technical profile slots."""
+    """Optional persisted defaults for the four technical profile slots.
+
+    Bindings are resolved from Local's profile store at task execution time.
+    A missing ``object_resolution`` binding is therefore an explicit
+    ``profile_missing`` error; this model never derives it from ``operational``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     operational: str | None = None
+    object_resolution: str | None = None
     background: str | None = None
     embedding: str | None = None
 
-    @field_validator("operational", "background", "embedding")
+    @field_validator("operational", "object_resolution", "background", "embedding")
     @classmethod
     def _normalize_profile_id(cls, value: str | None) -> str | None:
         if value is None:
@@ -149,6 +155,8 @@ class LocalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     config_version: int = Field(ge=1)
+    # Runtime language is deployment configuration, not request metadata.
+    semantic_language: Literal["ru", "en", "es", "pt", "fr", "de", "uk"]
     bind_host: str = "127.0.0.1"
     bind_port: int = Field(default=8765, ge=1, le=65535)
     rounds_database_path: str = Field(

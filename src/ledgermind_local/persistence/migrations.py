@@ -169,7 +169,17 @@ def _apply_single_migration(
     migration: Migration,
 ) -> None:
     owns_transaction = False
+    restore_foreign_keys = False
     try:
+        # SQLite cannot change a CHECK constraint while a transaction is
+        # active. Migration 0014 rebuilds a parent table referenced by
+        # profile-slot and capability tables, so temporarily disable FK
+        # enforcement before BEGIN and restore it only after COMMIT.
+        if migration.sql.lstrip().startswith("PRAGMA foreign_keys = OFF"):
+            foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()
+            restore_foreign_keys = bool(foreign_keys and foreign_keys[0])
+            if restore_foreign_keys:
+                conn.execute("PRAGMA foreign_keys = OFF")
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
             owns_transaction = True
@@ -190,9 +200,13 @@ def _apply_single_migration(
         )
         if owns_transaction:
             conn.commit()
+        if restore_foreign_keys:
+            conn.execute("PRAGMA foreign_keys = ON")
     except Exception:
         if conn.in_transaction:
             conn.rollback()
+        if restore_foreign_keys:
+            conn.execute("PRAGMA foreign_keys = ON")
         raise
 
 

@@ -29,6 +29,7 @@ from .config import (
     CoreSecurityConfig,
     EmbeddingConfig,
     LocalConfig,
+    ProfileSlotsConfig,
     WorkerConfig,
     WorkerSetConfig,
 )
@@ -67,6 +68,8 @@ def background_structured_output_preference(
     The remaining modes are kept as explicit compatibility fallbacks.
     """
 
+    if "strict_json_schema" in configured_output_modes:
+        return "strict_json_schema"
     if "json_schema" in configured_output_modes:
         return "json_schema"
     if "json_object" in configured_output_modes:
@@ -103,13 +106,21 @@ def copy_signed_core(binary: Path, paths: ServicePaths) -> None:
     )
 
 
+def _generation_for_task(lab_config: Any, task_kind: str) -> Any:
+    """Resolve the Lab task route without inventing a production fallback."""
+
+    profile_name = lab_config.generation_profile_for_task(task_kind)
+    return lab_config.with_profiles(generation_profile=profile_name).generation
+
+
 def config_for(*, home: Path, lab_config: Any, port: int) -> LocalConfig:
     """Build the same secure Local configuration used by pre-production gates."""
 
-    generation = lab_config.generation
+    generation = _generation_for_task(lab_config, "user_semantic")
     embedding = lab_config.embedding
     return LocalConfig(
         config_version=2,
+        semantic_language=lab_config.semantic_language,
         bind_host="127.0.0.1",
         bind_port=port,
         rounds_database_path="rounds.db",
@@ -140,6 +151,12 @@ def config_for(*, home: Path, lab_config: Any, port: int) -> LocalConfig:
         generation_concurrency=1,
         provider_capability_ttl_seconds=86_400,
         inference_secrets_path=str(home / "secrets.json"),
+        profile_slots=ProfileSlotsConfig(
+            operational="generation-operational",
+            object_resolution="generation-object-resolution",
+            background="generation-background",
+            embedding="embedding-api",
+        ),
         embedding=EmbeddingConfig(
             enabled=True,
             provider_mode="api",
@@ -165,7 +182,11 @@ def seed_local(
 ) -> None:
     """Create the migration-owned seed state and bind all inference slots."""
 
-    generation = lab_config.generation
+    generation = _generation_for_task(lab_config, "user_semantic")
+    object_resolution_generation = _generation_for_task(
+        lab_config, "object_resolution"
+    )
+    background_generation = _generation_for_task(lab_config, "execution_semantic")
     embedding = lab_config.embedding
     configured_output_modes = tuple(generation.structured_output_modes)
     background_output_preference = background_structured_output_preference(
@@ -173,6 +194,10 @@ def seed_local(
     )
     secret_store = SecretStore(paths.home / "secrets.json")
     secret_store.put("generation-api", generation.token.get_secret_value())
+    secret_store.put(
+        "generation-object-resolution-api",
+        object_resolution_generation.token.get_secret_value(),
+    )
     secret_store.put("embedding-api", embedding.token.get_secret_value())
     database = paths.resolve_rounds_database_path(config.rounds_database_path)
     connection = open_sqlite_connection(database)
@@ -188,30 +213,41 @@ def seed_local(
             (memory_space_id, source_client, now, now),
         )
         store = InferenceProfileStore(connection)
-        reasoning_profile = generation.reasoning.for_provider_model(
-            generation.provider,
-            generation.model,
-        )
-        generation_extra_body = dict(reasoning_profile.extra_body)
-        if (
-            reasoning_profile.reasoning_effort is not None
-            and "reasoning_effort" not in generation_extra_body
+        for profile_id, slot, selected_generation, secret_ref in (
+            ("generation-operational", "operational", generation, "generation-api"),
+            (
+                "generation-object-resolution",
+                "object_resolution",
+                object_resolution_generation,
+                "generation-object-resolution-api",
+            ),
+            ("generation-background", "background", background_generation, "generation-api"),
         ):
-            generation_extra_body["reasoning_effort"] = reasoning_profile.reasoning_effort
-        for profile_id, slot in (
-            ("generation-operational", "operational"),
-            ("generation-background", "background"),
-        ):
+            reasoning_profile = selected_generation.reasoning.for_provider_model(
+                selected_generation.provider,
+                selected_generation.model,
+            )
+            generation_extra_body = dict(reasoning_profile.extra_body)
+            if (
+                reasoning_profile.reasoning_effort is not None
+                and "reasoning_effort" not in generation_extra_body
+            ):
+                generation_extra_body["reasoning_effort"] = reasoning_profile.reasoning_effort
             store.upsert(
                 InferenceProfile(
                     profile_id=profile_id,
-                    base_url=generation.endpoint,
-                    model=generation.model,
-                    secret_ref="generation-api",
-                    timeout_seconds=min(generation.timeout_seconds, 300.0),
-                    max_retries=generation.max_retries,
+                    provider_kind=(
+                        "nvidia_nim"
+                        if selected_generation.provider == "nvidia"
+                        else "openai_compatible"
+                    ),
+                    base_url=selected_generation.endpoint,
+                    model=selected_generation.model,
+                    secret_ref=secret_ref,
+                    timeout_seconds=min(selected_generation.timeout_seconds, 300.0),
+                    max_retries=selected_generation.max_retries,
                     max_input_tokens=12_000,
-                    max_output_tokens=generation.max_output_tokens,
+                    max_output_tokens=selected_generation.max_output_tokens,
                     extra_body=generation_extra_body,
                     # Keep operational work capability-aware, while the
                     # optional background path uses the most reliable
@@ -250,7 +286,7 @@ def seed_local(
 def probe_generation_profiles(
     *, paths: ServicePaths, database: Path, memory_space_id: str
 ) -> dict[str, Any]:
-    """Warm the two durable capability rows using the actual provider."""
+    """Warm all three generation-slot capability rows using the actual provider."""
 
     resolver = DatabaseBackedProfileResolver(database)
     probe = ProviderProbe(
@@ -260,7 +296,11 @@ def probe_generation_profiles(
         capability_ttl_seconds=86_400,
     )
     results: dict[str, Any] = {}
-    for slot in (ProfileSlot.OPERATIONAL, ProfileSlot.BACKGROUND):
+    for slot in (
+        ProfileSlot.OPERATIONAL,
+        ProfileSlot.OBJECT_RESOLUTION,
+        ProfileSlot.BACKGROUND,
+    ):
         result = probe.probe(memory_space_id, slot, force=False, reprobe=False)
         results[slot.value] = {
             "status": result.status,

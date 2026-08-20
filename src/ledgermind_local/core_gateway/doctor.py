@@ -160,6 +160,7 @@ def build_core_doctor_report(
                 or any(isolation_requirements.as_dict().values())
             ),
             binary_signature_verified=signature_verified,
+            semantic_language=config.semantic_language,
         )
         try:
             health = supervisor.request("health", {})

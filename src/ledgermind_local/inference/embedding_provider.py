@@ -21,7 +21,7 @@ from .profiles import (
     EmbeddingProfileReadiness,
     InferenceProfile,
 )
-from .vectorizer import Vectorizer
+from .vectorizer import EmbeddingRole, Vectorizer
 from .provider_telemetry import record_task
 
 VectorizerFactory = Callable[[], Vectorizer]
@@ -37,6 +37,8 @@ class EmbeddingBatch(BaseModel):
     model_version: str = Field(min_length=1)
     dimensions: int = Field(gt=0)
     purpose: str = Field(min_length=1)
+    role: EmbeddingRole | None = None
+    renderer_version: str | None = Field(default=None, min_length=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +55,8 @@ class EmbeddingBatchRequest:
     config_fingerprint: str | None = None
     privacy_class: str = "default"
     deadline: str | None = None
+    role: EmbeddingRole | None = None
+    renderer_version: str | None = None
 
 
 class EmbeddingVectorCache:
@@ -70,8 +74,18 @@ class EmbeddingVectorCache:
         profile_fingerprint: str,
         namespace: str,
         content: str,
+        role: EmbeddingRole | None = None,
+        renderer_version: str | None = None,
     ) -> str:
-        material = "\x1f".join((profile_fingerprint, namespace, content))
+        material = "\x1f".join(
+            (
+                profile_fingerprint,
+                namespace,
+                renderer_version or "plain",
+                role or "plain",
+                content,
+            )
+        )
         return "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def get(self, key: str) -> tuple[float, ...] | None:
@@ -356,6 +370,8 @@ class EmbeddingProvider:
         purpose: EmbeddingPurpose,
         *,
         cancellation_token: CancellationToken | None = None,
+        role: EmbeddingRole | None = None,
+        renderer_version: str | None = None,
     ) -> EmbeddingBatch:
         """Embed ``texts`` through the local backend and validate the batch."""
         return self.embed_many(
@@ -364,6 +380,8 @@ class EmbeddingProvider:
                     texts=tuple(texts),
                     profile=profile,
                     purpose=purpose,
+                    role=role,
+                    renderer_version=renderer_version,
                 ),
             ),
             cancellation_token=cancellation_token,
@@ -399,6 +417,14 @@ class EmbeddingProvider:
                 raise EmbeddingRequestError("embedding batch must not be empty")
             if request.cache_keys is not None and len(request.cache_keys) != len(request.texts):
                 raise EmbeddingRequestError("embedding cache_keys must match texts")
+            required_role = {
+                "object_candidate_query": "query",
+                "object_identity_passage": "passage",
+            }.get(request.purpose)
+            if required_role is not None and request.role != required_role:
+                raise EmbeddingRequestError(
+                    f"{request.purpose} requires role={required_role}"
+                )
             if (
                 request.profile.model != first.profile.model
                 or request.profile.base_url != first.profile.base_url
@@ -409,6 +435,8 @@ class EmbeddingProvider:
                 or request.config_fingerprint != first.config_fingerprint
                 or request.privacy_class != first.privacy_class
                 or request.deadline != first.deadline
+                or request.role != first.role
+                or request.renderer_version != first.renderer_version
             ):
                 raise EmbeddingRequestError("embedding tasks are not technically compatible")
             for text in request.texts:
@@ -441,6 +469,8 @@ class EmbeddingProvider:
                     profile_fingerprint=identity.profile_fingerprint,
                     namespace=namespace,
                     content=explicit or text,
+                    role=request.role,
+                    renderer_version=request.renderer_version,
                 )
                 keys.append(key)
                 cache_metadata.append((namespace, explicit or text))
@@ -491,7 +521,20 @@ class EmbeddingProvider:
                             operation=requests[0].purpose,
                             profile_fingerprint=identity.profile_fingerprint,
                         )
-                raw_missing = list(vectorizer.encode(tuple(all_texts[index] for index in missing_indices)))
+                missing_texts = tuple(
+                    all_texts[index] for index in missing_indices
+                )
+                try:
+                    raw_missing = list(
+                        vectorizer.encode(missing_texts, role=first.role)
+                    )
+                except TypeError:
+                    # Compatibility is limited to legacy, role-less generic
+                    # embeddings.  A required query/passage role is never
+                    # retried through a plain call.
+                    if first.role is not None:
+                        raise
+                    raw_missing = list(vectorizer.encode(missing_texts))
             else:
                 raw_missing = []
             if len(raw_missing) != len(missing_indices):
@@ -526,6 +569,8 @@ class EmbeddingProvider:
                         model_version=identity.profile_fingerprint,
                         dimensions=dimension,
                         purpose=request.purpose,
+                        role=request.role,
+                        renderer_version=request.renderer_version,
                     )
                 )
                 offset += size

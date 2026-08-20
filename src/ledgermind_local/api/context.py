@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, Protocol
 
@@ -17,6 +18,9 @@ from ledgermind_local.core_gateway import (
 )
 
 from .http import build_request_id, error_payload, validate_json_request_headers
+
+
+logger = logging.getLogger(__name__)
 
 
 class ContextGateway(Protocol):
@@ -175,26 +179,31 @@ def create_context_router(
             response_payload["delivered_value_ids"] = list(candidate_ids)
             return ContextViewResponse.model_validate(response_payload)
         except DomainRejectedError as exc:
+            logger.warning("context retrieval rejected: %s", exc.code)
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=error_payload(exc.code, exc.detail),
             ) from exc
         except TransientCoreError as exc:
+            logger.warning("context retrieval Core unavailable: %s", str(exc)[:240])
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=error_payload("core_unavailable", str(exc)),
             ) from exc
         except ValueError as exc:
+            logger.warning("context retrieval response validation failed: %s", str(exc)[:240])
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=error_payload("validation_failed", str(exc)),
             ) from exc
         except RuntimeError as exc:
+            logger.warning("context retrieval runtime failure: %s", str(exc)[:240])
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=error_payload("core_unavailable", str(exc)),
             ) from exc
         except Exception as exc:
+            logger.exception("context retrieval unexpected failure: %s", type(exc).__name__)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=error_payload(
@@ -252,6 +261,12 @@ def _normalize_legacy_context_payload(payload: dict[str, object]) -> dict[str, o
             items.append(raw_item)
             continue
         item = dict(raw_item)
+        # ``source_kind`` is Core-owned provenance used by the durable audit
+        # and retrieval internals.  It is intentionally not part of the
+        # public ContextView contract, so remove it before validating the
+        # strict RetrievalResponse boundary instead of letting a newer Core
+        # response turn an otherwise valid retrieval into HTTP 503.
+        item.pop("source_kind", None)
         # Old in-process adapters did not expose provenance. Keep that
         # adapter usable with an explicit compatibility marker; real Core
         # responses always carry source-owned event ids.

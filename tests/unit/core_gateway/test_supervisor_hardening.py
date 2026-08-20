@@ -41,6 +41,7 @@ def test_core_child_receives_restricted_environment_cwd_and_fds(
     monkeypatch.setenv("LANG", "C.UTF-8")
     monkeypatch.setenv("LC_ALL", "C.UTF-8")
     monkeypatch.setenv("LC_CTYPE", "C.UTF-8")
+    monkeypatch.setenv("LEDGERMIND_SEMANTIC_LANGUAGE", "ru")
     monkeypatch.setenv("TZ", "UTC")
     monkeypatch.setenv("LEDGERMIND_TEST_SECRET", "[REDACTED]")
     monkeypatch.setenv("LEDGERMIND_ROUNDS_DB", str(tmp_path / "rounds.db"))
@@ -59,6 +60,7 @@ def test_core_child_receives_restricted_environment_cwd_and_fds(
         core_data_dir=core_data_dir,
         blocked_data_dirs=(local_data_dir,),
         rounds_database_path=rounds_database,
+        semantic_language="ru",
     )
     try:
         supervisor._spawn_locked()
@@ -83,6 +85,7 @@ def test_core_child_receives_restricted_environment_cwd_and_fds(
         "LC_ALL": "C.UTF-8",
         "RUST_BACKTRACE": "0",
         "LEDGERMIND_CORE_DATA_DIR": str(core_data_dir),
+        "LEDGERMIND_SEMANTIC_LANGUAGE": "ru",
     }
     if supervisor.isolation_capabilities.sandbox_backend == "bwrap":
         expected_environment.update(
@@ -120,6 +123,7 @@ def test_full_network_sandbox_cannot_reach_host_loopback(tmp_path: Path) -> None
     supervisor = CoreSupervisor(
         [sys.executable, str(probe_path), str(report_path), str(server.getsockname()[1])],
         core_data_dir=core_data_dir,
+        semantic_language="ru",
     )
     try:
         supervisor._spawn_locked()
@@ -162,6 +166,7 @@ def test_strict_profile_refuses_when_rounds_database_cannot_be_hidden(
             require_environment_sanitized=True,
         ),
         strict_isolation=True,
+        semantic_language="ru",
     )
 
     with pytest.raises(CoreSupervisorError, match="rounds_database_hidden"):

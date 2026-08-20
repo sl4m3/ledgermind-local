@@ -9,6 +9,11 @@ from typing import Any
 import httpx
 
 from ..errors import ProviderProbeError
+from ...inference.strict import (
+    STRICT_SCHEMA_PROFILE_VERSION,
+    canonical_digest,
+    validate_strict_schema_profile,
+)
 from ..models import EmbeddingApiConfig, GenerationConfig
 from .embedding_api import OpenAICompatibleEmbeddingProvider
 
@@ -22,6 +27,36 @@ def _safe_status(response: httpx.Response) -> None:
         raise ProviderProbeError("provider rate limit was reached")
     if response.status_code >= 400:
         raise ProviderProbeError(f"provider returned HTTP {response.status_code}")
+
+
+_STRICT_PROBE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "schema_version": {"type": "integer", "enum": [1]},
+        "state": {"type": "string", "enum": ["ok"]},
+        "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "items": {"type": "integer"},
+        },
+    },
+    "required": ["schema_version", "state", "items"],
+}
+
+
+def _strict_probe_output(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return (
+        set(payload) == {"schema_version", "state", "items"}
+        and payload.get("schema_version") == 1
+        and payload.get("state") == "ok"
+        and isinstance(payload.get("items"), list)
+        and 1 <= len(payload["items"]) <= 2
+        and all(isinstance(item, int) and not isinstance(item, bool) for item in payload["items"])
+    )
 
 
 def probe_generation(
@@ -44,11 +79,24 @@ def probe_generation(
             json={
                 "model": config.model,
                 "messages": [
-                    {"role": "user", "content": 'Return the JSON object {"ok":true}.'}
+                    {
+                        "role": "system",
+                        "content": "Return exactly one JSON object matching the strict capability probe schema.",
+                    },
+                    {
+                        "role": "user",
+                        "content": 'Return {"schema_version":1,"state":"ok","items":[1]}.',
+                    },
                 ],
-                "temperature": 0,
                 "max_tokens": 32,
-                "response_format": {"type": "json_object"},
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "ledgermind_strict_probe",
+                        "strict": True,
+                        "schema": _STRICT_PROBE_SCHEMA,
+                    },
+                },
             },
             timeout=config.timeout_seconds,
         )
@@ -72,8 +120,10 @@ def probe_generation(
             raise ProviderProbeError(
                 "generation provider did not return structured JSON"
             ) from exc
-        if not isinstance(decoded, dict):
-            raise ProviderProbeError("generation structured response is not an object")
+        if not _strict_probe_output(decoded):
+            raise ProviderProbeError(
+                "generation provider did not satisfy the strict probe schema"
+            )
         return {
             "endpoint": config.endpoint,
             "model": payload.get("model", config.model)
@@ -83,6 +133,11 @@ def probe_generation(
             or response.headers.get("request-id"),
             "status_code": response.status_code,
             "structured_json": True,
+            "strict_structured_outputs": True,
+            "schema_profile_version": STRICT_SCHEMA_PROFILE_VERSION,
+            "probe_contract_digest": canonical_digest(
+                validate_strict_schema_profile(_STRICT_PROBE_SCHEMA)
+            ),
         }
     except httpx.TimeoutException as exc:
         raise ProviderProbeError("generation provider timed out") from exc

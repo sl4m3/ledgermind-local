@@ -84,13 +84,14 @@ def _minimal_config(**workers: object) -> LocalConfig:
         "core_model_tasks": {"enabled": False},
     }
     defaults.update(workers)
-    return LocalConfig(config_version=1, workers=defaults)
+    return LocalConfig(config_version=1, semantic_language="ru", workers=defaults)
 
 
 def test_legacy_security_switch_migrates_to_secure_config_without_serializing_legacy_key() -> None:
     config = LocalConfig.from_dict(
         {
             "config_version": 1,
+            "semantic_language": "ru",
             "require_core_network_isolation": True,
         }
     )
@@ -103,7 +104,11 @@ def test_legacy_security_switch_migrates_to_secure_config_without_serializing_le
     assert "require_core_network_isolation" not in config.model_dump()
 
     migrated_false = LocalConfig.from_dict(
-        {"config_version": 1, "require_core_network_isolation": False}
+        {
+            "config_version": 1,
+            "semantic_language": "ru",
+            "require_core_network_isolation": False,
+        }
     )
     assert migrated_false.config_version == 2
     assert migrated_false.core_security.profile == "secure"
@@ -117,6 +122,7 @@ def test_persisted_legacy_config_is_rewritten_to_current_schema(tmp_path: Path) 
         json.dumps(
             {
                 "config_version": 1,
+                "semantic_language": "ru",
                 "require_core_network_isolation": False,
             }
         ),
@@ -284,7 +290,9 @@ def test_backup_restore_uses_coordinated_saga_and_rotates_token(
     tmp_path: Path, monkeypatch
 ) -> None:
     home = tmp_path / "service"
-    assert cli.main(["--home", str(home), "init"]) == 0
+    assert cli.main(
+        ["--home", str(home), "init", "--semantic-language", "ru"]
+    ) == 0
     old_token = (home / "server.token").read_text(encoding="utf-8")
     events: list[str] = []
 

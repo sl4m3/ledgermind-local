@@ -78,6 +78,7 @@ class _Gateway:
 def _config() -> LocalConfig:
     return LocalConfig(
         config_version=1,
+        semantic_language="ru",
         workers={
             "retention": {"enabled": False},
             "core_commands": {"enabled": False},
@@ -97,7 +98,7 @@ def _seed_profiles(database: Path, missing: str | None = None) -> None:
             ("space-c2", "tests", "2026-08-08T00:00:00Z", "2026-08-08T00:00:00Z"),
         )
         store = InferenceProfileStore(connection)
-        for slot in ("operational", "background", "embedding"):
+        for slot in ("operational", "object_resolution", "background", "embedding"):
             profile_id = f"{slot}-profile"
             store.upsert(
                 InferenceProfile(
@@ -135,7 +136,7 @@ def _runtime(tmp_path: Path, *, gateway: _Gateway) -> LocalRuntime:
     )
 
 
-def test_full_readiness_requires_all_three_profile_slots(tmp_path: Path) -> None:
+def test_full_readiness_requires_all_four_profile_slots(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path, gateway=_Gateway())
     _seed_profiles(runtime.database_path)
 
@@ -148,7 +149,9 @@ def test_full_readiness_requires_all_three_profile_slots(tmp_path: Path) -> None
         runtime.stop()
 
 
-@pytest.mark.parametrize("missing", ["operational", "background", "embedding"])
+@pytest.mark.parametrize(
+    "missing", ["operational", "object_resolution", "background", "embedding"]
+)
 def test_full_readiness_reports_each_missing_profile_slot(
     tmp_path: Path, missing: str
 ) -> None:

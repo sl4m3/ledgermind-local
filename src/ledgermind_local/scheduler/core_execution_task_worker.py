@@ -309,7 +309,7 @@ class CoreExecutionTaskWorker:
         # rejection.  This branch is failure-only: a successful normal task
         # still consumes exactly one provider call.
         if (
-            task.task_kind == "generate_json"
+            task.task_kind in {"generate_json", "object_resolution"}
             and getattr(result, "status", None) == "failed"
             and getattr(result, "error_code", None)
             in {
@@ -332,7 +332,7 @@ class CoreExecutionTaskWorker:
         try:
             self._deliver_result(task, result, memory_space_id)
         except DomainRejectedError as exc:
-            if task.task_kind != "generate_json" or exc.code == "invalid_execution_result":
+            if task.task_kind not in {"generate_json", "object_resolution"} or exc.code == "invalid_execution_result":
                 raise
             logger.warning(
                 "retrying structured generation after remote Core rejection",
@@ -357,7 +357,7 @@ class CoreExecutionTaskWorker:
                     task_id=task.task_id,
                     memory_space_id=memory_space_id,
                     worker_id=self._worker_id,
-                    result=result.model_dump(mode="json"),
+                    result=_core_result_payload(result),
                 )
             )
             if not submitted.accepted:
@@ -389,8 +389,13 @@ class CoreExecutionTaskWorker:
             if isinstance(exc, Exception)
             else ExecutionFailureClassification("execution_error", False, 0)
         )
+        detail = getattr(exc, "detail", None)
+        if not isinstance(detail, str) or not detail.strip():
+            detail = str(exc)
+        detail = detail.strip().replace("\n", " ")[:500]
         logger.warning(
-            "Core execution task failed",
+            "Core execution task failed: %s",
+            detail,
             extra={
                 "worker": self._worker_id,
                 "task_id": task_id,
@@ -411,6 +416,24 @@ class CoreExecutionTaskWorker:
 
     def _request_id(self, operation: str) -> str:
         return f"{self._worker_id}:{operation}:{uuid.uuid4()}"
+
+
+def _core_result_payload(result: object) -> dict[str, object]:
+    """Project the Local executor result onto the Core-owned wire contract."""
+
+    payload = result.model_dump(mode="json")
+    if payload.get("task_kind") == "embed_texts":
+        embedding = payload.get("embedding_result")
+        if isinstance(embedding, dict):
+            # ``role`` and ``renderer_version`` are Local cache/rendering
+            # metadata.  They are valid on the Local result but are not part
+            # of Core's strict embedding-result contract.
+            payload["embedding_result"] = {
+                key: embedding[key]
+                for key in ("vectors", "model", "model_version", "dimensions", "purpose")
+                if key in embedding
+            }
+    return payload
 
 
 def _local_execution_task(
@@ -443,12 +466,26 @@ def _local_execution_task(
                 if isinstance(wire.model_request.get("output_contract"), dict)
                 else None
             ),
+            structured_output_requirement=(
+                dict(wire.model_request["structured_output_requirement"])
+                if isinstance(
+                    wire.model_request.get("structured_output_requirement"), dict
+                )
+                else None
+            ),
             mode=cast(
                 StructuredOutputMode,
                 str(
                     wire.model_request.get("mode")
                     or wire.model_request.get("structured_output_mode")
-                    or "auto"
+                    or (
+                        "strict_json_schema"
+                        if isinstance(
+                            wire.model_request.get("structured_output_requirement"),
+                            dict,
+                        )
+                        else "auto"
+                    )
                 ),
             ),
             tool_name=(
@@ -522,6 +559,18 @@ def _local_execution_task(
             deadline=(
                 str(value)
                 if (value := _request_or_operation_input("deadline")) is not None
+                else None
+            ),
+            role=(
+                str(value)
+                if (value := _request_or_operation_input("role", "embedding_role"))
+                is not None
+                else None
+            ),
+            renderer_version=(
+                str(value)
+                if (value := _request_or_operation_input("renderer_version"))
+                is not None
                 else None
             ),
         )

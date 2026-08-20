@@ -457,8 +457,10 @@ class InferenceProfileStore:
     def bind_slot(
         self, memory_space_id: str, *, slot: str, profile_id: str
     ) -> str:
-        if slot not in {"operational", "background", "embedding"}:
-            raise ValueError("slot must be operational, background, or embedding")
+        if slot not in {"operational", "object_resolution", "background", "embedding"}:
+            raise ValueError(
+                "slot must be operational, object_resolution, background, or embedding"
+            )
         if not profile_id.strip():
             raise ValueError("profile_id must not be empty")
         self._connection.execute(

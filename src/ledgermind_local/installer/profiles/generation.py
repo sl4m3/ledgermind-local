@@ -1,4 +1,4 @@
-"""Generation profile construction for operational and background slots."""
+"""Generation profile construction for all production generation slots."""
 
 from __future__ import annotations
 
@@ -9,8 +9,13 @@ from ..models import GenerationConfig
 
 def build_generation_profiles(
     config: GenerationConfig,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     operational = config.operational_model or config.model
+    object_resolution = config.object_resolution_model
+    if not object_resolution:
+        raise ValueError(
+            "generation.object_resolution_model is required; refusing operational fallback"
+        )
     background = config.background_model or config.model
     common = {
         "endpoint": config.endpoint,
@@ -24,6 +29,12 @@ def build_generation_profiles(
             "profile_id": "generation-operational",
             "slot": "operational",
             "model": operational,
+            **common,
+        },
+        {
+            "profile_id": "generation-object-resolution",
+            "slot": "object_resolution",
+            "model": object_resolution,
             **common,
         },
         {

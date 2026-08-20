@@ -8,7 +8,7 @@ from ledgermind_local.installer.profiles.embedding_api import (
     OpenAICompatibleEmbeddingProvider,
 )
 
-from .vectorizer import Vectorizer
+from .vectorizer import EmbeddingRole, Vectorizer
 
 
 class OpenAIEmbeddingVectorizer(Vectorizer):
@@ -45,11 +45,18 @@ class OpenAIEmbeddingVectorizer(Vectorizer):
     def dimension(self) -> int:
         return self._dimension
 
-    def encode(self, texts: Sequence[str]) -> list[list[float]]:
+    def encode(
+        self,
+        texts: Sequence[str],
+        *,
+        role: EmbeddingRole | None = None,
+    ) -> list[list[float]]:
         vectors: list[list[float]] = []
         batch_size = self._provider.batch_size
         for start in range(0, len(texts), batch_size):
-            batch = self._provider.embed(texts[start : start + batch_size])
+            batch = self._provider.embed(
+                texts[start : start + batch_size], role=role
+            )
             vectors.extend([list(vector) for vector in batch])
         return vectors
 

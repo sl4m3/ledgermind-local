@@ -11,9 +11,10 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-ProviderKind = Literal["openai_compatible", "google_genai"]
+ProviderKind = Literal["openai_compatible", "google_genai", "nvidia_nim"]
 StructuredOutputMode = Literal[
     "auto",
+    "strict_json_schema",
     "json_schema",
     "tool_call",
     "json_object",
@@ -388,6 +389,8 @@ class ProviderCapabilities(BaseModel):
     def supports(self, mode: str) -> bool:
         """Return whether a probe recorded support for ``mode``."""
 
+        if mode == "strict_json_schema":
+            return self.structured_json_schema and self.native_schema_strictness
         if mode == "json_schema":
             return self.json_schema_supported or self.structured_json_schema
         if mode == "tool_call":

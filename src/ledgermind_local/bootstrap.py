@@ -173,6 +173,7 @@ def build_process_core_gateway(
             or any(requirements.as_dict().values())
         ),
         binary_signature_verified=signature_verified,
+        semantic_language=config.semantic_language,
     )
     return ProcessCoreGateway(supervisor)
 
@@ -1332,7 +1333,7 @@ class LocalRuntime:
         )
 
     def _profile_slots_report(self) -> dict[str, object]:
-        """Check all three enabled profile slots without legacy fallbacks."""
+        """Check all four enabled profile slots without legacy fallbacks."""
 
         slots = tuple(slot.value for slot in ProfileSlot)
         missing: dict[str, list[str]] = {}

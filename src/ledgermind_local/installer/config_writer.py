@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ledgermind_local.config import EmbeddingConfig as LocalEmbeddingConfig
-from ledgermind_local.config import LocalConfig
+from ledgermind_local.config import LocalConfig, ProfileSlotsConfig
 
 from .models import InstallerConfig
 from .paths import InstallerPaths
@@ -154,30 +154,13 @@ def write_installer_config(
     if isinstance(backend, SecretServiceStore):
         FileSecretStore(paths.secrets_file).put(generation_ref, generation_token)
     profiles: list[dict[str, Any]] = []
-    operational_model = config.generation.operational_model or config.generation.model
-    background_model = config.generation.background_model or config.generation.model
-    profiles.extend(
-        [
+    for generation_profile in build_generation_profiles(config.generation):
+        profiles.append(
             {
-                "profile_id": "generation-operational",
-                "slot": "operational",
-                "endpoint": config.generation.endpoint,
-                "model": operational_model,
+                **generation_profile,
                 "secret_ref": generation_ref,
-                "timeout_seconds": config.generation.timeout_seconds,
-                "max_concurrency": config.generation.max_concurrency,
-            },
-            {
-                "profile_id": "generation-background",
-                "slot": "background",
-                "endpoint": config.generation.endpoint,
-                "model": background_model,
-                "secret_ref": generation_ref,
-                "timeout_seconds": config.generation.timeout_seconds,
-                "max_concurrency": config.generation.max_concurrency,
-            },
-        ]
-    )
+            }
+        )
     if config.embedding.mode == "api":
         assert config.embedding.api is not None
         embedding_token = _secret_value(
@@ -280,12 +263,23 @@ def build_local_config(
     )
     return LocalConfig(
         config_version=2,
+        semantic_language=config.semantic_language,
         rounds_database_path=str(memory_root / "rounds.db"),
         knowledge_database_path=str(memory_root / "core" / "knowledge.db"),
         core_binary_path=str(release / "bin" / "ledgermind-core"),
         core_signature_path=str(release / "signatures" / "ledgermind-core.sig"),
         core_public_key_path=str(release / "signatures" / "ledgermind-core.pub"),
         inference_secrets_path=str(paths.secrets_file),
+        profile_slots=ProfileSlotsConfig(
+            operational="generation-operational",
+            object_resolution="generation-object-resolution",
+            background="generation-background",
+            embedding=(
+                "embedding-default"
+                if config.embedding.mode == "api"
+                else "embedding-local"
+            ),
+        ),
         embedding=embedding,
     )
 

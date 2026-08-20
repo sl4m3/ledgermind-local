@@ -278,3 +278,15 @@ def test_pythonhome_is_only_injected_for_a_python_shim(tmp_path: Path) -> None:
 
     assert "PYTHONHOME" not in rust_environment
     assert shim_environment["PYTHONHOME"] == sys.base_prefix
+
+
+def test_sandbox_environment_preserves_semantic_language_contract(
+    tmp_path: Path,
+) -> None:
+    environment = _sandbox_environment(
+        tmp_path,
+        ("/opt/ledgermind-core/bin/ledgermind-core",),
+        semantic_language="ru",
+    )
+
+    assert environment["LEDGERMIND_SEMANTIC_LANGUAGE"] == "ru"

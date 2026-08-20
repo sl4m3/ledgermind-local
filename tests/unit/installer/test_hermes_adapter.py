@@ -15,6 +15,7 @@ from ledgermind_local.installer.targets.hermes.adapter import HermesTargetAdapte
 
 def _config() -> InstallerConfig:
     return InstallerConfig(
+        semantic_language="en",
         generation=GenerationConfig(
             endpoint="https://provider.example/v1", token="token", model="model"
         ),

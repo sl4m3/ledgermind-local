@@ -33,6 +33,10 @@ class GenerationConfig(BaseModel):
     secret_ref: str | None = None
     model: str
     operational_model: str | None = None
+    # Object Resolution is a separate production role.  It is optional only
+    # at parse time so legacy installer payloads can be diagnosed explicitly;
+    # profile materialization refuses to invent an operational fallback.
+    object_resolution_model: str | None = None
     background_model: str | None = None
     timeout_seconds: float = Field(default=180.0, gt=0, le=600)
     max_concurrency: int = Field(default=2, ge=1, le=64)
@@ -43,7 +47,7 @@ class GenerationConfig(BaseModel):
     def validate_endpoint(cls, value: str) -> str:
         return _http_url(value)
 
-    @field_validator("model", "operational_model", "background_model")
+    @field_validator("model", "operational_model", "object_resolution_model", "background_model")
     @classmethod
     def validate_models(cls, value: str | None, info: object) -> str | None:
         if value is None:
@@ -168,6 +172,9 @@ class InstallerConfig(BaseModel):
 
     schema_version: Literal[1] = 1
     target: Literal["hermes"] = "hermes"
+    # Installation must make the semantic language an explicit deployment
+    # choice; it is never inferred from user text or the host locale.
+    semantic_language: Literal["ru", "en", "es", "pt", "fr", "de", "uk"]
     memory_data_path: str | None = None
     generation: GenerationConfig
     embedding: EmbeddingConfig

@@ -13,6 +13,8 @@ EmbeddingPurpose: TypeAlias = Literal[
     "retrieval_query",
     "facet_catalog",
     "knowledge",
+    "object_candidate_query",
+    "object_identity_passage",
 ]
 
 # ``knowledge`` is retained for older Local callers; Core's claim-first wire
@@ -27,6 +29,8 @@ EMBEDDING_PURPOSES = frozenset(
         "retrieval_query",
         "facet_catalog",
         "knowledge",
+        "object_candidate_query",
+        "object_identity_passage",
     }
 )
 

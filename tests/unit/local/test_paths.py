@@ -46,7 +46,8 @@ def test_windows_like_path_is_handled_without_posix_assumptions() -> None:
 def test_bootstrap_creates_private_directories(tmp_path: Path) -> None:
     service_dir = tmp_path / "secure"
     paths, _ = bootstrap_local_service(
-        home=service_dir, config=LocalConfig(config_version=1)
+        home=service_dir,
+        config=LocalConfig(config_version=1, semantic_language="ru"),
     )
 
     assert paths.home.exists()
@@ -63,7 +64,11 @@ def test_configured_database_path_is_resolved_under_service_home(
 ) -> None:
     paths, _ = bootstrap_local_service(
         home=tmp_path / "secure",
-        config=LocalConfig(config_version=1, database_path="state/custom.db"),
+        config=LocalConfig(
+            config_version=1,
+            semantic_language="ru",
+            database_path="state/custom.db",
+        ),
     )
 
     database = paths.resolve_database_path("state/custom.db")
@@ -76,7 +81,9 @@ def test_existing_config_controls_database_path_without_creating_default(
 ) -> None:
     home = tmp_path / "configured"
     home.mkdir()
-    config = LocalConfig(config_version=1, database_path="state.db")
+    config = LocalConfig(
+        config_version=1, semantic_language="ru", database_path="state.db"
+    )
     (home / "config.json").write_text(config.to_json(), encoding="utf-8")
 
     paths, resolved, _token = initialize_local_layout(home=home)

@@ -27,10 +27,11 @@ class _Gateway:
                     {
                         "value_id": "value-1",
                         "primary_object_id": "object-1",
-                        "object_name": "Deployment",
-                        "facet": "property",
-                        "content": "Deployments require review.",
-                        "relevance": 0.9,
+                    "object_name": "Deployment",
+                    "facet": "property",
+                    "content": "Deployments require review.",
+                    "source_kind": "explicit_user",
+                    "relevance": 0.9,
                         "explanation": {
                             "object_reasons": ["direct_value_semantic"],
                             "item_facet": "property",
@@ -98,6 +99,7 @@ def test_context_embeds_query_returns_provenance_and_records_outcome() -> None:
     assert payload["delivered_value_ids"] == ["value-1"]
     assert payload["items"][0]["object_name"] == "Deployment"
     assert payload["items"][0]["facet"] == "property"
+    assert "source_kind" not in payload["items"][0]
     assert payload["items"][0]["explanation"]["object_reasons"] == [
         "direct_value_semantic"
     ]

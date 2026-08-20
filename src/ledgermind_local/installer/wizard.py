@@ -34,9 +34,17 @@ def build_interactive_config(
         target = _ask("Target", input_fn=input_fn, default="hermes")
         if target != "hermes":
             raise ValueError("only Hermes is supported in this release")
+        semantic_language = _ask(
+            "Semantic language (ru/en/es/pt/fr/de/uk)", input_fn=input_fn
+        )
+        if semantic_language not in {"ru", "en", "es", "pt", "fr", "de", "uk"}:
+            raise ValueError("semantic language must be one of ru, en, es, pt, fr, de, uk")
         endpoint = _ask("Generation endpoint", input_fn=input_fn)
         token = secret_fn("Generation token: ").strip()
         model = _ask("Generation model", input_fn=input_fn)
+        object_resolution_model = _ask(
+            "Object Resolution model (separate profile)", input_fn=input_fn
+        )
         embedding_mode = _ask(
             "Embeddings mode (api/local)", input_fn=input_fn, default="api"
         )
@@ -79,7 +87,13 @@ def build_interactive_config(
         heartbeat = float(_ask("Heartbeat seconds", input_fn=input_fn, default="10"))
         return InstallerConfig(
             target="hermes",
-            generation=GenerationConfig(endpoint=endpoint, token=token, model=model),
+            semantic_language=semantic_language,
+            generation=GenerationConfig(
+                endpoint=endpoint,
+                token=token,
+                model=model,
+                object_resolution_model=object_resolution_model,
+            ),
             embedding=embedding,
             runtime=RuntimeConfig(
                 idle_shutdown_seconds=idle,

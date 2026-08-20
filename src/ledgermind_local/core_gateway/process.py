@@ -159,6 +159,32 @@ def _validate_retrieval_outcome_payload(payload: Mapping[str, Any]) -> None:
         raise ValueError("delivered_value_ids must be a subset of candidates")
 
 
+def _normalize_core_retrieval_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove Core-only retrieval provenance before the public protocol boundary.
+
+    Core includes ``source_kind`` on retrieval items for durable audit and
+    ranking diagnostics.  The Python wire protocol deliberately exposes the
+    smaller public ContextView contract, so strict protocol validation must
+    happen after this boundary normalization rather than treating the newer
+    internal field as a malformed Core response.
+    """
+
+    normalized = dict(payload)
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        return normalized
+    normalized_items: list[Any] = []
+    for raw_item in raw_items:
+        if isinstance(raw_item, Mapping):
+            item = dict(raw_item)
+            item.pop("source_kind", None)
+            normalized_items.append(item)
+        else:
+            normalized_items.append(raw_item)
+    normalized["items"] = normalized_items
+    return normalized
+
+
 class ProcessCoreGateway(CoreGateway):
     """Use a supervised Core process without importing the Python Core package."""
 
@@ -421,7 +447,9 @@ class ProcessCoreGateway(CoreGateway):
         try:
             from ledgermind_protocol.object_facet import RetrievalResponse
 
-            validated_result = RetrievalResponse.model_validate(result)
+            validated_result = RetrievalResponse.model_validate(
+                _normalize_core_retrieval_payload(result)
+            )
         except (ImportError, TypeError, ValueError) as exc:
             raise TransientCoreError("Core retrieval result is malformed") from exc
         return RetrieveContextResult(validated_result.model_dump(mode="json"))

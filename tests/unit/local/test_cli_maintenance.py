@@ -118,7 +118,7 @@ def _patch_core_backup(monkeypatch) -> None:
 
 def test_rotate_token_updates_existing_token(tmp_path: Path) -> None:
     home = tmp_path / "service"
-    assert main(["--home", str(home), "init"]) == 0
+    assert main(["--home", str(home), "init", "--semantic-language", "ru"]) == 0
     old_token = (home / "server.token").read_text(encoding="utf-8")
 
     assert main(["--home", str(home), "rotate-token"]) == 0
@@ -146,7 +146,7 @@ def test_backup_create_writes_zip_archive(
 ) -> None:
     _patch_core_backup(monkeypatch)
     home = tmp_path / "service"
-    assert main(["--home", str(home), "init"]) == 0
+    assert main(["--home", str(home), "init", "--semantic-language", "ru"]) == 0
 
     assert main(["--home", str(home), "backup", "create"]) == 0
 
@@ -167,7 +167,7 @@ def test_backup_create_writes_to_requested_path(
 ) -> None:
     _patch_core_backup(monkeypatch)
     home = tmp_path / "service"
-    assert main(["--home", str(home), "init"]) == 0
+    assert main(["--home", str(home), "init", "--semantic-language", "ru"]) == 0
 
     target = home / "snapshot.zip"
     assert (
@@ -182,7 +182,7 @@ def test_backup_restore_keeps_core_snapshot_opaque(
 ) -> None:
     _patch_core_backup(monkeypatch)
     home = tmp_path / "service"
-    assert main(["--home", str(home), "init"]) == 0
+    assert main(["--home", str(home), "init", "--semantic-language", "ru"]) == 0
 
     backup = home / "snapshot.zip"
     assert (
@@ -206,7 +206,7 @@ def test_backup_restore_reverts_database_to_backup(
 ) -> None:
     _patch_core_backup(monkeypatch)
     home = tmp_path / "service"
-    assert main(["--home", str(home), "init"]) == 0
+    assert main(["--home", str(home), "init", "--semantic-language", "ru"]) == 0
 
     database = home / "rounds.db"
     connection = open_sqlite_connection(database)
@@ -268,7 +268,7 @@ def test_backup_restore_fails_when_service_is_running(
 ) -> None:
     _patch_core_backup(monkeypatch)
     home = tmp_path / "service"
-    assert main(["--home", str(home), "init"]) == 0
+    assert main(["--home", str(home), "init", "--semantic-language", "ru"]) == 0
 
     backup = home / "snapshot.zip"
     assert (

@@ -17,6 +17,7 @@ import httpx
 
 from ..cancellation import CancellationToken
 from ..profiles import TokenParameter
+from ..strict import STRICT_JSON_SCHEMA_MODE
 from ..provider_telemetry import record_http_attempt
 from .base import (
     InferenceProvider,
@@ -171,7 +172,7 @@ def build_payload(request: ModelRequest) -> dict[str, object]:
             return build_payload_json_schema(request)
         raise ProviderConfigurationError("unsupported response format")
     mode = request.mode
-    if mode == "json_schema":
+    if mode in {STRICT_JSON_SCHEMA_MODE, "json_schema"}:
         return build_payload_json_schema(request)
     if mode == "tool_call":
         return build_payload_tool_call(request)
@@ -335,6 +336,7 @@ class OpenAICompatibleProvider(InferenceProvider):
         supports_system_role: bool = True,
         supports_seed: bool = False,
         extra_body: Mapping[str, object] | None = None,
+        strict_transport: str | None = None,
         profile_fingerprint: str | None = None,
         client: httpx.Client | None = None,
     ) -> None:
@@ -398,6 +400,11 @@ class OpenAICompatibleProvider(InferenceProvider):
         self.supports_system_role = bool(supports_system_role)
         self.supports_seed = bool(supports_seed)
         self.extra_body = dict(extra_body or {})
+        self.strict_transport = strict_transport
+        if strict_transport is not None and strict_transport != "nvidia_guided_json":
+            raise ProviderConfigurationError("unsupported strict provider adapter")
+        if strict_transport == "nvidia_guided_json":
+            self.provider_kind = "nvidia_nim"
         self.profile_fingerprint = profile_fingerprint
         self.timeout = httpx.Timeout(
             self.timeout_seconds,
@@ -430,8 +437,10 @@ class OpenAICompatibleProvider(InferenceProvider):
             updates["supports_seed"] = self.supports_seed
         if request.response_format is not None:
             format_type = request.response_format.get("type")
-            if format_type in {"json_object", "json_schema"}:
-                updates["mode"] = format_type
+            if format_type == "json_object":
+                updates["mode"] = "json_object"
+            elif format_type == "json_schema" and request.mode != STRICT_JSON_SCHEMA_MODE:
+                updates["mode"] = "json_schema"
         if request.mode == "auto" and request.response_format is None:
             updates["mode"] = "json_object"
         return request.model_copy(update=updates) if updates else request
@@ -444,7 +453,12 @@ class OpenAICompatibleProvider(InferenceProvider):
     ) -> ModelResponse:
         _raise_if_cancelled(token)
         prepared = self._prepare_request(request)
-        payload = prepared.to_openai_payload()
+        if prepared.mode == STRICT_JSON_SCHEMA_MODE and self.strict_transport == "nvidia_guided_json":
+            payload = build_payload_json_schema(prepared)
+            payload.pop("response_format", None)
+            payload["guided_json"] = _contract_schema(prepared)
+        else:
+            payload = prepared.to_openai_payload()
         # Provider-specific controls are kept outside the Core request
         # contract.  Core-generated transport fields remain authoritative so
         # an option blob cannot weaken the JSON contract or redirect a task.

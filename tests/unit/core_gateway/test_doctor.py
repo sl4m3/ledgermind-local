@@ -105,6 +105,7 @@ while True:
 def _doctor_config() -> LocalConfig:
     return LocalConfig(
         config_version=1,
+        semantic_language="ru",
         core_backend="process",
         core_binary_path="bin/fake-core",
         core_signature_path="bin/fake-core.sig",

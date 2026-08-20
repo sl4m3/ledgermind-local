@@ -17,6 +17,7 @@ def _runtime(tmp_path: Path) -> LocalRuntime:
     paths = ServicePaths(tmp_path / "local")
     config = LocalConfig(
         config_version=1,
+        semantic_language="ru",
         workers=WorkerSetConfig(
             retention={"enabled": False},
             core_commands={"enabled": False},

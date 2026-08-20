@@ -11,7 +11,10 @@ from ledgermind_local.core_gateway.compatibility import (
     SUPPORTED_PROTOCOL_MAX,
 )
 from ledgermind_local.core_gateway.contracts import IngestRawRoundCommand
-from ledgermind_local.core_gateway.process import ProcessCoreGateway
+from ledgermind_local.core_gateway.process import (
+    ProcessCoreGateway,
+    _normalize_core_retrieval_payload,
+)
 
 _OPERATIONS = [
     "handshake",
@@ -77,6 +80,24 @@ def test_process_gateway_accepts_current_core_schema() -> None:
     )
 
     assert gateway.advertised_schema_version == SUPPORTED_KNOWLEDGE_SCHEMA_MAX
+
+
+def test_core_retrieval_provenance_is_removed_before_public_validation() -> None:
+    payload = {
+        "schema_version": 3,
+        "retrieval_request_id": "retrieval-1",
+        "items": [
+            {
+                "value_id": "value-1",
+                "source_kind": "explicit_user",
+            }
+        ],
+    }
+
+    normalized = _normalize_core_retrieval_payload(payload)
+
+    assert normalized["items"] == [{"value_id": "value-1"}]
+    assert payload["items"][0]["source_kind"] == "explicit_user"
 
 
 def test_process_gateway_forwards_embedding_profile_on_ingest() -> None:

@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from ..embedding_purpose import validate_embedding_purpose
+from ..inference.strict import STRICT_JSON_SCHEMA_MODE, validate_strict_requirement
 
 
 class CoreGatewayError(RuntimeError):
@@ -156,9 +157,9 @@ class CoreExecutionTask:
 
     schema_version: int
     task_id: str
-    task_kind: Literal["generate_json", "embed_texts"]
+    task_kind: Literal["generate_json", "object_resolution", "embed_texts"]
     operation: str
-    profile_slot: Literal["operational", "background", "embedding"]
+    profile_slot: Literal["operational", "object_resolution", "background", "embedding"]
     memory_space_id: str
     expires_at: str
     lease: str | None
@@ -184,12 +185,12 @@ class CoreExecutionTask:
         ):
             if value is not None and not isinstance(value, dict):
                 raise TypeError(f"{name} must be an object")
-        if self.task_kind not in {"generate_json", "embed_texts"}:
-            raise ValueError("task_kind must be generate_json or embed_texts")
-        if self.task_kind == "generate_json":
-            if self.profile_slot not in {"operational", "background"}:
+        if self.task_kind not in {"generate_json", "object_resolution", "embed_texts"}:
+            raise ValueError("task_kind must be generate_json, object_resolution, or embed_texts")
+        if self.task_kind in {"generate_json", "object_resolution"}:
+            if self.profile_slot not in {"operational", "object_resolution", "background"}:
                 raise ValueError(
-                    "generate_json task requires an operational or background profile slot"
+                    "generate_json task requires an operational, object_resolution, or background profile slot"
                 )
             if self.model_request is None or self.embedding_request is not None:
                 raise ValueError("generate_json task has an invalid request shape")
@@ -200,6 +201,7 @@ class CoreExecutionTask:
                     "max_output_tokens",
                     "response_format",
                     "output_contract",
+                    "structured_output_requirement",
                     "mode",
                     "structured_output_mode",
                     "tool_name",
@@ -237,6 +239,15 @@ class CoreExecutionTask:
             output_contract = self.model_request.get("output_contract")
             if output_contract is not None and not isinstance(output_contract, dict):
                 raise TypeError("model_request.output_contract must be an object")
+            structured_output_requirement = self.model_request.get(
+                "structured_output_requirement"
+            )
+            if structured_output_requirement is not None and not isinstance(
+                structured_output_requirement, dict
+            ):
+                raise TypeError(
+                    "model_request.structured_output_requirement must be an object"
+                )
             if response_format is None and output_contract is None:
                 raise ValueError(
                     "model_request requires output_contract or response_format"
@@ -246,12 +257,38 @@ class CoreExecutionTask:
             )
             if mode is not None and mode not in {
                 "auto",
+                "strict_json_schema",
                 "json_schema",
                 "tool_call",
                 "json_object",
                 "prompt_only",
             }:
                 raise ValueError("model_request mode is invalid")
+            if self.operation in {"user_semantic", "execution_semantic", "object_resolution"}:
+                if mode != STRICT_JSON_SCHEMA_MODE:
+                    raise ValueError(
+                        "semantic generate_json tasks require mode=strict_json_schema"
+                    )
+                try:
+                    validate_strict_requirement(
+                        structured_output_requirement,
+                        output_contract,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "semantic generate_json task has an invalid strict requirement"
+                    ) from exc
+                structured_generation = self.structured_generation or {}
+                contract_digest = structured_generation.get("contract_digest")
+                output_digest = (
+                    output_contract.get("schema_digest")
+                    if isinstance(output_contract, dict)
+                    else None
+                )
+                if not isinstance(contract_digest, str) or contract_digest != output_digest:
+                    raise ValueError(
+                        "semantic task contract digest must match the strict output contract"
+                    )
             tool_name = self.model_request.get("tool_name")
             if tool_name is not None:
                 _required(tool_name, "model_request.tool_name")
@@ -287,6 +324,8 @@ class CoreExecutionTask:
                     "cache_namespace",
                     "cache_keys",
                     "deadline",
+                    "role",
+                    "renderer_version",
                 },
                 "embedding_request",
             )
@@ -304,9 +343,20 @@ class CoreExecutionTask:
                     raise ValueError("embedding_request.subject_refs must contain strings")
                 if len(set(subject_refs)) != len(subject_refs):
                     raise ValueError("embedding_request.subject_refs must be unique")
-            validate_embedding_purpose(
+            purpose = validate_embedding_purpose(
                 _required(self.embedding_request.get("purpose"), "embedding purpose")
             )
+            role = self.embedding_request.get("role")
+            if role is not None and role not in {"query", "passage"}:
+                raise ValueError("embedding_request.role must be query or passage")
+            required_role = {
+                "object_candidate_query": "query",
+                "object_identity_passage": "passage",
+            }.get(purpose)
+            if required_role is not None and role != required_role:
+                raise ValueError(
+                    f"embedding_request purpose {purpose} requires role={required_role}"
+                )
             dimensions = self.embedding_request.get("dimensions")
             if dimensions is not None and (
                 isinstance(dimensions, bool)
@@ -320,6 +370,7 @@ class CoreExecutionTask:
                 "privacy_class",
                 "cache_namespace",
                 "deadline",
+                "renderer_version",
             ):
                 value = self.embedding_request.get(key)
                 if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -352,10 +403,15 @@ class CoreExecutionTask:
             "object-facet execution task",
         )
         task_kind = payload.get("task_kind")
-        if task_kind not in {"generate_json", "embed_texts"}:
-            raise ValueError("task_kind must be generate_json or embed_texts")
+        if task_kind not in {"generate_json", "object_resolution", "embed_texts"}:
+            raise ValueError("task_kind must be generate_json, object_resolution, or embed_texts")
         profile_slot = payload.get("profile_slot")
-        if profile_slot not in {"operational", "background", "embedding"}:
+        if profile_slot not in {
+            "operational",
+            "object_resolution",
+            "background",
+            "embedding",
+        }:
             raise ValueError("profile_slot is invalid")
         model_request = payload.get("model_request")
         embedding_request = payload.get("embedding_request")
@@ -422,7 +478,7 @@ class CoreExecutionResult:
     """Strict generic result envelope sent back to Core."""
 
     task_id: str
-    task_kind: Literal["generate_json", "embed_texts"]
+    task_kind: Literal["generate_json", "object_resolution", "embed_texts"]
     status: Literal["completed"]
     operation: str
     operation_input: dict[str, Any] | None
@@ -439,7 +495,7 @@ class CoreExecutionResult:
     def __post_init__(self) -> None:
         _required(self.task_id, "result.task_id")
         _required(self.operation, "result.operation")
-        if self.task_kind not in {"generate_json", "embed_texts"}:
+        if self.task_kind not in {"generate_json", "object_resolution", "embed_texts"}:
             raise ValueError("result.task_kind is invalid")
         if self.status != "completed":
             raise ValueError("result.status must be completed")
@@ -451,7 +507,7 @@ class CoreExecutionResult:
             raise TypeError("result.embedding_result must be an object")
         if not isinstance(self.egress_audit, dict):
             raise TypeError("result.egress_audit must be an object")
-        if self.task_kind == "generate_json":
+        if self.task_kind in {"generate_json", "object_resolution"}:
             if self.output is None or self.embedding_result is not None:
                 raise ValueError("generate_json result has an invalid output shape")
         elif self.embedding_result is None or self.output is not None:
@@ -516,7 +572,7 @@ class CoreExecutionResult:
             "object-facet execution result",
         )
         task_kind = payload.get("task_kind")
-        if task_kind not in {"generate_json", "embed_texts"}:
+        if task_kind not in {"generate_json", "object_resolution", "embed_texts"}:
             raise ValueError("result.task_kind is invalid")
         if payload.get("status") != "completed":
             raise ValueError("result.status must be completed")
@@ -540,7 +596,7 @@ class CoreExecutionResult:
         metadata = payload.get("metadata")
         if metadata is not None and not isinstance(metadata, dict):
             raise TypeError("result.metadata must be an object")
-        if task_kind == "generate_json":
+        if task_kind in {"generate_json", "object_resolution"}:
             if not isinstance(output, dict) or embedding_result is not None:
                 raise ValueError("generate_json result has an invalid output shape")
         elif not isinstance(embedding_result, dict) or output is not None:
@@ -826,6 +882,7 @@ class ControlMaintenanceResult:
     diagnostic_rows_deleted: int = 0
     terminal_task_rows_deleted: int = 0
     cleanup_candidate_count: int = 0
+    objects_consolidated: int = 0
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> ControlMaintenanceResult:
@@ -838,6 +895,7 @@ class ControlMaintenanceResult:
                 "stale_jobs_recovered",
                 "findings_created",
                 "duplicate_object_findings",
+                "objects_consolidated",
                 "missing_card_embeddings",
                 "missing_facet_embeddings",
                 "integrity_errors",
@@ -863,6 +921,9 @@ class ControlMaintenanceResult:
             ),
             duplicate_object_findings=_non_negative_int(
                 payload.get("duplicate_object_findings"), "duplicate_object_findings"
+            ),
+            objects_consolidated=_non_negative_int(
+                payload.get("objects_consolidated", 0), "objects_consolidated"
             ),
             missing_card_embeddings=_non_negative_int(
                 payload.get("missing_card_embeddings"), "missing_card_embeddings"

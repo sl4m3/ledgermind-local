@@ -20,7 +20,7 @@ from ledgermind_local.bootstrap import (
     build_process_core_gateway,
     initialize_local_layout,
 )
-from ledgermind_local.config import LocalConfig
+from ledgermind_local.config import CURRENT_CONFIG_VERSION, LocalConfig
 from ledgermind_local.core_gateway import CoreGateway
 from ledgermind_local.core_gateway.doctor import build_core_doctor_report
 from ledgermind_local.diagnostics.integrity import run_database_integrity_checks
@@ -76,6 +76,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rotate-token",
         action="store_true",
         help="Rotate token when force is used",
+    )
+    init_parser.add_argument(
+        "--semantic-language",
+        choices=("ru", "en", "es", "pt", "fr", "de", "uk"),
+        help="Semantic language for a new or forced configuration",
     )
     init_parser.set_defaults(func=_command_init)
 
@@ -195,7 +200,7 @@ def _build_parser() -> argparse.ArgumentParser:
     profiles_add_parser.add_argument(
         "--provider",
         dest="provider_kind",
-        choices=("openai_compatible",),
+        choices=("openai_compatible", "nvidia_nim"),
         default="openai_compatible",
     )
     profiles_add_parser.add_argument("--base-url", required=True)
@@ -209,7 +214,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--structured-output-preference",
         "--structured-output-mode",
         dest="structured_output_preference",
-        choices=("auto", "json_schema", "tool_call", "json_object", "prompt_only"),
+        choices=(
+            "auto",
+            "strict_json_schema",
+            "json_schema",
+            "tool_call",
+            "json_object",
+            "prompt_only",
+        ),
         default="auto",
     )
     profiles_add_parser.add_argument(
@@ -251,7 +263,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     inference_bind_parser.add_argument("--memory-space-id", required=True)
     inference_bind_parser.add_argument(
-        "--slot", choices=("operational", "background", "embedding"), required=True
+        "--slot",
+        choices=("operational", "object_resolution", "background", "embedding"),
+        required=True,
     )
     inference_bind_parser.add_argument("--profile-id", required=True)
     inference_bind_parser.set_defaults(func=_command_inference_bind)
@@ -262,13 +276,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     inference_probe_parser.add_argument("--memory-space-id", required=True)
     inference_probe_parser.add_argument(
-        "--slot", choices=("operational", "background"), required=True
+        "--slot",
+        choices=("operational", "object_resolution", "background"),
+        required=True,
     )
     inference_probe_parser.add_argument(
         "--mode",
         "--structured-output-mode",
         dest="mode",
-        choices=("auto", "json_schema", "tool_call", "json_object", "prompt_only"),
+        choices=(
+            "auto",
+            "strict_json_schema",
+            "json_schema",
+            "tool_call",
+            "json_object",
+            "prompt_only",
+        ),
     )
     inference_probe_parser.add_argument(
         "--json",
@@ -337,10 +360,26 @@ def _command_init(args: argparse.Namespace) -> int:
         print("--rotate-token requires --force")
         return 2
 
+    home = Path(args.home).expanduser()
+    config_path = ServicePaths(home=home).config_file
+    semantic_language = getattr(args, "semantic_language", None)
+    if (force or not config_path.exists()) and not semantic_language:
+        print("--semantic-language is required when creating or replacing config")
+        return 2
+    init_config = (
+        LocalConfig(
+            config_version=CURRENT_CONFIG_VERSION,
+            semantic_language=semantic_language,
+        )
+        if force or not config_path.exists()
+        else None
+    )
+
     paths, config, token = initialize_local_layout(
-        home=Path(args.home).expanduser(),
+        home=home,
         force=force,
         rotate_token=rotate_token,
+        config=init_config,
     )
     print(f"initialized {paths.home}")
     print(f"config: {paths.config_file}")

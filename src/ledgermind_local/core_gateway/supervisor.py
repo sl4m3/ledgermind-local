@@ -68,6 +68,7 @@ class CoreSupervisor:
         isolation_requirements: IsolationRequirements | None = None,
         strict_isolation: bool | None = None,
         binary_signature_verified: bool = False,
+        semantic_language: str | None = None,
     ) -> None:
         if not command or any(not str(part) for part in command):
             raise ValueError("Core command must not be empty")
@@ -110,6 +111,9 @@ class CoreSupervisor:
         )
         self._runtime_paths = tuple(Path(item).expanduser() for item in runtime_paths)
         self._binary_signature_verified = binary_signature_verified
+        if semantic_language is None or not semantic_language.strip():
+            raise ValueError("semantic_language must be supplied by LocalConfig")
+        self._semantic_language = semantic_language
         self._isolation_capabilities = IsolationCapabilities(
             sandbox_backend="unavailable",
             detail="Core has not been launched",
@@ -254,6 +258,7 @@ class CoreSupervisor:
                 required=self._strict_isolation,
                 requirements=self._isolation_requirements,
                 strict=self._strict_isolation,
+                semantic_language=self._semantic_language,
             )
         except SandboxUnavailableError as exc:
             self._isolation_capabilities = IsolationCapabilities(
@@ -295,6 +300,7 @@ class CoreSupervisor:
         environment = {
             "RUST_BACKTRACE": "0",
             "LEDGERMIND_CORE_DATA_DIR": str(self._core_data_dir),
+            "LEDGERMIND_SEMANTIC_LANGUAGE": self._semantic_language,
             "PWD": str(self._core_data_dir),
         }
         for name in ("LANG", "LC_ALL"):

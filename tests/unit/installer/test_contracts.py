@@ -31,10 +31,12 @@ from ledgermind_local.runtime.supervisor import RuntimeSupervisor
 
 def _config() -> InstallerConfig:
     return InstallerConfig(
+        semantic_language="en",
         generation=GenerationConfig(
             endpoint="https://provider.example/v1",
             token="generation-secret",
             model="generation-model",
+            object_resolution_model="object-resolution-model",
         ),
         embedding=EmbeddingConfig(
             mode="api",
@@ -89,6 +91,7 @@ def test_installer_materializes_profiles_for_local_resolver(tmp_path: Path) -> N
         "background": "generation-background",
         "embedding": "embedding-default",
         "operational": "generation-operational",
+        "object_resolution": "generation-object-resolution",
     }
 
 
