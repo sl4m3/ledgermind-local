@@ -48,6 +48,7 @@ class HermesTargetAdapter(BaseTargetAdapter):
                 "plugin_root": str(home / "plugins" / "ledgermind-hermes"),
             }
         payload = {
+            "enabled": bool(context.metadata.get("enabled", True)),
             "endpoint": "http://127.0.0.1:8765",
             "token_file": str(context.paths.data_dir / "local" / "server.token"),
             "memory_space_id": "hermes-default",

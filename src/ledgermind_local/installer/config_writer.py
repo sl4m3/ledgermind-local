@@ -214,6 +214,20 @@ def write_installer_config(
     }
 
 
+def persist_installer_config(
+    config: InstallerConfig, paths: InstallerPaths
+) -> Path:
+    """Persist an already-secret-free installer configuration.
+
+    Integration lifecycle commands use this helper so enabling or disabling an
+    adapter never has to resolve, receive, or rewrite provider credentials.
+    """
+
+    paths.ensure()
+    _write_private_json(paths.config_file, _safe_config_payload(config))
+    return paths.config_file
+
+
 def load_installer_config(path: str | Path) -> InstallerConfig:
     payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
     return InstallerConfig.model_validate(payload)

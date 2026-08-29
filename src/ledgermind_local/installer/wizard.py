@@ -12,6 +12,7 @@ from .models import (
     EmbeddingConfig,
     GenerationConfig,
     InstallerConfig,
+    IntegrationConfig,
     LocalEmbeddingConfig,
     RuntimeConfig,
 )
@@ -31,9 +32,6 @@ def build_interactive_config(
     secret_fn: Callable[[str], str] = getpass.getpass,
 ) -> InstallerConfig:
     try:
-        target = _ask("Target", input_fn=input_fn, default="hermes")
-        if target != "hermes":
-            raise ValueError("only Hermes is supported in this release")
         semantic_language = _ask(
             "Semantic language (ru/en/es/pt/fr/de/uk)", input_fn=input_fn
         )
@@ -85,9 +83,28 @@ def build_interactive_config(
         idle = float(_ask("Idle shutdown seconds", input_fn=input_fn, default="60"))
         ttl = float(_ask("Lease TTL seconds", input_fn=input_fn, default="30"))
         heartbeat = float(_ask("Heartbeat seconds", input_fn=input_fn, default="10"))
+        from .targets.registry import get_target_adapter
+
+        hermes = get_target_adapter("hermes").discover()
+        connect_hermes = "no"
+        if hermes.detected:
+            connect_hermes = _ask(
+                "Connect detected Hermes installation (yes/no)",
+                input_fn=input_fn,
+                default="yes",
+            ).lower()
+            if connect_hermes not in {"yes", "no"}:
+                raise ValueError("Hermes selection must be yes or no")
         return InstallerConfig(
-            target="hermes",
-            semantic_language=semantic_language,
+            semantic_language=cast(
+                Literal["ru", "en", "es", "pt", "fr", "de", "uk"],
+                semantic_language,
+            ),
+            integrations=(
+                (IntegrationConfig(id="hermes", enabled=True),)
+                if connect_hermes == "yes"
+                else ()
+            ),
             generation=GenerationConfig(
                 endpoint=endpoint,
                 token=token,

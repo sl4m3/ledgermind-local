@@ -22,7 +22,11 @@ from ..verify import verify_bundle_tree
 
 
 def doctor(
-    *, paths: InstallerPaths, full_smoke: bool = True, probe_providers: bool = True
+    *,
+    paths: InstallerPaths,
+    full_smoke: bool = True,
+    probe_providers: bool = True,
+    verify_integrations: bool = True,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
         "status": "passed",
@@ -31,7 +35,7 @@ def doctor(
         "configuration": {},
         "providers": {},
         "runtime": {},
-        "hermes": {},
+        "integrations": {},
         "smoke_test": {},
         "warnings": [],
     }
@@ -78,7 +82,9 @@ def doctor(
                 if backend.__class__.__name__ == "SecretServiceStore"
                 else "file-0600"
             )
-            report["configuration"]["target"] = config.target
+            report["configuration"]["integrations"] = [
+                item.model_dump(mode="json") for item in config.integrations
+            ]
             for path in (
                 paths.config_file,
                 paths.profiles_file,
@@ -86,18 +92,31 @@ def doctor(
             ):
                 if path.is_file():
                     assert_private(path, directory=False)
-            adapter = get_target_adapter(config.target)
-            discovery = adapter.discover()
-            report["hermes"]["discovery"] = discovery.as_dict()
-            if discovery.detected:
-                context = AdapterContext(
-                    config=config, paths=paths, discovery=discovery
-                )
+            for selected in config.integrations:
+                adapter = get_target_adapter(selected.id)
+                discovery = adapter.discover()
+                integration = {
+                    "connected": True,
+                    "enabled": selected.enabled,
+                    "discovery": discovery.as_dict(),
+                }
+                report["integrations"][selected.id] = integration
+                if not verify_integrations:
+                    integration["adapter"] = {"status": "skipped_by_request"}
+                    continue
+                if not discovery.detected:
+                    report["status"] = "failed"
+                    integration["adapter"] = {
+                        "status": "failed",
+                        "error": discovery.detail or "agent was not discovered",
+                    }
+                    continue
+                context = AdapterContext(config=config, paths=paths, discovery=discovery)
                 try:
-                    report["hermes"]["adapter"] = adapter.verify(context)
+                    integration["adapter"] = adapter.verify(context)
                 except Exception as exc:  # noqa: BLE001
                     report["status"] = "failed"
-                    report["hermes"]["adapter"] = {
+                    integration["adapter"] = {
                         "status": "failed",
                         "error": str(exc),
                     }

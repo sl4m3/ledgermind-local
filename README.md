@@ -114,7 +114,7 @@ not own `HypothesisCandidate`, `MemoryObject`, `Target`, `Facet`, Merge, or
 Replace semantics. The application Core coordinator owns those decisions;
 Local only transports provider work and reports opaque results.
 
-## Universal Hermes installer
+## Universal installer
 
 The release installer is rootless and uses one configuration engine for the
 interactive wizard and agent-driven JSON installs. It accepts only an
@@ -124,12 +124,42 @@ API or a signed local CPU/GPU model catalog entry:
 ```bash
 curl -fsSL https://github.com/sl4m3/ledgermind/releases/latest/download/install.sh | sh
 ledgermind install schema --json
+ledgermind integrations discover --json
+ledgermind integrations status --json
 ledgermind doctor --json
 ledgermind runtime status --json
 ```
 
+Without arguments, `install.sh` starts the human wizard. An agent uses the same
+installer non-interactively: it asks the user for deployment choices, writes a
+private (`0600`) current-schema config, then executes one command and consumes its
+JSON result:
+
+```bash
+curl -fsSL https://github.com/sl4m3/ledgermind/releases/latest/download/install.sh \
+  | sh -s -- install --non-interactive --config /secure/install.json --json
+```
+
+Provider credentials should be supplied through `token_env`, `token_stdin`, or
+an existing `secret_ref`; the persisted installer config never contains the
+token value. One platform installation may connect several agent integrations.
+Their lifecycle is independent from the platform transaction:
+
+```bash
+ledgermind integrations connect hermes --json
+ledgermind integrations disable hermes --json
+ledgermind integrations enable hermes --json
+ledgermind integrations disconnect hermes --json
+```
+
+The states are intentionally distinct: `installed` means the LedgerMind
+platform exists, `connected` means an adapter is registered, `enabled` means it
+will attach to future agent sessions, and `active` means a live session holds a
+runtime lease. A failed agent connection returns a partial result and never
+rolls back a successfully verified platform installation.
+
 Install data follows XDG directories. Signed manifests, bundle artifacts,
 Core, model files, and embedding runtimes are verified before `current` is
-switched. The default runtime is on-demand: Hermes acquires a TTL lease before
+switched. The default runtime is on-demand: an enabled Hermes integration acquires a TTL lease before
 memory work, heartbeats while active, and releases it on shutdown. Ordinary
 uninstall preserves user memory, configuration, and secrets.

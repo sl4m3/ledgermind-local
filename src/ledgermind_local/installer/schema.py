@@ -7,11 +7,16 @@ from typing import Any
 INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
-    "required": ["schema_version", "target", "generation", "embedding"],
+    "required": ["schema_version", "semantic_language", "generation", "embedding"],
     "additionalProperties": False,
     "properties": {
-        "schema_version": {"const": 1},
-        "target": {"const": "hermes"},
+        "schema_version": {"const": 2},
+        "semantic_language": {"enum": ["ru", "en", "es", "pt", "fr", "de", "uk"]},
+        "integrations": {
+            "type": "array",
+            "uniqueItems": True,
+            "items": {"$ref": "#/$defs/integration"},
+        },
         "memory_data_path": {"type": ["string", "null"]},
         "generation": {
             "type": "object",
@@ -25,6 +30,7 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
                 "secret_ref": {"type": ["string", "null"]},
                 "model": {"type": "string"},
                 "operational_model": {"type": ["string", "null"]},
+                "object_resolution_model": {"type": ["string", "null"]},
                 "background_model": {"type": ["string", "null"]},
                 "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
                 "max_concurrency": {"type": "integer", "minimum": 1},
@@ -83,6 +89,15 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
         },
     },
     "$defs": {
+        "integration": {
+            "type": "object",
+            "required": ["id"],
+            "additionalProperties": False,
+            "properties": {
+                "id": {"enum": ["hermes"]},
+                "enabled": {"type": "boolean"},
+            },
+        },
         "embeddingApi": {
             "type": "object",
             "required": ["endpoint", "model", "dimensions"],

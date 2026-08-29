@@ -18,12 +18,19 @@ from .operations.doctor import doctor
 from .operations.export_config import export_config
 from .operations.import_config import import_config
 from .operations.install import install, install_plan
+from .operations.integrations import (
+    connect_integration,
+    disconnect_integration,
+    discover_integrations,
+    integration_status,
+    set_integration_enabled,
+)
 from .operations.repair import repair
 from .operations.status import status
 from .operations.uninstall import uninstall
 from .operations.update import update
 from .paths import InstallerPaths
-from .result import InstallResult
+from .result import InstallResult, ResultStep
 from .schema import schema
 from .targets.registry import target_ids
 
@@ -55,7 +62,6 @@ def _build_parser() -> argparse.ArgumentParser:
     plan_parser = install_subparsers.add_parser("plan")
     _common(plan_parser)
     plan_parser.add_argument("--manifest", type=Path)
-    install_parser.add_argument("--target", choices=target_ids(), default="hermes")
     for option in (install_parser,):
         _common(option)
         option.add_argument("--manifest", type=Path)
@@ -88,6 +94,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status")
     _common(status_parser)
+
+    integrations_parser = subparsers.add_parser("integrations")
+    integration_commands = integrations_parser.add_subparsers(
+        dest="integration_command", required=True
+    )
+    integrations_discover = integration_commands.add_parser("discover")
+    _common(integrations_discover)
+    integrations_status = integration_commands.add_parser("status")
+    _common(integrations_status)
+    integrations_connect = integration_commands.add_parser("connect")
+    _common(integrations_connect)
+    integrations_connect.add_argument("integration", choices=target_ids())
+    integrations_connect.add_argument("--disabled", action="store_true")
+    for action in ("enable", "disable", "disconnect"):
+        action_parser = integration_commands.add_parser(action)
+        _common(action_parser)
+        action_parser.add_argument("integration", choices=target_ids())
 
     export_parser = subparsers.add_parser("export-config")
     _common(export_parser)
@@ -142,7 +165,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _paths(args: argparse.Namespace) -> InstallerPaths:
-    return InstallerPaths(home_override=args.home)
+    return InstallerPaths(home_override=getattr(args, "home", None))
 
 
 def _runtime(paths: InstallerPaths) -> RuntimeSupervisor:
@@ -292,14 +315,23 @@ def _result(
         step_status = (
             payload_status
             if isinstance(payload_status, str)
-            and payload_status in {"passed", "success", "dry_run", "failed"}
+            and payload_status in {"passed", "success", "partial", "dry_run", "failed"}
             else "passed"
         )
-        result.step(operation, step_status, data=payload)
+        result.steps.append(ResultStep(operation, step_status, data=dict(payload)))
         if step_status == "dry_run":
             result.status = "dry_run"
         elif step_status == "failed":
             result.status = "failed"
+        elif step_status == "partial":
+            result.status = "partial"
+            result.exit_code = ExitCode.ADAPTER_FAILED
+            failures = payload.get("integration_failures", [])
+            if failures:
+                result.warning(
+                    "platform installed; integrations failed: "
+                    + ", ".join(str(item) for item in failures)
+                )
     return result
 
 
@@ -321,7 +353,9 @@ def _emit(result: InstallResult, *, json_output: bool) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
-    raw_argv = sys.argv[1:] if argv is None else argv
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if not raw_argv:
+        raw_argv = ["install"]
     args = parser.parse_args(_normalize_argv(raw_argv))
     operation = args.command
     try:
@@ -344,8 +378,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _emit(result, json_output=bool(args.json_output))
         if operation == "install":
             config, generation_stdin, embedding_stdin = _config(args)
-            if config.target != args.target:
-                config = config.model_copy(update={"target": args.target})
             payload = install(
                 config=config,
                 paths=paths,
@@ -354,6 +386,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest_signature=args.manifest_signature,
                 dry_run=bool(args.dry_run),
                 skip_provider_probe=bool(args.skip_provider_probe),
+                generation_stdin=generation_stdin,
+                embedding_stdin=embedding_stdin,
             )
             result = _result("install", payload=payload, paths=paths)
             return _emit(result, json_output=bool(args.json_output))
@@ -384,7 +418,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json_output=bool(args.json_output),
             )
         if operation == "update":
-            config, _, _ = _config(args)
+            config, generation_stdin, embedding_stdin = _config(args)
             payload = update(
                 config=config,
                 paths=paths,
@@ -392,6 +426,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 bundle=args.bundle,
                 dry_run=bool(args.dry_run),
                 skip_provider_probe=bool(args.skip_provider_probe),
+                generation_stdin=generation_stdin,
+                embedding_stdin=embedding_stdin,
             )
             return _emit(
                 _result("update", payload=payload, paths=paths),
@@ -412,6 +448,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         if operation == "status":
             return _emit(
                 _result("status", payload=status(paths=paths), paths=paths),
+                json_output=bool(args.json_output),
+            )
+        if operation == "integrations":
+            if args.integration_command == "discover":
+                payload = discover_integrations()
+            elif args.integration_command == "status":
+                payload = integration_status(paths=paths)
+            elif args.integration_command == "connect":
+                payload = connect_integration(
+                    paths=paths,
+                    target_id=args.integration,
+                    enabled=not bool(args.disabled),
+                    dry_run=bool(args.dry_run),
+                )
+            elif args.integration_command == "disconnect":
+                payload = disconnect_integration(
+                    paths=paths,
+                    target_id=args.integration,
+                    dry_run=bool(args.dry_run),
+                )
+            else:
+                payload = set_integration_enabled(
+                    paths=paths,
+                    target_id=args.integration,
+                    enabled=args.integration_command == "enable",
+                    dry_run=bool(args.dry_run),
+                )
+            return _emit(
+                _result(
+                    "integrations " + args.integration_command,
+                    payload=payload,
+                    paths=paths,
+                ),
                 json_output=bool(args.json_output),
             )
         if operation == "export-config":

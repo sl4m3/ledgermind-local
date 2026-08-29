@@ -15,6 +15,7 @@ dependencies = [
     "httpx>=0.27,<1",
     "fastapi>=0.111,<1",
     "PyYAML>=6.0,<7",
+    "zstandard>=0.23,<1",
     "ledgermind-protocol>=2.0.0a1,<2.1",
     "uvicorn>=0.30,<1"
 ]

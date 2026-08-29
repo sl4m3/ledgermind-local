@@ -40,13 +40,14 @@ def uninstall(
     RuntimeSupervisor(paths).stop(force=True)
     adapter_result: dict[str, Any] = {}
     if config is not None:
-        adapter = get_target_adapter(config.target)
-        discovery = adapter.discover()
-        if discovery.detected:
-            adapter_result = adapter.uninstall(
-                AdapterContext(config=config, paths=paths, discovery=discovery),
-                purge=False,
-            )
+        for selected in config.integrations:
+            adapter = get_target_adapter(selected.id)
+            discovery = adapter.discover()
+            if discovery.detected:
+                adapter_result[selected.id] = adapter.uninstall(
+                    AdapterContext(config=config, paths=paths, discovery=discovery),
+                    purge=False,
+                )
     remove_bin_link(paths)
     if paths.current_link.is_symlink():
         paths.current_link.unlink(missing_ok=True)
@@ -72,7 +73,7 @@ def uninstall(
         shutil.rmtree(paths.data_dir / "local", ignore_errors=True)
     return {
         "status": "passed",
-        "adapter": adapter_result,
+        "integrations": adapter_result,
         "releases_removed": releases_removed,
         "preserved_data": not purge_data,
         "preserved_config": not purge_config,

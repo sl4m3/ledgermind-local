@@ -22,6 +22,8 @@ def update(
     bundle: str | Path,
     dry_run: bool = False,
     skip_provider_probe: bool = False,
+    generation_stdin: str | None = None,
+    embedding_stdin: str | None = None,
 ) -> dict[str, Any]:
     if dry_run:
         return {"status": "dry_run", "operation": "update"}
@@ -48,6 +50,8 @@ def update(
             manifest_path=manifest_path,
             bundle=bundle,
             skip_provider_probe=skip_provider_probe,
+            generation_stdin=generation_stdin,
+            embedding_stdin=embedding_stdin,
         )
         result["doctor"] = doctor(paths=paths)
         if result["doctor"].get("status") != "passed":

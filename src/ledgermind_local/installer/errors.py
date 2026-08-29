@@ -72,7 +72,7 @@ class ProviderProbeError(InstallerError):
 
 class AdapterError(InstallerError):
     exit_code = ExitCode.ADAPTER_FAILED
-    error_code = "hermes_adapter_failed"
+    error_code = "integration_adapter_failed"
 
 
 class TransactionError(InstallerError):

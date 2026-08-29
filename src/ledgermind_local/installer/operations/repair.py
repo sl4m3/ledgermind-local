@@ -21,15 +21,28 @@ def repair(*, paths: InstallerPaths, dry_run: bool = False) -> dict[str, Any]:
     if dry_run:
         return {"status": "dry_run", "current": str(paths.current_link)}
     install_bin_link(paths)
-    adapter = get_target_adapter(config.target)
-    discovery = adapter.discover()
-    context = AdapterContext(
-        config=config, paths=paths, discovery=discovery, bundle_root=paths.current_link
-    )
-    adapter.repair(context)
+    integrations: dict[str, Any] = {}
+    for selected in config.integrations:
+        adapter = get_target_adapter(selected.id)
+        discovery = adapter.discover()
+        if not discovery.detected:
+            integrations[selected.id] = {
+                "status": "failed",
+                "error": discovery.detail or "agent was not discovered",
+            }
+            continue
+        context = AdapterContext(
+            config=config,
+            paths=paths,
+            discovery=discovery,
+            bundle_root=paths.current_link,
+            metadata={"enabled": selected.enabled},
+        )
+        integrations[selected.id] = adapter.repair(context)
     return {
         "status": "passed",
         "doctor": doctor(paths=paths),
+        "integrations": integrations,
         "current": str(paths.current_link),
     }
 

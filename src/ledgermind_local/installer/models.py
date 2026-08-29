@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -165,13 +165,22 @@ class AdvancedConfig(BaseModel):
     custom_runtime_compatibility: str | None = None
 
 
+class IntegrationConfig(BaseModel):
+    """One explicitly selected agent integration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Literal["hermes"]
+    enabled: bool = True
+
+
 class InstallerConfig(BaseModel):
     """The single schema shared by the wizard and agent-driven installs."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
-    target: Literal["hermes"] = "hermes"
+    schema_version: Literal[2] = 2
+    integrations: tuple[IntegrationConfig, ...] = ()
     # Installation must make the semantic language an explicit deployment
     # choice; it is never inferred from user text or the host locale.
     semantic_language: Literal["ru", "en", "es", "pt", "fr", "de", "uk"]
@@ -180,6 +189,25 @@ class InstallerConfig(BaseModel):
     embedding: EmbeddingConfig
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_config(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if payload.get("schema_version") == 1 or "target" in payload:
+            target = payload.pop("target", "hermes")
+            payload["schema_version"] = 2
+            payload.setdefault("integrations", [{"id": target, "enabled": True}])
+        return payload
+
+    @model_validator(mode="after")
+    def validate_integrations(self) -> InstallerConfig:
+        identifiers = [item.id for item in self.integrations]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("integrations must contain unique ids")
+        return self
 
     @field_validator("memory_data_path")
     @classmethod
@@ -221,6 +249,7 @@ __all__ = [
     "EmbeddingConfig",
     "GenerationConfig",
     "InstallerConfig",
+    "IntegrationConfig",
     "LocalEmbeddingConfig",
     "ProfileBinding",
     "RuntimeConfig",

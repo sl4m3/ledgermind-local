@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,7 @@ from ..config_writer import (
 from ..embeddings.model_download import download_model
 from ..embeddings.runtime_install import install_runtime
 from ..embeddings.verification import verify_model_files
-from ..errors import AdapterError, ConfigurationError, InstallerError
+from ..errors import ConfigurationError, InstallerError
 from ..lock import InstallerLock
 from ..manifest import InstallManifest
 from ..models import InstallerConfig
@@ -26,8 +25,6 @@ from ..preflight import check_preflight
 from ..profiles.embedding_local import build_local_embedding_plan
 from ..profiles.generation import build_generation_profiles
 from ..profiles.probes import probe_embedding_api, probe_generation
-from ..targets.base import AdapterContext
-from ..targets.registry import get_target_adapter
 from ..transaction import InstallTransaction
 from ..verify import (
     public_key_from_environment,
@@ -47,8 +44,7 @@ from .common import (
     write_install_history,
 )
 from .doctor import doctor
-
-logger = logging.getLogger(__name__)
+from .integrations import connect_integration
 
 
 def install_plan(
@@ -77,7 +73,7 @@ def install_plan(
         entry = manifest.catalog_entry(config.embedding.local.catalog_id)
         profiles.append(build_local_embedding_plan(config.embedding.local, entry))
     return {
-        "target": config.target,
+        "integrations": [item.model_dump(mode="json") for item in config.integrations],
         "platform": _platform_name(),
         "memory_data_path": config.memory_data_path or str(paths.memory_data_dir),
         "profiles": profiles,
@@ -104,6 +100,8 @@ def install(
     dry_run: bool = False,
     skip_provider_probe: bool = False,
     bundle_root_override: str | Path | None = None,
+    generation_stdin: str | None = None,
+    embedding_stdin: str | None = None,
 ) -> dict[str, Any]:
     """Install one release and return safe operation metadata."""
 
@@ -150,10 +148,6 @@ def install(
     platform_manifest(manifest)
     preflight = check_preflight(paths)
     plan = install_plan(config, paths=paths, manifest=manifest)
-    adapter = get_target_adapter(config.target)
-    discovery = adapter.discover()
-    if not discovery.detected:
-        raise AdapterError(discovery.detail or "Hermes was not discovered")
     bundle_source = Path(bundle_root)
     if bundle_source.is_file():
         bundle_record = platform_manifest(manifest).bundle
@@ -223,16 +217,13 @@ def install(
             paths=paths,
         )
         local_embedding_metadata = local_plan
-    context = AdapterContext(
-        config=effective_config,
-        paths=paths,
-        bundle_root=bundle_path,
-        discovery=discovery,
-        dry_run=False,
-    )
-    plan["adapter_preflight"] = adapter.preflight(context)
     if not skip_provider_probe:
-        generation_token, embedding_token = resolve_provider_tokens(config, paths)
+        generation_token, embedding_token = resolve_provider_tokens(
+            config,
+            paths,
+            generation_stdin=generation_stdin,
+            embedding_stdin=embedding_stdin,
+        )
         plan["generation_probe"] = probe_generation(
             config.generation, token=generation_token
         )
@@ -242,9 +233,11 @@ def install(
                 config.embedding.api, token=embedding_token
             )
     release_dir = paths.release_dir(manifest.release_version)
+    platform_config = effective_config.model_copy(update={"integrations": ()})
     local_database_path = Path(
-        build_local_config(effective_config, paths).rounds_database_path
+        build_local_config(platform_config, paths).rounds_database_path
     )
+    doctor_report: dict[str, Any] = {}
     with (
         InstallerLock(paths.install_lock),
         InstallTransaction(
@@ -259,8 +252,6 @@ def install(
             }
         )
         transaction.commit(staged_bundle=staged, switch_current=False)
-        adapter_installed = False
-        doctor_report: dict[str, Any] = {}
         try:
             for path in (
                 paths.config_file,
@@ -273,36 +264,45 @@ def install(
                 Path(f"{local_database_path}-shm"),
             ):
                 transaction.backup_file(path)
-            config_metadata = write_installer_config(effective_config, paths)
+            config_metadata = write_installer_config(
+                platform_config,
+                paths,
+                generation_stdin=generation_stdin,
+                embedding_stdin=embedding_stdin,
+            )
             config_metadata["local_config"] = str(
-                write_local_config(effective_config, paths, release_dir=release_dir)
+                write_local_config(platform_config, paths, release_dir=release_dir)
             )
             config_metadata["local_profiles"] = write_local_profiles(
-                effective_config, paths
+                platform_config, paths
             )
-            adapter_metadata = adapter.install(context)
-            adapter_installed = True
             transaction.switch_current()
             install_bin_link(paths)
-            adapter.verify(context)
             doctor_report = doctor(
                 paths=paths,
                 full_smoke=True,
                 probe_providers=not skip_provider_probe,
+                verify_integrations=False,
             )
             if doctor_report.get("status") != "passed":
                 raise InstallerError("post-install doctor or sandbox smoke failed")
         except Exception:
-            if adapter_installed:
-                try:
-                    adapter.uninstall(context, purge=False)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Hermes rollback cleanup failed: %s", type(exc).__name__
-                    )
             transaction.rollback()
             transaction.restore_backups()
             raise
+    integration_results: dict[str, Any] = {}
+    integration_failures: list[str] = []
+    for selected in effective_config.integrations:
+        try:
+            integration_results[selected.id] = connect_integration(
+                paths=paths, target_id=selected.id, enabled=selected.enabled
+            )
+        except Exception as exc:  # noqa: BLE001
+            integration_results[selected.id] = {
+                "status": "failed",
+                "error": str(exc),
+            }
+            integration_failures.append(selected.id)
     write_install_history(
         paths,
         {
@@ -314,14 +314,15 @@ def install(
         },
     )
     return {
-        "status": "success",
+        "status": "partial" if integration_failures else "success",
         "release_version": manifest.release_version,
         "platform": preflight["platform"],
         "preflight": preflight,
         "plan": plan,
         "local_embedding": local_embedding_metadata,
         "config": config_metadata,
-        "adapter": adapter_metadata,
+        "integrations": integration_results,
+        "integration_failures": integration_failures,
         "doctor": doctor_report,
         "smoke_test": doctor_report.get("smoke_test", {}),
         "current": str(paths.current_link),

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import hashlib
 import io
 import json
@@ -78,10 +79,18 @@ def _copy_dependencies(sources: list[Path], target: Path) -> None:
 
 def _payload_archive(payload_root: Path) -> bytes:
     archive_bytes = io.BytesIO()
-    with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+    with (
+        gzip.GzipFile(fileobj=archive_bytes, mode="wb", mtime=0) as compressed,
+        tarfile.open(fileobj=compressed, mode="w") as archive,
+    ):
         for path in sorted(payload_root.rglob("*")):
             relative = path.relative_to(payload_root)
             info = archive.gettarinfo(str(path), arcname=str(relative))
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
             if path.is_file() and not path.is_symlink():
                 with path.open("rb") as handle:
                     archive.addfile(info, handle)
@@ -114,7 +123,7 @@ if [ ! -x "$runtime" ]; then
     printf '%s\\n' 'installer payload marker is missing' >&2
     exit 6
   fi
-  tail -n +"$payload_line" "$0" | tar -xf - -C "$temporary"
+  tail -n +"$payload_line" "$0" | tar -xzf - -C "$temporary"
   if [ ! -x "$temporary/runtime/{runtime_executable}" ]; then
     printf '%s\\n' 'bundled Python runtime is missing' >&2
     exit 6

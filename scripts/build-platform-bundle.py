@@ -68,6 +68,21 @@ def _copy_source(source: Path, target: Path) -> None:
         shutil.copy2(source, target)
 
 
+def _copy_hermes_plugin(source: Path, target: Path) -> None:
+    """Accept either a prepared plugin payload or the Hermes package source."""
+
+    if (source / "plugin.yaml").is_file() and (source / "plugin_entry.py").is_file():
+        target.mkdir(parents=True, exist_ok=True)
+        _copy_source(source / "plugin.yaml", target / "plugin.yaml")
+        (target / "__init__.py").write_text(
+            "from ledgermind_integrations.adapters.hermes.plugin_entry import register\n\n"
+            '__all__ = ["register"]\n',
+            encoding="utf-8",
+        )
+        return
+    _copy_source(source, target)
+
+
 def _private_key(path: Path):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -135,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     for device in ("cpu", "cuda", "rocm"):
         (bundle / "embedding-runtimes" / device).mkdir(parents=True)
     (bundle / "defaults" / "config.json").write_text(
-        '{"schema_version":1,"target":"hermes"}\n', encoding="utf-8"
+        '{"schema_version":2,"integrations":[]}\n', encoding="utf-8"
     )
     (bundle / "defaults" / "facets.json").write_text("[]\n", encoding="utf-8")
     (bundle / "defaults" / "logging.json").write_text(
@@ -168,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         if not source.is_dir():
             raise SystemExit(f"site-packages directory does not exist: {source}")
         _copy_source(source, bundle / "python" / "site-packages")
-    _copy_source(
+    _copy_hermes_plugin(
         args.integrations_source.expanduser(),
         bundle / "integrations" / "hermes" / "plugin",
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -105,8 +106,27 @@ def unpack_bundle(source: str | Path, destination: str | Path) -> Path:
     if not source_path.is_file():
         raise TransactionError(f"bundle artifact does not exist: {source_path}")
     ensure_private_dir(destination_path)
+    decompressed: Path | None = None
     try:
-        with tarfile.open(source_path, mode="r:*") as archive:
+        try:
+            archive = tarfile.open(source_path, mode="r:*")  # noqa: SIM115
+        except tarfile.ReadError:
+            if not source_path.name.endswith(".tar.zst"):
+                raise
+            try:
+                import zstandard
+            except ImportError as exc:
+                raise TransactionError(
+                    "zstandard support is missing from the installer runtime"
+                ) from exc
+            with tempfile.NamedTemporaryFile(
+                dir=destination_path.parent, suffix=".tar", delete=False
+            ) as handle:
+                decompressed = Path(handle.name)
+                with source_path.open("rb") as source_handle:
+                    zstandard.ZstdDecompressor().copy_stream(source_handle, handle)
+            archive = tarfile.open(decompressed, mode="r:")  # noqa: SIM115
+        with archive:
             members = archive.getmembers()
             for member in members:
                 target = (destination_path / member.name).resolve()
@@ -127,6 +147,9 @@ def unpack_bundle(source: str | Path, destination: str | Path) -> Path:
                 archive.extractall(destination_path, members=members)
     except (OSError, tarfile.TarError, TypeError) as exc:
         raise TransactionError("cannot unpack platform bundle") from exc
+    finally:
+        if decompressed is not None:
+            decompressed.unlink(missing_ok=True)
     entries = list(destination_path.iterdir())
     if len(entries) == 1 and entries[0].is_dir():
         return entries[0]
