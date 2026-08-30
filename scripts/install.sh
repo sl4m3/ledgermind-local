@@ -28,4 +28,25 @@ fi
 
 chmod 700 "$destination"
 export LEDGERMIND_RELEASE_BASE_URL="$base_url"
+
+# When this bootstrap is streamed through `curl | sh`, stdin belongs to the
+# shell reading the downloaded script rather than to the interactive wizard.
+# Route interactive input to the user's terminal while leaving stdin untouched
+# for explicitly non-interactive installs (for example token_stdin).
+interactive=1
+for arg in "$@"; do
+  if [ "$arg" = "--non-interactive" ]; then
+    interactive=0
+    break
+  fi
+done
+
+if [ "$interactive" -eq 1 ] && [ ! -t 0 ]; then
+  if [ -r /dev/tty ]; then
+    exec "$destination" "$@" </dev/tty
+  fi
+  printf '%s\n' "an interactive terminal is required; use --non-interactive with --config for piped installs" >&2
+  exit 4
+fi
+
 exec "$destination" "$@"
