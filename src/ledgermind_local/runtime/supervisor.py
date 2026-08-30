@@ -125,7 +125,7 @@ class RuntimeSupervisor:
             started = (
                 not active_before
                 or not bool(state.get("running"))
-                or (bool(state.get("processes")) and not recorded_processes)
+                or (bool(self.commands) and not recorded_processes)
             )
             lease = self.leases.acquire(client=client, session_id=session_id)
             if started:
@@ -142,7 +142,11 @@ class RuntimeSupervisor:
     def heartbeat(self, lease_id: str) -> dict[str, object]:
         with InstallerLock(self.paths.state_dir / "runtime.lock"):
             lease = self.leases.heartbeat(lease_id)
-            if not load_state(self.paths.runtime_state).get("running"):
+            state = load_state(self.paths.runtime_state)
+            if not state.get("running") or (
+                bool(self.commands)
+                and not self._live_records(state.get("processes", {}))
+            ):
                 self._start()
             self._write(running=True)
             return {**lease.as_dict(), "endpoint": self.endpoint}

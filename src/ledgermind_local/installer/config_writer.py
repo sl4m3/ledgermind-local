@@ -16,6 +16,13 @@ from .models import InstallerConfig
 from .paths import InstallerPaths
 from .permissions import ensure_private_dir
 from .profiles.generation import build_generation_profiles
+from .secret_refs import (
+    EMBEDDING_SECRET_REF,
+    GENERATION_SECRET_REF,
+    LEGACY_EMBEDDING_SECRET_REF,
+    LEGACY_GENERATION_SECRET_REF,
+    LOCAL_EMBEDDING_SECRET_REF,
+)
 from .secrets.base import SecretBackend
 from .secrets.file_store import FileSecretStore
 from .secrets.secret_service import SecretServiceStore
@@ -82,6 +89,17 @@ def _secret_value(
     raise ValueError("a provider token could not be resolved")
 
 
+def _stored_secret_value(
+    backend: SecretBackend, *secret_refs: str | None
+) -> str | None:
+    for secret_ref in secret_refs:
+        if secret_ref:
+            stored = backend.get(secret_ref)
+            if stored:
+                return stored
+    return None
+
+
 def resolve_provider_tokens(
     config: InstallerConfig,
     paths: InstallerPaths,
@@ -90,22 +108,38 @@ def resolve_provider_tokens(
     embedding_stdin: str | None = None,
 ) -> tuple[str, str | None]:
     backend = select_secret_backend(paths)
-    generation = _secret_value(
-        config.generation.token,
-        config.generation.token_env,
-        generation_stdin if config.generation.token_stdin else None,
-        secret_ref=config.generation.secret_ref or "generation/token",
-        backend=backend,
+    generation = (
+        config.generation.token
+        or (os.environ.get(config.generation.token_env, "") if config.generation.token_env else None)
+        or (generation_stdin if config.generation.token_stdin else None)
+        or _stored_secret_value(
+            backend,
+            config.generation.secret_ref,
+            GENERATION_SECRET_REF,
+            LEGACY_GENERATION_SECRET_REF,
+        )
     )
+    if not generation:
+        raise ValueError("a provider token could not be resolved")
     embedding: str | None = None
     if config.embedding.mode == "api" and config.embedding.api is not None:
-        embedding = _secret_value(
-            config.embedding.api.token,
-            config.embedding.api.token_env,
-            embedding_stdin if config.embedding.api.token_stdin else None,
-            secret_ref=config.embedding.api.secret_ref or "embedding/token",
-            backend=backend,
+        embedding = (
+            config.embedding.api.token
+            or (
+                os.environ.get(config.embedding.api.token_env, "")
+                if config.embedding.api.token_env
+                else None
+            )
+            or (embedding_stdin if config.embedding.api.token_stdin else None)
+            or _stored_secret_value(
+                backend,
+                config.embedding.api.secret_ref,
+                EMBEDDING_SECRET_REF,
+                LEGACY_EMBEDDING_SECRET_REF,
+            )
         )
+        if not embedding:
+            raise ValueError("a provider token could not be resolved")
     return generation, embedding
 
 
@@ -115,7 +149,7 @@ def _safe_config_payload(config: InstallerConfig) -> dict[str, Any]:
     generation.pop("token", None)
     generation.pop("token_env", None)
     generation.pop("token_stdin", None)
-    generation["secret_ref"] = "generation/token"
+    generation["secret_ref"] = GENERATION_SECRET_REF
     payload["generation"] = generation
     embedding = dict(payload.get("embedding", {}))
     api = embedding.get("api")
@@ -124,7 +158,7 @@ def _safe_config_payload(config: InstallerConfig) -> dict[str, Any]:
         api.pop("token", None)
         api.pop("token_env", None)
         api.pop("token_stdin", None)
-        api["secret_ref"] = "embedding/token"
+        api["secret_ref"] = EMBEDDING_SECRET_REF
         embedding["api"] = api
     payload["embedding"] = embedding
     return payload
@@ -149,7 +183,7 @@ def write_installer_config(
         secret_ref=config.generation.secret_ref,
         backend=backend,
     )
-    generation_ref = "generation/token"
+    generation_ref = GENERATION_SECRET_REF
     backend.put(generation_ref, generation_token)
     if isinstance(backend, SecretServiceStore):
         FileSecretStore(paths.secrets_file).put(generation_ref, generation_token)
@@ -170,7 +204,7 @@ def write_installer_config(
             secret_ref=config.embedding.api.secret_ref,
             backend=backend,
         )
-        embedding_ref = "embedding/token"
+        embedding_ref = EMBEDDING_SECRET_REF
         backend.put(embedding_ref, embedding_token)
         if isinstance(backend, SecretServiceStore):
             FileSecretStore(paths.secrets_file).put(embedding_ref, embedding_token)
@@ -268,7 +302,7 @@ def build_local_config(
             dimensions=config.embedding.api.dimensions,
             batch_size=config.embedding.api.batch_size,
             timeout_seconds=config.embedding.api.timeout_seconds,
-            secret_ref="embedding/token",
+            secret_ref=EMBEDDING_SECRET_REF,
         )
     memory_root = (
         Path(config.memory_data_path).expanduser()
@@ -333,28 +367,41 @@ def write_local_profiles(
     try:
         migrations.apply_migrations(connection)
         store = InferenceProfileStore(connection)
-        SQLiteMemorySpaceRepository(connection).ensure("hermes-default", "hermes")
+        if config.memory_mode == "shared":
+            memory_spaces = {"shared": config.memory_space_id_for("hermes")}
+        else:
+            sources = {"hermes", *(item.id for item in config.integrations)}
+            memory_spaces = {
+                source: config.memory_space_id_for(source) for source in sources
+            }
+        repository = SQLiteMemorySpaceRepository(connection)
+        for source, memory_space_id in memory_spaces.items():
+            repository.ensure(memory_space_id, source)
         max_retries = config.advanced.retry_attempts
         max_input = config.advanced.generation_max_input or 12_000
-        max_output = config.advanced.generation_max_output or 2_000
+        # Core's largest built-in semantic contract is the 2,048-token
+        # execution pass. The installer default must be able to execute every
+        # built-in contract without requiring an undocumented override.
+        max_output = config.advanced.generation_max_output or 2_048
         profile_ids: list[str] = []
         for profile in build_generation_profiles(config.generation):
             materialized = InferenceProfile(
                 profile_id=str(profile["profile_id"]),
                 base_url=str(profile["endpoint"]),
                 model=str(profile["model"]),
-                secret_ref="generation/token",
+                secret_ref=GENERATION_SECRET_REF,
                 timeout_seconds=config.generation.timeout_seconds,
                 max_retries=max_retries,
                 max_input_tokens=max_input,
                 max_output_tokens=max_output,
             )
             store.upsert(materialized)
-            store.bind_slot(
-                "hermes-default",
-                slot=str(profile["slot"]),
-                profile_id=materialized.profile_id,
-            )
+            for memory_space_id in memory_spaces.values():
+                store.bind_slot(
+                    memory_space_id,
+                    slot=str(profile["slot"]),
+                    profile_id=materialized.profile_id,
+                )
             profile_ids.append(materialized.profile_id)
 
         if config.embedding.mode == "api" and config.embedding.api is not None:
@@ -363,7 +410,7 @@ def write_local_profiles(
                 profile_id="embedding-default",
                 base_url=embedding.endpoint,
                 model=embedding.model,
-                secret_ref="embedding/token",
+                secret_ref=EMBEDDING_SECRET_REF,
                 timeout_seconds=embedding.timeout_seconds,
                 max_retries=max_retries,
                 max_input_tokens=config.advanced.embedding_max_text_length or 12_000,
@@ -375,25 +422,27 @@ def write_local_profiles(
                 profile_id="embedding-local",
                 base_url="http://127.0.0.1:8766",
                 model=config.embedding.local.catalog_id,
-                secret_ref="embedding/local",
+                secret_ref=LOCAL_EMBEDDING_SECRET_REF,
                 timeout_seconds=60.0,
                 max_retries=max_retries,
                 max_input_tokens=config.advanced.embedding_max_text_length or 12_000,
                 max_output_tokens=2_000,
             )
         store.upsert(embedding_profile)
-        store.bind_slot(
-            "hermes-default",
-            slot="embedding",
-            profile_id=embedding_profile.profile_id,
-        )
+        for memory_space_id in memory_spaces.values():
+            store.bind_slot(
+                memory_space_id,
+                slot="embedding",
+                profile_id=embedding_profile.profile_id,
+            )
         profile_ids.append(embedding_profile.profile_id)
         connection.commit()
     finally:
         connection.close()
     return {
         "database": str(database_path),
-        "memory_space_id": "hermes-default",
+        "memory_space_id": config.memory_space_id_for("hermes"),
+        "memory_space_ids": sorted(memory_spaces.values()),
         "profile_ids": profile_ids,
     }
 

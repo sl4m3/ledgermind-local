@@ -19,6 +19,7 @@ from ledgermind_local.cli import (
     _build_core_gateway,
     _coalesce_optional,
     _command_serve,
+    _embedding_recovery_pending,
     _install_signal_handlers,
     _restore_signal_handlers,
 )
@@ -147,6 +148,56 @@ def test_coalesce_optional_returns_fallback() -> None:
     assert _coalesce_optional("", "default") == "default"
     assert _coalesce_optional(0, "default") == 0
     assert _coalesce_optional("0.0.0.0", "default") == "0.0.0.0"
+
+
+def test_embedding_only_backlog_can_recover_during_secure_startup() -> None:
+    report = {
+        "readiness_reason": "object_facet_not_ready",
+        "terminal_worker_failure": False,
+        "components": {
+            "core": {"ready": True},
+            "inference": {"ready": True},
+            "workers": {"ready": True},
+            "object_facet": {
+                "embedding_backlog": 5,
+                "operational_backlog": 0,
+                "background_backlog": 0,
+            },
+        },
+    }
+
+    assert _embedding_recovery_pending(report) is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("operational_backlog", 1),
+        ("background_backlog", 1),
+        ("embedding_backlog", 0),
+    ],
+)
+def test_embedding_recovery_does_not_hide_other_startup_failures(
+    field: str, value: int
+) -> None:
+    object_facet = {
+        "embedding_backlog": 5,
+        "operational_backlog": 0,
+        "background_backlog": 0,
+        field: value,
+    }
+    report = {
+        "readiness_reason": "object_facet_not_ready",
+        "terminal_worker_failure": False,
+        "components": {
+            "core": {"ready": True},
+            "inference": {"ready": True},
+            "workers": {"ready": True},
+            "object_facet": object_facet,
+        },
+    }
+
+    assert _embedding_recovery_pending(report) is False
 
 
 def test_process_core_backend_builds_process_gateway_without_starting_core(

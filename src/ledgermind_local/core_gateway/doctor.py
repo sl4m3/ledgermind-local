@@ -141,19 +141,25 @@ def build_core_doctor_report(
     )
     signature_verified = signature_report["status"] == "verified"
     if binary.is_file() and signature_allows_launch:
+        knowledge_database_path = paths.resolve_knowledge_database_path(
+            config.knowledge_database_path
+        )
+        core_data_dir = knowledge_database_path.parent
+        core_data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         supervisor = CoreSupervisor(
             [
                 str(binary),
                 "--database",
-                str(paths.resolve_knowledge_database_path(config.knowledge_database_path)),
+                str(knowledge_database_path),
             ],
             startup_timeout_seconds=config.core_startup_timeout_seconds,
             operation_timeout_seconds=config.core_request_timeout_seconds,
-            core_data_dir=paths.core_data_dir,
+            core_data_dir=core_data_dir,
             blocked_data_dirs=(paths.home,),
             rounds_database_path=paths.resolve_rounds_database_path(
                 config.rounds_database_path
             ),
+            runtime_paths=(core_data_dir,),
             isolation_requirements=isolation_requirements,
             strict_isolation=(
                 config.core_security.profile == "secure"

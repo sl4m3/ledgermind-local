@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..models import GenerationConfig
+from ..secret_refs import GENERATION_SECRET_REF
 
 
 def build_generation_profiles(
@@ -19,7 +20,7 @@ def build_generation_profiles(
     background = config.background_model or config.model
     common = {
         "endpoint": config.endpoint,
-        "secret_ref": "generation/token",
+        "secret_ref": GENERATION_SECRET_REF,
         "timeout_seconds": config.timeout_seconds,
         "max_concurrency": config.max_concurrency,
         "structured_json_support": config.structured_json_support,

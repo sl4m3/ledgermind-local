@@ -74,9 +74,14 @@ def connect_integration(
             "enabled": enabled,
             "preflight": preflight,
         }
+    updated = _replace_selection(config, target_id, enabled=enabled)
     try:
         installed = adapter.install(context)
         verified = adapter.verify(context)
+        persist_installer_config(updated, paths)
+        from ..config_writer import write_local_profiles
+
+        write_local_profiles(updated, paths)
     except Exception:
         try:
             adapter.uninstall(context, purge=False)
@@ -86,9 +91,15 @@ def connect_integration(
                 target_id,
                 type(cleanup_error).__name__,
             )
+        try:
+            persist_installer_config(config, paths)
+        except Exception as cleanup_error:  # noqa: BLE001
+            logger.warning(
+                "integration config rollback failed for %s: %s",
+                target_id,
+                type(cleanup_error).__name__,
+            )
         raise
-    updated = _replace_selection(config, target_id, enabled=enabled)
-    persist_installer_config(updated, paths)
     return {
         "status": "passed",
         "integration": target_id,
@@ -102,7 +113,7 @@ def connect_integration(
 
 def _integration_config_path(target_id: str, context: AdapterContext) -> Path:
     environment = get_target_adapter(target_id).runtime_environment(context)
-    key = f"LEDGERMIND_{target_id.upper()}_CONFIG"
+    key = f"LEDGERMIND_{target_id.upper().replace('-', '_')}_CONFIG"
     value = environment.get(key)
     if not value:
         raise AdapterError(f"{target_id} does not expose a mutable integration config")
@@ -201,8 +212,12 @@ def integration_status(*, paths: InstallerPaths) -> dict[str, Any]:
         }
         if target_id in selected and discovery.detected:
             try:
-                item["verify"] = adapter.verify(
+                verification = adapter.verify(
                     AdapterContext(config=config, paths=paths, discovery=discovery)
+                )
+                item["verify"] = verification
+                item["active"] = bool(selected[target_id].enabled) and not bool(
+                    verification.get("activation_required")
                 )
             except Exception as exc:  # noqa: BLE001
                 item["verify"] = {"status": "failed", "error": str(exc)}

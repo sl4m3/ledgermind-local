@@ -144,7 +144,8 @@ def build_process_core_gateway(
     knowledge_database_path = paths.resolve_knowledge_database_path(
         config.knowledge_database_path
     )
-    paths.core_data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    core_data_dir = knowledge_database_path.parent
+    core_data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     signature_verified = False
     if config.verify_core_signature:
         verify_core_binary(
@@ -161,12 +162,12 @@ def build_process_core_gateway(
         [str(command_path), "--database", str(knowledge_database_path)],
         startup_timeout_seconds=config.core_startup_timeout_seconds,
         operation_timeout_seconds=config.core_request_timeout_seconds,
-        core_data_dir=paths.core_data_dir,
+        core_data_dir=core_data_dir,
         blocked_data_dirs=(paths.home,),
         rounds_database_path=paths.resolve_rounds_database_path(
             config.rounds_database_path
         ),
-        runtime_paths=(paths.core_data_dir,),
+        runtime_paths=(core_data_dir,),
         isolation_requirements=requirements,
         strict_isolation=(
             config.core_security.profile == "secure"
@@ -1040,7 +1041,9 @@ class LocalRuntime:
                 raise RuntimeError("Core health check failed")
             self._backup_service = CoreBackupService(
                 gateway=self.core_gateway,
-                core_data_dir=self.paths.core_data_dir,
+                core_data_dir=self.paths.resolve_knowledge_database_path(
+                    self.config.knowledge_database_path
+                ).parent,
                 rounds_database_path=self.database_path,
             )
         except Exception as exc:  # noqa: BLE001 - capture remains available

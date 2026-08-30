@@ -10,6 +10,7 @@ from typing import Any
 
 from ..config_writer import load_installer_config, select_secret_backend
 from ..paths import InstallerPaths
+from ..secret_refs import EMBEDDING_SECRET_REF, GENERATION_SECRET_REF
 
 
 def export_config(
@@ -20,7 +21,7 @@ def export_config(
     if include_secrets:
         backend = select_secret_backend(paths)
         secrets: dict[str, str] = {}
-        for key in ("generation/token", "embedding/token"):
+        for key in (GENERATION_SECRET_REF, EMBEDDING_SECRET_REF):
             value = backend.get(key)
             if value is not None:
                 secrets[key] = value

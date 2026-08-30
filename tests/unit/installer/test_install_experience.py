@@ -70,6 +70,17 @@ def test_schema_v1_target_migrates_to_v2_integration() -> None:
 def test_new_config_does_not_connect_an_agent_implicitly() -> None:
     assert _config().schema_version == 2
     assert _config().integrations == ()
+    assert _config().memory_mode == "per_agent"
+
+
+def test_memory_mode_resolves_shared_or_per_agent_spaces() -> None:
+    config = _config()
+    assert config.memory_space_id_for("hermes") == "hermes-default"
+    assert config.memory_space_id_for("codex") == "codex-default"
+
+    shared = config.model_copy(update={"memory_mode": "shared"})
+    assert shared.memory_space_id_for("hermes") == "shared-default"
+    assert shared.memory_space_id_for("codex") == "shared-default"
 
 
 def test_python_312_compatible_zstandard_bundle_unpack(tmp_path: Path) -> None:

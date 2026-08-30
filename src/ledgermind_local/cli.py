@@ -825,9 +825,10 @@ def _command_serve(args: argparse.Namespace) -> int:
         # content-free bootstrap projection drains; every other not-ready
         # condition remains a hard startup failure.
         bootstrap_initializing = report.get("readiness_reason") == "object_facet_initializing"
-        if bootstrap_initializing:
+        embedding_recovery = _embedding_recovery_pending(report)
+        if bootstrap_initializing or embedding_recovery:
             print(
-                "secure runtime is serving while Core facet catalogue preload is pending",
+                "secure runtime is serving while Core embedding projection is pending",
                 file=sys.stderr,
             )
         else:
@@ -874,6 +875,32 @@ def _command_serve(args: argparse.Namespace) -> int:
         _restore_signal_handlers(installed_handlers)
         runtime.stop()
     return 0
+
+
+def _embedding_recovery_pending(report: dict[str, Any]) -> bool:
+    """Allow healthy workers to drain an embedding-only startup backlog."""
+
+    if report.get("readiness_reason") != "object_facet_not_ready":
+        return False
+    components = report.get("components")
+    if not isinstance(components, dict):
+        return False
+    object_facet = components.get("object_facet")
+    if not isinstance(object_facet, dict):
+        return False
+    required_ready = ("core", "inference", "workers")
+    if any(
+        not isinstance(components.get(name), dict)
+        or not components[name].get("ready")
+        for name in required_ready
+    ):
+        return False
+    return (
+        int(object_facet.get("embedding_backlog") or 0) > 0
+        and int(object_facet.get("operational_backlog") or 0) == 0
+        and int(object_facet.get("background_backlog") or 0) == 0
+        and not bool(report.get("terminal_worker_failure"))
+    )
 
 
 def _build_runtime_supervisor(*, config: LocalConfig, host: str, port: int) -> object:

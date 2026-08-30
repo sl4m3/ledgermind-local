@@ -32,6 +32,9 @@ _PROFILE_KEYWORDS = frozenset(
         "minLength",
         "maxLength",
         "pattern",
+        "$defs",
+        "$ref",
+        "oneOf",
     }
 )
 
@@ -59,6 +62,10 @@ def validate_strict_schema_profile(schema: object) -> dict[str, object]:
     if not isinstance(schema, Mapping):
         raise ValueError("strict schema must be an object")
 
+    definitions = schema.get("$defs", {})
+    if not isinstance(definitions, Mapping):
+        raise ValueError("strict schema $defs must be an object")
+
     def visit(node: object, path: str, *, root: bool = False) -> None:
         if not isinstance(node, Mapping):
             raise ValueError(f"strict schema node {path} must be an object")
@@ -67,8 +74,38 @@ def validate_strict_schema_profile(schema: object) -> dict[str, object]:
             raise ValueError(
                 f"strict schema node {path} uses unsupported keywords: {', '.join(unsupported)}"
             )
+        if "$defs" in node and not root:
+            raise ValueError(f"strict schema node {path} may not declare $defs")
+        reference = node.get("$ref")
+        if reference is not None:
+            if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+                raise ValueError(f"strict schema reference at {path} must be local")
+            definition_name = reference.removeprefix("#/$defs/")
+            if (
+                not definition_name
+                or "/" in definition_name
+                or definition_name not in definitions
+            ):
+                raise ValueError(f"strict schema reference at {path} is unknown")
+            if set(node) != {"$ref"}:
+                raise ValueError(
+                    f"strict schema reference at {path} must not have siblings"
+                )
+            return
+        alternatives = node.get("oneOf")
+        if alternatives is not None:
+            if (
+                not isinstance(alternatives, Sequence)
+                or isinstance(alternatives, (str, bytes, bytearray))
+                or not alternatives
+            ):
+                raise ValueError(
+                    f"strict schema oneOf at {path} must be a non-empty array"
+                )
+            for index, alternative in enumerate(alternatives):
+                visit(alternative, f"{path}.oneOf[{index}]")
         types = _types(node.get("type"))
-        if not types and "enum" not in node:
+        if not types and "enum" not in node and alternatives is None:
             raise ValueError(f"strict schema node {path} must declare a type")
         known = {"object", "array", "string", "integer", "number", "boolean", "null"}
         if any(item not in known for item in types):
@@ -122,6 +159,12 @@ def validate_strict_schema_profile(schema: object) -> dict[str, object]:
                 raise ValueError(f"strict schema minLength exceeds maxLength at {path}")
         if root and "object" not in types:
             raise ValueError("strict semantic schema root must be an object")
+
+        if root:
+            for name, definition in definitions.items():
+                if not isinstance(name, str) or not name or "/" in name:
+                    raise ValueError("strict schema definition name is invalid")
+                visit(definition, f"$.$defs.{name}")
 
     visit(schema, "$", root=True)
     return dict(schema)

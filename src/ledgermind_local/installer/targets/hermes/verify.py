@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +19,12 @@ REQUIRED_HOOKS = {
 }
 
 
-def verify_hermes_plugin(plugin_root: str | Path) -> dict[str, Any]:
+def verify_hermes_plugin(
+    plugin_root: str | Path,
+    *,
+    hermes_binary: str | None = None,
+    hermes_home: str | Path | None = None,
+) -> dict[str, Any]:
     root = Path(plugin_root)
     manifest_path = root / "plugin.yaml"
     if not manifest_path.is_file():
@@ -47,7 +54,42 @@ def verify_hermes_plugin(plugin_root: str | Path) -> dict[str, Any]:
         raise AdapterError("Hermes installation record is invalid") from exc
     if not isinstance(record, dict) or record.get("target") != "hermes":
         raise AdapterError("Hermes installation record has an invalid target")
-    return {"status": "passed", "plugin_root": str(root), "hooks": sorted(hooks)}
+    config_path = root / "config.json"
+    try:
+        plugin_config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise AdapterError("Hermes plugin config is invalid") from exc
+    expected_enabled = bool(plugin_config.get("enabled", True))
+    if hermes_binary is None:
+        raise AdapterError("Hermes CLI is required to verify plugin activation")
+    environment = dict(os.environ)
+    if hermes_home is not None:
+        environment["HERMES_HOME"] = str(Path(hermes_home).expanduser())
+    completed = subprocess.run(
+        [hermes_binary, "plugins", "list", "--plain", "--no-bundled"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+    if completed.returncode != 0:
+        raise AdapterError("Hermes plugin activation status could not be read")
+    matching = [
+        line.strip()
+        for line in completed.stdout.splitlines()
+        if line.strip().endswith("ledgermind-hermes")
+    ]
+    actual_enabled = bool(matching and matching[0].startswith("enabled"))
+    if actual_enabled != expected_enabled:
+        state = "enabled" if expected_enabled else "disabled"
+        raise AdapterError(f"Hermes plugin is not {state}")
+    return {
+        "status": "passed",
+        "plugin_root": str(root),
+        "hooks": sorted(hooks),
+        "enabled": actual_enabled,
+    }
 
 
 __all__ = ["REQUIRED_HOOKS", "verify_hermes_plugin"]

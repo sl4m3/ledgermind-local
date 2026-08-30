@@ -170,7 +170,7 @@ class IntegrationConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: Literal["hermes"]
+    id: Literal["hermes", "codex", "claude-code", "cursor", "opencode", "openclaw"]
     enabled: bool = True
 
 
@@ -184,6 +184,9 @@ class InstallerConfig(BaseModel):
     # Installation must make the semantic language an explicit deployment
     # choice; it is never inferred from user text or the host locale.
     semantic_language: Literal["ru", "en", "es", "pt", "fr", "de", "uk"]
+    # Agents may either share one logical knowledge space or keep independent
+    # spaces while still using the same Local/Core runtime.
+    memory_mode: Literal["shared", "per_agent"] = "per_agent"
     memory_data_path: str | None = None
     generation: GenerationConfig
     embedding: EmbeddingConfig
@@ -208,6 +211,13 @@ class InstallerConfig(BaseModel):
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("integrations must contain unique ids")
         return self
+
+    def memory_space_id_for(self, target_id: str) -> str:
+        """Return the logical memory space injected into an agent adapter."""
+
+        if self.memory_mode == "shared":
+            return "shared-default"
+        return f"{target_id}-default"
 
     @field_validator("memory_data_path")
     @classmethod

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -161,6 +163,10 @@ def _build_parser() -> argparse.ArgumentParser:
     stop = runtime_subparsers.add_parser("stop")
     _runtime_flags(stop)
     stop.add_argument("--force", action="store_true")
+
+    hook = subparsers.add_parser("integration-hook", help=argparse.SUPPRESS)
+    hook.add_argument("--config", type=Path, required=True)
+    hook.add_argument("--event", required=True)
     return parser
 
 
@@ -196,9 +202,9 @@ def _runtime(paths: InstallerPaths) -> RuntimeSupervisor:
     if local.is_file() and local.stat().st_mode & 0o111:
         commands["local"] = (
             str(local),
-            "serve",
             "--home",
             str(paths.data_dir / "local"),
+            "serve",
         )
     if (
         config is not None
@@ -359,6 +365,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(_normalize_argv(raw_argv))
     operation = args.command
     try:
+        if operation == "integration-hook":
+            try:
+                lifecycle = importlib.import_module(
+                    "ledgermind_integrations.adapters.lifecycle"
+                )
+                payload = json.load(sys.stdin)
+                if not isinstance(payload, dict):
+                    payload = {}
+                response = lifecycle.handle_hook(
+                    lifecycle.load_lifecycle_config(args.config), args.event, payload
+                )
+            except Exception:  # noqa: BLE001 -- hooks must never break the agent
+                response = {}
+            if response:
+                context = response.get("additional_context")
+                if isinstance(context, str) and context:
+                    response = {
+                        "hookSpecificOutput": {
+                            "hookEventName": "UserPromptSubmit",
+                            "additionalContext": context,
+                        }
+                    }
+                print(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
+            return 0
         paths = _paths(args)
         if operation == "install" and args.install_command == "schema":
             result = _result("install schema", payload=schema(args.name))

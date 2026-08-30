@@ -9,6 +9,12 @@ from typing import Any
 from ...runtime.supervisor import RuntimeSupervisor
 from ..config_writer import select_secret_backend
 from ..paths import InstallerPaths
+from ..secret_refs import (
+    EMBEDDING_SECRET_REF,
+    GENERATION_SECRET_REF,
+    LEGACY_EMBEDDING_SECRET_REF,
+    LEGACY_GENERATION_SECRET_REF,
+)
 from ..targets.base import AdapterContext
 from ..targets.registry import get_target_adapter
 from .common import remove_bin_link
@@ -67,8 +73,13 @@ def uninstall(
                 shutil.rmtree(custom_memory, ignore_errors=True)
     if purge_config:
         backend = select_secret_backend(paths)
-        backend.delete("generation/token")
-        backend.delete("embedding/token")
+        for secret_ref in (
+            GENERATION_SECRET_REF,
+            EMBEDDING_SECRET_REF,
+            LEGACY_GENERATION_SECRET_REF,
+            LEGACY_EMBEDDING_SECRET_REF,
+        ):
+            backend.delete(secret_ref)
         shutil.rmtree(paths.config_dir, ignore_errors=True)
         shutil.rmtree(paths.data_dir / "local", ignore_errors=True)
     return {

@@ -11,6 +11,20 @@ from ..models import InstallerConfig
 from ..paths import InstallerPaths
 from ..permissions import assert_private
 from ..profiles.probes import probe_embedding_api, probe_generation
+from ..secret_refs import (
+    EMBEDDING_SECRET_REF,
+    GENERATION_SECRET_REF,
+    LEGACY_EMBEDDING_SECRET_REF,
+    LEGACY_GENERATION_SECRET_REF,
+)
+
+
+def _get_secret(backend: object, *refs: str) -> str | None:
+    for ref in refs:
+        value = backend.get(ref)  # type: ignore[attr-defined]
+        if value:
+            return value
+    return None
 
 
 def import_config(
@@ -33,13 +47,17 @@ def import_config(
                 backend.put(key, value)
     probes: dict[str, Any] = {}
     if validate_providers:
-        generation_token = config.generation.token or backend.get("generation/token")
+        generation_token = config.generation.token or _get_secret(
+            backend, GENERATION_SECRET_REF, LEGACY_GENERATION_SECRET_REF
+        )
         if generation_token:
             probes["generation"] = probe_generation(
                 config.generation, token=generation_token
             )
         if config.embedding.mode == "api" and config.embedding.api is not None:
-            token = config.embedding.api.token or backend.get("embedding/token")
+            token = config.embedding.api.token or _get_secret(
+                backend, EMBEDDING_SECRET_REF, LEGACY_EMBEDDING_SECRET_REF
+            )
             if token:
                 probes["embedding"] = probe_embedding_api(
                     config.embedding.api, token=token

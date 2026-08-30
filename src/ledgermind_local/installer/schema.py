@@ -12,6 +12,7 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
     "properties": {
         "schema_version": {"const": 2},
         "semantic_language": {"enum": ["ru", "en", "es", "pt", "fr", "de", "uk"]},
+        "memory_mode": {"enum": ["shared", "per_agent"]},
         "integrations": {
             "type": "array",
             "uniqueItems": True,
@@ -94,7 +95,16 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
             "required": ["id"],
             "additionalProperties": False,
             "properties": {
-                "id": {"enum": ["hermes"]},
+                "id": {
+                    "enum": [
+                        "hermes",
+                        "codex",
+                        "claude-code",
+                        "cursor",
+                        "opencode",
+                        "openclaw",
+                    ]
+                },
                 "enabled": {"type": "boolean"},
             },
         },

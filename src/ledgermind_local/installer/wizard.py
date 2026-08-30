@@ -39,9 +39,13 @@ def build_interactive_config(
             raise ValueError("semantic language must be one of ru, en, es, pt, fr, de, uk")
         endpoint = _ask("Generation endpoint", input_fn=input_fn)
         token = secret_fn("Generation token: ").strip()
-        model = _ask("Generation model", input_fn=input_fn)
+        model = _ask(
+            "Generation model (120B+ recommended; strict JSON Schema required)",
+            input_fn=input_fn,
+        )
         object_resolution_model = _ask(
-            "Object Resolution model (separate profile)", input_fn=input_fn
+            "Object Resolution model (120B+ recommended; strict JSON Schema required)",
+            input_fn=input_fn,
         )
         embedding_mode = _ask(
             "Embeddings mode (api/local)", input_fn=input_fn, default="api"
@@ -83,28 +87,41 @@ def build_interactive_config(
         idle = float(_ask("Idle shutdown seconds", input_fn=input_fn, default="60"))
         ttl = float(_ask("Lease TTL seconds", input_fn=input_fn, default="30"))
         heartbeat = float(_ask("Heartbeat seconds", input_fn=input_fn, default="10"))
-        from .targets.registry import get_target_adapter
+        memory_mode = _ask(
+            "Memory mode for agents (shared/per_agent)",
+            input_fn=input_fn,
+            default="per_agent",
+        ).lower()
+        if memory_mode not in {"shared", "per_agent"}:
+            raise ValueError("memory mode must be shared or per_agent")
+        from .targets.registry import get_target_adapter, target_ids
 
-        hermes = get_target_adapter("hermes").discover()
-        connect_hermes = "no"
-        if hermes.detected:
-            connect_hermes = _ask(
-                "Connect detected Hermes installation (yes/no)",
+        integrations: list[IntegrationConfig] = []
+        for target_id in target_ids():
+            adapter = get_target_adapter(target_id)
+            discovery = adapter.discover()
+            if not discovery.detected:
+                continue
+            answer = _ask(
+                f"Connect detected {adapter.label} installation (yes/no)",
                 input_fn=input_fn,
                 default="yes",
             ).lower()
-            if connect_hermes not in {"yes", "no"}:
-                raise ValueError("Hermes selection must be yes or no")
+            if answer not in {"yes", "no"}:
+                raise ValueError(f"{adapter.label} selection must be yes or no")
+            if answer == "yes":
+                integrations.append(
+                    IntegrationConfig.model_validate(
+                        {"id": target_id, "enabled": True}
+                    )
+                )
         return InstallerConfig(
             semantic_language=cast(
                 Literal["ru", "en", "es", "pt", "fr", "de", "uk"],
                 semantic_language,
             ),
-            integrations=(
-                (IntegrationConfig(id="hermes", enabled=True),)
-                if connect_hermes == "yes"
-                else ()
-            ),
+            integrations=tuple(integrations),
+            memory_mode=cast(Literal["shared", "per_agent"], memory_mode),
             generation=GenerationConfig(
                 endpoint=endpoint,
                 token=token,

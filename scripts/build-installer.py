@@ -28,6 +28,16 @@ def _parser() -> argparse.ArgumentParser:
         "--source", type=Path, required=True, help="bundle Python source root"
     )
     parser.add_argument(
+        "--extra-source",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "additional current source root copied beside --source; use for "
+            "runtime packages such as integrations and protocol"
+        ),
+    )
+    parser.add_argument(
         "--python",
         default=sys.executable,
         help="runtime executable recorded in launcher",
@@ -134,7 +144,7 @@ if [ ! -x "$runtime" ]; then
   mv "$temporary" "$payload_root"
   trap - EXIT INT TERM
 fi
-{key_export}export PYTHONPATH="$payload_root/python/site-packages:$payload_root/python${{PYTHONPATH:+:$PYTHONPATH}}"
+{key_export}export PYTHONPATH="$payload_root/python:$payload_root/python/site-packages${{PYTHONPATH:+:$PYTHONPATH}}"
 exec "$runtime" -m ledgermind_local.installer.cli "$@"
 
 __LEDGERMIND_PAYLOAD_BELOW__
@@ -146,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
     source = args.source.expanduser().resolve()
     if not source.is_dir():
         raise SystemExit(f"source directory does not exist: {source}")
+    extra_sources = [item.expanduser().resolve() for item in args.extra_source]
+    missing_extra = next((item for item in extra_sources if not item.is_dir()), None)
+    if missing_extra is not None:
+        raise SystemExit(f"extra source directory does not exist: {missing_extra}")
     output = args.output.expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     target_source = output.parent / "python"
@@ -198,6 +212,8 @@ from ledgermind_local.installer.cli import main
 raise SystemExit(main(sys.argv[1:]))
 """
         _copy_tree(source, target_source)
+        for extra_source in extra_sources:
+            _copy_tree(extra_source, target_source)
         _copy_dependencies(args.site_packages, target_source / "site-packages")
         staging = output.with_name(f".{output.name}.tmp")
         staging.write_text(launcher, encoding="utf-8")
@@ -207,6 +223,8 @@ raise SystemExit(main(sys.argv[1:]))
         with tempfile.TemporaryDirectory(prefix="ledgermind-installer-") as temporary:
             payload_root = Path(temporary) / "payload"
             _copy_tree(source, payload_root / "python")
+            for extra_source in extra_sources:
+                _copy_tree(extra_source, payload_root / "python")
             _copy_dependencies(
                 args.site_packages, payload_root / "python" / "site-packages"
             )

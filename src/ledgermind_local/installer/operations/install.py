@@ -74,6 +74,7 @@ def install_plan(
         profiles.append(build_local_embedding_plan(config.embedding.local, entry))
     return {
         "integrations": [item.model_dump(mode="json") for item in config.integrations],
+        "memory_mode": config.memory_mode,
         "platform": _platform_name(),
         "memory_data_path": config.memory_data_path or str(paths.memory_data_dir),
         "profiles": profiles,

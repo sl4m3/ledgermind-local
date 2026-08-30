@@ -68,19 +68,67 @@ def _copy_source(source: Path, target: Path) -> None:
         shutil.copy2(source, target)
 
 
-def _copy_hermes_plugin(source: Path, target: Path) -> None:
+def _protocol_package(source: Path | None) -> Path:
+    if source is None:
+        raise SystemExit(
+            "Hermes integration requires --protocol-python for a self-contained payload"
+        )
+    candidates = (source / "ledgermind_protocol", source / "src" / "ledgermind_protocol")
+    package = next((candidate for candidate in candidates if candidate.is_dir()), None)
+    if package is None:
+        raise SystemExit(f"ledgermind_protocol package does not exist under: {source}")
+    return package
+
+
+def _copy_hermes_plugin(
+    source: Path, target: Path, *, protocol_python: Path | None
+) -> None:
     """Accept either a prepared plugin payload or the Hermes package source."""
 
+    if (source / "_vendor" / "ledgermind_integrations").is_dir():
+        _copy_source(source, target)
+        return
     if (source / "plugin.yaml").is_file() and (source / "plugin_entry.py").is_file():
         target.mkdir(parents=True, exist_ok=True)
         _copy_source(source / "plugin.yaml", target / "plugin.yaml")
+        package_root = source.parents[1]
+        if package_root.name != "ledgermind_integrations":
+            raise SystemExit(
+                "Hermes package source must be inside ledgermind_integrations/adapters"
+            )
+        _copy_source(
+            package_root, target / "_vendor" / "ledgermind_integrations"
+        )
+        _copy_source(
+            _protocol_package(protocol_python),
+            target / "_vendor" / "ledgermind_protocol",
+        )
         (target / "__init__.py").write_text(
+            "import sys\n"
+            "from pathlib import Path\n\n"
+            "_VENDOR = Path(__file__).resolve().parent / '_vendor'\n"
+            "if str(_VENDOR) not in sys.path:\n"
+            "    sys.path.insert(0, str(_VENDOR))\n\n"
             "from ledgermind_integrations.adapters.hermes.plugin_entry import register\n\n"
             '__all__ = ["register"]\n',
             encoding="utf-8",
         )
         return
     _copy_source(source, target)
+
+
+def _integration_source(root: Path, target: str) -> Path:
+    """Resolve both the legacy Hermes path and the new adapters-root input."""
+
+    candidate = root / target
+    if candidate.is_dir():
+        return candidate
+    if target == "hermes":
+        return root
+    sibling = root.parent / target
+    if sibling.is_dir():
+        return sibling
+    raise SystemExit(f"{target} integration payload does not exist under: {root}")
 
 
 def _private_key(path: Path):
@@ -142,7 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     bundle = output / "bundle"
     (bundle / "bin").mkdir(parents=True)
     (bundle / "signatures").mkdir()
-    (bundle / "integrations" / "hermes").mkdir(parents=True)
+    for integration in ("hermes", "opencode", "openclaw"):
+        (bundle / "integrations" / integration).mkdir(parents=True)
     (bundle / "protocol" / "schemas").mkdir(parents=True)
     (bundle / "protocol" / "python").mkdir(parents=True)
     (bundle / "defaults").mkdir()
@@ -183,10 +232,17 @@ def main(argv: list[str] | None = None) -> int:
         if not source.is_dir():
             raise SystemExit(f"site-packages directory does not exist: {source}")
         _copy_source(source, bundle / "python" / "site-packages")
+    integrations_source = args.integrations_source.expanduser()
     _copy_hermes_plugin(
-        args.integrations_source.expanduser(),
+        _integration_source(integrations_source, "hermes"),
         bundle / "integrations" / "hermes" / "plugin",
+        protocol_python=args.protocol_python.expanduser()
+        if args.protocol_python
+        else None,
     )
+    for integration in ("opencode", "openclaw"):
+        source = _integration_source(integrations_source, integration)
+        _copy_source(source, bundle / "integrations" / integration / "plugin")
     if args.protocol_schemas:
         _copy_source(
             args.protocol_schemas.expanduser(), bundle / "protocol" / "schemas"
@@ -243,9 +299,9 @@ def main(argv: list[str] | None = None) -> int:
         "set -eu\n"
         'root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\n'
         'if [ -d "$root/python/local/src" ]; then\n'
-        '  export PYTHONPATH="$root/python/site-packages:$root/python/local/src${PYTHONPATH:+:$PYTHONPATH}"\n'
+        '  export PYTHONPATH="$root/python/local/src:$root/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"\n'
         "else\n"
-        '  export PYTHONPATH="$root/python/site-packages:$root/python/local${PYTHONPATH:+:$PYTHONPATH}"\n'
+        '  export PYTHONPATH="$root/python/local:$root/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"\n'
         "fi\n"
         'exec python3 -m ledgermind_local.cli "$@"\n',
         encoding="utf-8",

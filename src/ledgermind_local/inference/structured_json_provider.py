@@ -291,7 +291,9 @@ class StructuredJsonProvider:
                 "configured provider secret is not present"
             ) from exc
 
-        capabilities = self._load_capabilities(profile)
+        capabilities = self._load_capabilities(
+            profile, structured_output_override=requested_mode
+        )
         strict_request = (
             requested_mode == STRICT_JSON_SCHEMA_MODE
             or structured_output_requirement is not None
@@ -299,7 +301,9 @@ class StructuredJsonProvider:
         if strict_request and (
             capabilities is None
             or not capabilities.is_fresh(
-                profile_fingerprint=generation_profile_fingerprint(profile)
+                profile_fingerprint=generation_profile_fingerprint(
+                    profile, structured_output_override=requested_mode
+                )
             )
             or not capabilities.supports(STRICT_JSON_SCHEMA_MODE)
         ):
@@ -549,7 +553,15 @@ class StructuredJsonProvider:
                 )
         return contract, selected_request_mode
 
-    def _load_capabilities(self, profile: InferenceProfile) -> ProviderCapabilities | None:
+    def _load_capabilities(
+        self,
+        profile: InferenceProfile,
+        *,
+        structured_output_override: StructuredOutputMode | None = None,
+    ) -> ProviderCapabilities | None:
+        fingerprint = generation_profile_fingerprint(
+            profile, structured_output_override=structured_output_override
+        )
         stores: list[object] = []
         if self._capability_store is not None:
             stores.append(self._capability_store)
@@ -566,7 +578,7 @@ class StructuredJsonProvider:
                     record_counter(
                         "capability_cache_hits",
                         operation="capability_cache",
-                        provider_profile_fingerprint=generation_profile_fingerprint(profile),
+                        provider_profile_fingerprint=fingerprint,
                         model=profile.model,
                     )
                     return result
@@ -574,7 +586,6 @@ class StructuredJsonProvider:
             if callable(getter):
                 result = getter(profile.profile_id)
                 if isinstance(result, ProviderCapabilities):
-                    fingerprint = generation_profile_fingerprint(profile)
                     if result.profile_fingerprint and not result.is_fresh(
                         profile_fingerprint=fingerprint
                     ):

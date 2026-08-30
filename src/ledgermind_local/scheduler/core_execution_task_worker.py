@@ -218,38 +218,45 @@ class CoreExecutionTaskWorker:
         if self._closed:
             raise RuntimeError("Core execution task worker is closed")
         connection = self._connection_factory(self._database_path)
-        processed = 0
         try:
             migrations.apply_migrations(connection)
+            # Migration helpers may leave a write transaction open.  Do not
+            # retain that connection while executing provider work: embedding
+            # execution uses a second connection for the persistent vector
+            # cache and would otherwise wait on our own SQLite lock until the
+            # provider-task timeout expires.
+            connection.commit()
             spaces = connection.execute(
                 "SELECT memory_space_id FROM memory_spaces ORDER BY memory_space_id"
             ).fetchall()
-            for row in spaces:
-                memory_space_id = str(row[0])
-                try:
-                    polled = self._gateway.poll_execution_tasks(
-                        PollExecutionTasksCommand(
-                            request_id=self._request_id("poll"),
-                            memory_space_id=memory_space_id,
-                            worker_id=self._worker_id,
-                            limit=self._poll_limit,
-                            lease_seconds=self._lease_seconds,
-                        )
-                    )
-                except Exception:  # noqa: BLE001 - isolate one space's backlog
-                    logger.warning(
-                        "Core execution task poll failed",
-                        extra={
-                            "worker": self._worker_id,
-                            "memory_space_id": memory_space_id,
-                            "error_code": "core_poll_error",
-                        },
-                    )
-                    continue
-                processed += len(polled.tasks)
-                self._process_tasks(polled.tasks, memory_space_id)
         finally:
             connection.close()
+
+        processed = 0
+        for row in spaces:
+            memory_space_id = str(row[0])
+            try:
+                polled = self._gateway.poll_execution_tasks(
+                    PollExecutionTasksCommand(
+                        request_id=self._request_id("poll"),
+                        memory_space_id=memory_space_id,
+                        worker_id=self._worker_id,
+                        limit=self._poll_limit,
+                        lease_seconds=self._lease_seconds,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - isolate one space's backlog
+                logger.warning(
+                    "Core execution task poll failed",
+                    extra={
+                        "worker": self._worker_id,
+                        "memory_space_id": memory_space_id,
+                        "error_code": "core_poll_error",
+                    },
+                )
+                continue
+            processed += len(polled.tasks)
+            self._process_tasks(polled.tasks, memory_space_id)
         return processed
 
     def close(self) -> None:
@@ -363,6 +370,7 @@ class CoreExecutionTaskWorker:
             if not submitted.accepted:
                 raise TransientCoreError("Core did not accept execution result")
             return
+        retryable = _execution_result_is_retryable(result)
         self._gateway.fail_execution_task(
             FailExecutionTaskCommand(
                 request_id=self._request_id("fail"),
@@ -370,10 +378,8 @@ class CoreExecutionTaskWorker:
                 memory_space_id=memory_space_id,
                 worker_id=self._worker_id,
                 error_code=_safe_error_code(result.error_code, result.status),
-                retryable=result.status in {"timeout", "cancelled"},
-                retry_after_seconds=60
-                if result.status in {"timeout", "cancelled"}
-                else 0,
+                retryable=retryable,
+                retry_after_seconds=60 if retryable else 0,
             )
         )
 
@@ -434,6 +440,19 @@ def _core_result_payload(result: object) -> dict[str, object]:
                 if key in embedding
             }
     return payload
+
+
+def _execution_result_is_retryable(result: object) -> bool:
+    if getattr(result, "status", None) in {"timeout", "cancelled"}:
+        return True
+    return getattr(result, "error_code", None) in {
+        "provider_timeout",
+        "provider_transport_error",
+        "provider_unavailable",
+        "transport_error",
+        "transient_provider_error",
+        "timeout",
+    }
 
 
 def _local_execution_task(

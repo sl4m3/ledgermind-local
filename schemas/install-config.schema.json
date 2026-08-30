@@ -6,6 +6,7 @@
   "properties": {
     "schema_version": {"const": 2},
     "semantic_language": {"enum": ["ru", "en", "es", "pt", "fr", "de", "uk"]},
+    "memory_mode": {"enum": ["shared", "per_agent"]},
     "integrations": {
       "type": "array",
       "uniqueItems": true,
@@ -59,7 +60,7 @@
       "required": ["id"],
       "additionalProperties": false,
       "properties": {
-        "id": {"enum": ["hermes"]},
+        "id": {"enum": ["hermes", "codex", "claude-code", "cursor", "opencode", "openclaw"]},
         "enabled": {"type": "boolean"}
       }
     },

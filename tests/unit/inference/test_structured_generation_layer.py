@@ -305,6 +305,56 @@ def test_strict_profile_accepts_bounded_local_reference_patterns() -> None:
         validate_strict_schema_profile(invalid)
 
 
+def test_strict_profile_accepts_core_local_definitions() -> None:
+    schema = {
+        "$defs": {
+            "claim": {
+                "type": "object",
+                "properties": {"content": {"type": "string"}},
+                "required": ["content"],
+                "additionalProperties": False,
+            }
+        },
+        "type": "object",
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {"$ref": "#/$defs/claim"},
+                        {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": False,
+                        },
+                    ]
+                },
+            }
+        },
+        "required": ["claims"],
+        "additionalProperties": False,
+    }
+
+    assert validate_strict_schema_profile(schema) == schema
+
+
+def test_strict_profile_rejects_external_or_unknown_refs() -> None:
+    schema = {
+        "$defs": {},
+        "type": "object",
+        "properties": {"value": {"$ref": "https://example.invalid/schema"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+    with pytest.raises(ValueError, match="must be local"):
+        validate_strict_schema_profile(schema)
+
+    schema["properties"]["value"] = {"$ref": "#/$defs/missing"}
+    with pytest.raises(ValueError, match="is unknown"):
+        validate_strict_schema_profile(schema)
+
+
 def test_openai_provider_merges_non_secret_extra_body_without_overriding_contract() -> None:
     seen: dict[str, object] = {}
 

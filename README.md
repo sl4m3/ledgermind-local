@@ -135,6 +135,14 @@ installer non-interactively: it asks the user for deployment choices, writes a
 private (`0600`) current-schema config, then executes one command and consumes its
 JSON result:
 
+Use a generation model with at least 120B parameters. Its provider endpoint
+must implement strict JSON Schema structured outputs; plain JSON mode is not a
+substitute. All full provider-backed benchmark and integration runs reported
+for the current implementation used the tested reference model
+`deepseek/deepseek-v4-flash-0731`. Alternative models are supported only when
+they satisfy the same capability requirements. The installer verifies strict
+structured-output support with a provider probe.
+
 ```bash
 curl -fsSL https://github.com/sl4m3/ledgermind/releases/latest/download/install.sh \
   | sh -s -- install --non-interactive --config /secure/install.json --json
@@ -143,10 +151,18 @@ curl -fsSL https://github.com/sl4m3/ledgermind/releases/latest/download/install.
 Provider credentials should be supplied through `token_env`, `token_stdin`, or
 an existing `secret_ref`; the persisted installer config never contains the
 token value. One platform installation may connect several agent integrations.
+Set `memory_mode` to `shared` to give those agents one knowledge space, or to
+`per_agent` to keep their knowledge separate. The interactive wizard asks for
+the same choice and defaults to `per_agent` for compatibility.
 Their lifecycle is independent from the platform transaction:
 
 ```bash
 ledgermind integrations connect hermes --json
+ledgermind integrations connect codex --json
+ledgermind integrations connect claude-code --json
+ledgermind integrations connect cursor --json
+ledgermind integrations connect opencode --json
+ledgermind integrations connect openclaw --json
 ledgermind integrations disable hermes --json
 ledgermind integrations enable hermes --json
 ledgermind integrations disconnect hermes --json
@@ -154,8 +170,10 @@ ledgermind integrations disconnect hermes --json
 
 The states are intentionally distinct: `installed` means the LedgerMind
 platform exists, `connected` means an adapter is registered, `enabled` means it
-will attach to future agent sessions, and `active` means a live session holds a
-runtime lease. A failed agent connection returns a partial result and never
+will attach to future agent sessions, and `active` means the installed adapter
+is enabled and has no remaining activation step. Codex CLI requires the user to
+review and trust newly installed hooks with `/hooks`; status reports this step
+instead of claiming that the integration is active. A failed agent connection returns a partial result and never
 rolls back a successfully verified platform installation.
 
 Install data follows XDG directories. Signed manifests, bundle artifacts,
