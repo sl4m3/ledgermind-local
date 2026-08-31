@@ -14,6 +14,7 @@ from ...inference.strict import (
     canonical_digest,
     validate_strict_schema_profile,
 )
+from ...inference.providers.openai_compatible import provider_request_headers
 from ..models import EmbeddingApiConfig, GenerationConfig
 from .embedding_api import OpenAICompatibleEmbeddingProvider
 
@@ -72,10 +73,7 @@ def probe_generation(
             endpoint += "/chat/completions"
         response = active.post(
             endpoint,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
+            headers=provider_request_headers(endpoint, token),
             json={
                 "model": config.model,
                 "messages": [
