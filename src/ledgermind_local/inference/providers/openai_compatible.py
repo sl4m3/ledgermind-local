@@ -17,8 +17,8 @@ import httpx
 
 from ..cancellation import CancellationToken
 from ..profiles import TokenParameter
-from ..strict import STRICT_JSON_SCHEMA_MODE
 from ..provider_telemetry import record_http_attempt
+from ..strict import STRICT_JSON_SCHEMA_MODE
 from .base import (
     InferenceProvider,
     ModelRequest,
@@ -35,10 +35,26 @@ from .base import (
 )
 
 DEFAULT_TOOL_NAME = "submit_structured_result"
+OPENROUTER_SITE_URL = "https://ledgermind.org"
+OPENROUTER_APP_TITLE = "LedgerMind"
 _PROMPT_ONLY_SUFFIX = (
     "\n\nReturn only one JSON object. Do not use Markdown. "
     "Do not add explanations."
 )
+
+
+def provider_request_headers(endpoint: str, api_key: str) -> dict[str, str]:
+    """Build provider headers and identify LedgerMind to OpenRouter."""
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    host = (urlparse(endpoint).hostname or "").casefold().rstrip(".")
+    if host in {"openrouter.ai", "www.openrouter.ai"}:
+        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+        headers["X-Title"] = OPENROUTER_APP_TITLE
+    return headers
 
 
 def _contract_schema(request: ModelRequest) -> dict[str, object]:
@@ -486,10 +502,7 @@ class OpenAICompatibleProvider(InferenceProvider):
             try:
                 response = self._client.post(
                     f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=provider_request_headers(self.base_url, self._api_key),
                     json=payload,
                     timeout=self.timeout,
                 )

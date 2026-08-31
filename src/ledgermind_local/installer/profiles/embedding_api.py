@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ...inference.provider_telemetry import record_http_attempt
+from ...inference.providers.openai_compatible import provider_request_headers
 
 
 class EmbeddingProviderError(RuntimeError):
@@ -109,10 +110,7 @@ class OpenAICompatibleEmbeddingProvider:
         try:
             response = self._client.post(
                 self.endpoint,
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "Content-Type": "application/json",
-                },
+                headers=provider_request_headers(self.endpoint, self.token),
                 json=payload,
                 timeout=self.timeout,
             )

@@ -72,6 +72,29 @@ def test_openai_compatible_provider_posts_minimal_json_request_and_parses_respon
     provider.close()
 
 
+def test_openrouter_provider_identifies_ledger_mind_to_openrouter() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update({key.lower(): value for key, value in request.headers.items()})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    provider = OpenAICompatibleProvider(
+        base_url="https://openrouter.ai/api/v1",
+        api_key="secret",
+        max_retries=0,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.complete_json(_request())
+    provider.close()
+
+    assert seen["http-referer"] == "https://ledgermind.org"
+    assert seen["x-title"] == "LedgerMind"
+
+
 def test_openai_compatible_provider_rejects_auth_failure_without_secret_in_error() -> (
     None
 ):
