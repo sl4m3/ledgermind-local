@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 import time
 from collections.abc import Sequence
 from urllib.error import HTTPError, URLError
@@ -46,6 +47,88 @@ class RuntimeSupervisor:
         if self.embedding_command is not None:
             self.commands.setdefault("embedding", self.embedding_command)
         self.processes = ProcessManager()
+
+    @staticmethod
+    def _live_pid(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            if isinstance(value, int):
+                pid = value
+            elif isinstance(value, str):
+                pid = int(value)
+            else:
+                return None
+            if pid <= 0:
+                return None
+            os.kill(pid, 0)
+        except (TypeError, ValueError, ProcessLookupError, PermissionError, OSError):
+            return None
+        return pid
+
+    def _idle_reaper_command(self) -> tuple[str, ...] | None:
+        """Return the installed CLI command used by the detached idle watcher."""
+
+        installer = self.paths.current_link / "bin" / "ledgermind"
+        if not installer.is_file() or not os.access(installer, os.X_OK):
+            return None
+        command = [str(installer), "runtime", "_idle-reap"]
+        if self.paths.home_override is not None:
+            command.extend(("--home", str(self.paths.home_override)))
+        return tuple(command)
+
+    @staticmethod
+    def _reaper_environment() -> dict[str, str]:
+        environment: dict[str, str] = {}
+        for name in (
+            "PATH",
+            "LANG",
+            "LC_ALL",
+            "HOME",
+            "USER",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ):
+            value = os.environ.get(name)
+            if value:
+                environment[name] = value
+        return environment
+
+    def _ensure_idle_reaper(self) -> int | None:
+        """Keep exactly one detached watcher for an installed runtime."""
+
+        state = load_state(self.paths.runtime_state)
+        existing = self._live_pid(state.get("idle_reaper_pid"))
+        if existing is not None:
+            return existing
+        command = self._idle_reaper_command()
+        if command is None:
+            return None
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+            env=self._reaper_environment(),
+        )
+        state = load_state(self.paths.runtime_state)
+        state["idle_reaper_pid"] = process.pid
+        state["last_transition"] = time.time()
+        write_state(self.paths.runtime_state, state)
+        return process.pid
+
+    def _set_idle_since(self, value: float | None) -> None:
+        state = load_state(self.paths.runtime_state)
+        if value is None:
+            state.pop("idle_since", None)
+        else:
+            state["idle_since"] = value
+        state["last_transition"] = time.time()
+        write_state(self.paths.runtime_state, state)
 
     def _default_commands(self) -> dict[str, Sequence[str]]:
         raw = os.environ.get("LEDGERMIND_LOCAL_COMMAND", "").strip()
@@ -201,6 +284,8 @@ class RuntimeSupervisor:
                     self._start()
                 else:
                     self._write(running=True)
+                self._set_idle_since(None)
+                self._ensure_idle_reaper()
             except BaseException:
                 self.leases.release(lease.lease_id)
                 raise
@@ -220,6 +305,8 @@ class RuntimeSupervisor:
             ):
                 self._start()
             self._write(running=True)
+            self._set_idle_since(None)
+            self._ensure_idle_reaper()
             return {**lease.as_dict(), "endpoint": self.endpoint}
 
     def release(self, lease_id: str) -> dict[str, object]:
@@ -245,6 +332,8 @@ class RuntimeSupervisor:
                         running=bool(current.get("running", True)),
                         last_release_at=released_at,
                     )
+                    self._set_idle_since(released_at)
+                    self._ensure_idle_reaper()
             else:
                 self._write(running=True)
             return {
@@ -281,6 +370,41 @@ class RuntimeSupervisor:
                 "expired_leases": list(expired),
                 "processes": state.get("processes", {}),
             }
+
+    def watch_idle(self, *, poll_interval_seconds: float = 0.5) -> dict[str, object]:
+        """Watch leases until the installed runtime reaches its idle deadline."""
+
+        poll_interval = max(float(poll_interval_seconds), 0.05)
+        while True:
+            with InstallerLock(self.paths.state_dir / "runtime.lock"):
+                self.leases.reap_expired()
+                active = self.leases.active()
+                state = load_state(self.paths.runtime_state)
+                if not state.get("running"):
+                    return {"stopped": False, "reason": "runtime_not_running"}
+                if not self._all_commands_running(state.get("processes", {})):
+                    self._write(running=False)
+                    return {"stopped": False, "reason": "runtime_process_missing"}
+                now = time.time()
+                if active:
+                    if state.get("idle_since") is not None:
+                        self._set_idle_since(None)
+                else:
+                    idle_since = state.get("idle_since")
+                    if not isinstance(idle_since, int | float):
+                        idle_since = now
+                        self._set_idle_since(idle_since)
+                    if should_shutdown(
+                        active_leases=0,
+                        leased_tasks=0,
+                        pending_writes=0,
+                        last_release_at=float(idle_since),
+                        idle_grace_seconds=self.idle_shutdown_seconds,
+                        now=now,
+                    ):
+                        stopped = self._stop(force=True)
+                        return {**stopped, "reason": "idle_timeout"}
+            time.sleep(poll_interval)
 
     def stop(self, *, force: bool = False) -> dict[str, object]:
         with InstallerLock(self.paths.state_dir / "runtime.lock"):

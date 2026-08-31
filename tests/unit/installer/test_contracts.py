@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -388,6 +389,86 @@ def test_runtime_idle_grace_starts_at_the_current_release(
         assert supervisor.status()["running"] is True
     finally:
         supervisor.stop(force=True)
+
+
+def test_runtime_idle_watcher_stops_after_grace(tmp_path: Path) -> None:
+    supervisor = RuntimeSupervisor(
+        InstallerPaths(home_override=tmp_path),
+        commands={"local": ("/bin/sleep", "60")},
+        idle_shutdown_seconds=0.05,
+    )
+    lease = supervisor.acquire(client="agent", session_id="one")
+    supervisor.release(str(lease["lease_id"]))
+
+    result = supervisor.watch_idle(poll_interval_seconds=0.01)
+
+    assert result["stopped"] is True
+    assert result["reason"] == "idle_timeout"
+    assert supervisor.status()["running"] is False
+
+
+def test_runtime_idle_reaper_preserves_home_override(tmp_path: Path) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    installer = paths.current_link / "bin" / "ledgermind"
+    installer.parent.mkdir(parents=True)
+    installer.write_text("#!/bin/sh\n", encoding="utf-8")
+    installer.chmod(0o700)
+    supervisor = RuntimeSupervisor(paths, commands={"local": ("/bin/sleep", "60")})
+
+    assert supervisor._idle_reaper_command() == (
+        str(installer),
+        "runtime",
+        "_idle-reap",
+        "--home",
+        str(tmp_path),
+    )
+
+
+def test_runtime_idle_watcher_reaps_crashed_agent_lease(tmp_path: Path) -> None:
+    supervisor = RuntimeSupervisor(
+        InstallerPaths(home_override=tmp_path),
+        commands={"local": ("/bin/sleep", "60")},
+        idle_shutdown_seconds=0.05,
+        lease_ttl_seconds=0.05,
+    )
+    supervisor.acquire(client="agent", session_id="crashed")
+
+    result = supervisor.watch_idle(poll_interval_seconds=0.01)
+
+    assert result["stopped"] is True
+    assert result["reason"] == "idle_timeout"
+    status = supervisor.status()
+    assert status["running"] is False
+    assert status["active_leases"] == []
+
+
+def test_runtime_idle_watcher_cancels_and_rearms_for_new_lease(
+    tmp_path: Path,
+) -> None:
+    supervisor = RuntimeSupervisor(
+        InstallerPaths(home_override=tmp_path),
+        commands={"local": ("/bin/sleep", "60")},
+        idle_shutdown_seconds=0.12,
+    )
+    first = supervisor.acquire(client="agent", session_id="one")
+    supervisor.release(str(first["lease_id"]))
+    outcome: dict[str, object] = {}
+
+    def watch() -> None:
+        outcome.update(supervisor.watch_idle(poll_interval_seconds=0.01))
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    time.sleep(0.04)
+    second = supervisor.acquire(client="agent", session_id="two")
+    time.sleep(0.1)
+    assert supervisor.status()["running"] is True
+    supervisor.release(str(second["lease_id"]))
+    watcher.join(timeout=1)
+
+    assert not watcher.is_alive()
+    assert outcome["stopped"] is True
+    assert outcome["reason"] == "idle_timeout"
 
 
 def test_runtime_status_rejects_stale_running_state(tmp_path: Path) -> None:

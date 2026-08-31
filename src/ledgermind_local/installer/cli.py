@@ -209,6 +209,8 @@ def _build_parser() -> argparse.ArgumentParser:
     stop = runtime_subparsers.add_parser("stop")
     _runtime_flags(stop)
     stop.add_argument("--force", action="store_true")
+    idle_reap = runtime_subparsers.add_parser("_idle-reap", help=argparse.SUPPRESS)
+    _runtime_flags(idle_reap)
 
     hook = subparsers.add_parser("integration-hook", help=argparse.SUPPRESS)
     hook.add_argument("--config", type=Path, required=True)
@@ -861,6 +863,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload = supervisor.release(args.lease_id)
             elif args.runtime_command == "status":
                 payload = supervisor.status()
+            elif args.runtime_command == "_idle-reap":
+                payload = supervisor.watch_idle()
             else:
                 payload = supervisor.stop(force=bool(args.force))
             return _emit(

@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.0.0b2 - 2026-08-31
+
+- Added a detached idle watcher so Core and Local stop after the configured
+  grace period when the final agent lease is released or expires.
+- Cancelled and re-armed idle shutdown when another agent acquires a lease.
+- Preserved explicit `--home` roots in the watcher for isolated and rootless
+  installations.
+
 ## 4.0.0b1 - 2026-08-30
 
 - Made repeated installation explicit and non-destructive: users choose to add

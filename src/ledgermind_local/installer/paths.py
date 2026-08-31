@@ -16,8 +16,10 @@ class InstallerPaths:
 
     def __init__(self, *, home_override: str | Path | None = None) -> None:
         home = Path.home()
+        self.home_override: Path | None = None
         if home_override is not None:
             root = Path(home_override).expanduser().absolute()
+            self.home_override = root
             self.config_home = root / ".config"
             self.data_home = root / ".local" / "share"
             self.state_home = root / ".local" / "state"
