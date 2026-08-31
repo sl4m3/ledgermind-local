@@ -344,6 +344,44 @@ def test_update_uses_installed_provider_configuration(
     assert captured["embedding_stdin"] is None
 
 
+def test_failed_update_restores_local_database_and_skips_duplicate_provider_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    update_module = importlib.import_module(
+        "ledgermind_local.installer.operations.update"
+    )
+    paths = InstallerPaths(home_override=tmp_path / "install-home")
+    paths.ensure()
+    previous_release = paths.release_dir("previous")
+    previous_release.mkdir()
+    paths.current_link.symlink_to(previous_release)
+    database = paths.memory_data_dir / "rounds.db"
+    database.write_bytes(b"original-database")
+
+    def fake_install(**_kwargs: Any) -> dict[str, Any]:
+        database.write_bytes(b"partially-upgraded-database")
+        return {"status": "success", "release_version": "candidate"}
+
+    def failing_doctor(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["probe_providers"] is False
+        return {"status": "failed"}
+
+    monkeypatch.setattr(update_module, "install", fake_install)
+    monkeypatch.setattr(update_module, "doctor", failing_doctor)
+
+    with pytest.raises(RuntimeError, match="previous release was retained"):
+        update_module.update(
+            config=_config(),
+            paths=paths,
+            manifest_path=tmp_path / "manifest.json",
+            bundle=tmp_path / "bundle.tar.zst",
+            skip_provider_probe=True,
+        )
+
+    assert paths.current_link.resolve() == previous_release
+    assert database.read_bytes() == b"original-database"
+
+
 def test_provider_reconfiguration_preserves_memory_and_agents() -> None:
     existing = _config().model_copy(
         update={
