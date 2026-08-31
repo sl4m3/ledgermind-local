@@ -73,6 +73,14 @@ def _ensure_local_server_token(paths: InstallerPaths) -> Path:
     return target
 
 
+def _write_local_embedding_token(paths: InstallerPaths, token: str) -> Path:
+    target = paths.data_dir / "embedding" / "server.token"
+    ensure_private_dir(target.parent)
+    target.write_text(token + "\n", encoding="utf-8")
+    os.chmod(target, 0o600)
+    return target
+
+
 def select_secret_backend(paths: InstallerPaths) -> SecretBackend:
     """Return the one canonical provider-secret store used by Local.
 
@@ -215,6 +223,7 @@ def write_installer_config(
         )
         backend.put(generation_ref, generation_token)
     profiles: list[dict[str, Any]] = []
+    local_embedding_token_file: Path | None = None
     for generation_profile in build_generation_profiles(config.generation):
         profiles.append(
             {
@@ -251,13 +260,20 @@ def write_installer_config(
         )
     else:
         assert config.embedding.local is not None
+        local_embedding_token = backend.get(LOCAL_EMBEDDING_SECRET_REF)
+        if not local_embedding_token:
+            local_embedding_token = secrets.token_urlsafe(32)
+            backend.put(LOCAL_EMBEDDING_SECRET_REF, local_embedding_token)
+        local_embedding_token_file = _write_local_embedding_token(
+            paths, local_embedding_token
+        )
         profiles.append(
             {
                 "profile_id": "embedding-local",
                 "slot": "embedding",
                 "endpoint": "http://127.0.0.1:8766",
                 "model": config.embedding.local.catalog_id,
-                "secret_ref": None,
+                "secret_ref": LOCAL_EMBEDDING_SECRET_REF,
                 "device": config.embedding.local.device,
                 "batch_size": config.embedding.local.batch_size,
                 "concurrency": config.embedding.local.concurrency,
@@ -272,6 +288,11 @@ def write_installer_config(
         "secrets": str(paths.secrets_file),
         "runtime_token_file": str(runtime_token),
         "server_token_file": str(server_token),
+        "local_embedding_token_file": (
+            str(local_embedding_token_file)
+            if local_embedding_token_file is not None
+            else None
+        ),
         "profile_ids": [item["profile_id"] for item in profiles],
     }
 
@@ -318,6 +339,11 @@ def build_local_config(
             enabled=True,
             model_path=model_path,
             gpu_layers=99 if device != "cpu" else 0,
+            provider_mode="api",
+            endpoint="http://127.0.0.1:8766",
+            model=config.embedding.local.catalog_id,
+            dimensions=config.embedding.local.dimensions,
+            batch_size=config.embedding.local.batch_size,
         )
     elif config.embedding.mode == "api" and config.embedding.api is not None:
         embedding = LocalEmbeddingConfig(

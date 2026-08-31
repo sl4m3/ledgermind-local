@@ -39,6 +39,7 @@ def update(
         paths.secrets_file,
         paths.config_dir / "local-config.json",
         paths.data_dir / "local" / "config.json",
+        paths.data_dir / "embedding" / "server.token",
     ):
         if path.is_file():
             backups[path] = (True, path.read_bytes(), path.stat().st_mode & 0o777)

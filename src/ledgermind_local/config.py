@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -16,6 +17,7 @@ from pydantic import (
 )
 
 CURRENT_CONFIG_VERSION = 2
+_LANGUAGE_TAG = re.compile(r"^[A-Za-z]{2,8}(?:[-_][A-Za-z0-9]{1,8})*$")
 
 
 class EmbeddingConfig(BaseModel):
@@ -156,7 +158,7 @@ class LocalConfig(BaseModel):
 
     config_version: int = Field(ge=1)
     # Runtime language is deployment configuration, not request metadata.
-    semantic_language: Literal["ru", "en", "es", "pt", "fr", "de", "uk"]
+    semantic_language: str
     bind_host: str = "127.0.0.1"
     bind_port: int = Field(default=8765, ge=1, le=65535)
     rounds_database_path: str = Field(
@@ -185,6 +187,23 @@ class LocalConfig(BaseModel):
     raw_round_retention_days: int = Field(default=30, ge=1)
     allow_remote_bind: bool = False
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+
+    @field_validator("semantic_language")
+    @classmethod
+    def _normalize_semantic_language(cls, value: str) -> str:
+        raw = value.strip().replace("_", "-")
+        if not _LANGUAGE_TAG.fullmatch(raw):
+            raise ValueError("semantic_language must be a valid BCP-47 language tag")
+        parts = raw.split("-")
+        canonical = [parts[0].lower()]
+        for part in parts[1:]:
+            if len(part) == 2 and part.isalpha():
+                canonical.append(part.upper())
+            elif len(part) == 4 and part.isalpha():
+                canonical.append(part.title())
+            else:
+                canonical.append(part.lower())
+        return "-".join(canonical)
 
     @property
     def database_path(self) -> str:

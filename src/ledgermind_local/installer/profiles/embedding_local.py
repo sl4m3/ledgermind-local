@@ -22,6 +22,12 @@ def build_local_embedding_plan(
         raise ValueError(
             f"signed model does not support selected device: {selected.kind}"
         )
+    dimensions = int(catalog_entry.get("dimensions", 0))
+    runtime_id = str(catalog_entry.get("runtime_id", "")).strip()
+    if dimensions <= 0:
+        raise ValueError("signed local embedding catalog entry has no dimensions")
+    if not runtime_id:
+        raise ValueError("signed local embedding catalog entry has no runtime id")
     return {
         "catalog_id": config.catalog_id,
         "device": selected.kind,
@@ -32,8 +38,8 @@ def build_local_embedding_plan(
         "threads": config.threads,
         "gpu_allocation": config.gpu_allocation,
         "auto_start": config.auto_start,
-        "dimensions": int(catalog_entry.get("dimensions", 0)),
-        "runtime_id": catalog_entry.get("runtime_id"),
+        "dimensions": dimensions,
+        "runtime_id": runtime_id,
     }
 
 

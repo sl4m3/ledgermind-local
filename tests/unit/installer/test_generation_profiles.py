@@ -38,6 +38,7 @@ def test_openrouter_runtime_matches_probe_reasoning_and_route_controls() -> None
                 "order": ["baidu/fp8", "deepinfra/fp8"],
                 "only": ["baidu/fp8", "deepinfra/fp8"],
                 "allow_fallbacks": True,
+                "require_parameters": True,
             },
         }
 
@@ -56,6 +57,7 @@ def test_openrouter_single_route_remains_strictly_pinned() -> None:
             "order": ["baidu/fp8"],
             "only": ["baidu/fp8"],
             "allow_fallbacks": False,
+            "require_parameters": True,
         }
         for profile in profiles
     )
@@ -76,8 +78,7 @@ def test_generic_runtime_disables_reasoning_with_openai_compatible_control() -> 
     )
 
     assert all(
-        profile["extra_body"] == {"reasoning_effort": "none"}
-        for profile in profiles
+        profile["extra_body"] == {"reasoning_effort": "none"} for profile in profiles
     )
 
 
@@ -94,7 +95,6 @@ def test_nvidia_runtime_uses_native_profile_and_disables_thinking() -> None:
 
     assert all(profile["provider_kind"] == "nvidia_nim" for profile in profiles)
     assert all(
-        profile["extra_body"]
-        == {"chat_template_kwargs": {"enable_thinking": False}}
+        profile["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
         for profile in profiles
     )

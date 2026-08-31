@@ -82,7 +82,10 @@ def _strict_probe_output(payload: object) -> bool:
         and payload.get("state") == "ok"
         and isinstance(payload.get("items"), list)
         and 1 <= len(payload["items"]) <= 2
-        and all(isinstance(item, int) and not isinstance(item, bool) for item in payload["items"])
+        and all(
+            isinstance(item, int) and not isinstance(item, bool)
+            for item in payload["items"]
+        )
     )
 
 
@@ -157,6 +160,7 @@ def _probe_generation_single(
                     "order": routes,
                     "only": routes,
                     "allow_fallbacks": bool(config.fallback_routes),
+                    "require_parameters": True,
                 }
         elif provider.profile_id == "nvidia_nim":
             request_payload.pop("response_format")
@@ -233,28 +237,12 @@ def _probe_generation_single(
 def probe_generation(
     config: GenerationConfig, *, token: str, client: httpx.Client | None = None
 ) -> dict[str, Any]:
-    """Verify every distinct configured generation model on the exact route."""
+    """Verify the one model used by the complete semantic pipeline."""
 
-    models = tuple(
-        dict.fromkeys(
-            model
-            for model in (
-                config.operational_model or config.model,
-                config.object_resolution_model,
-                config.background_model or config.model,
-            )
-            if model
-        )
-    )
-    results: list[dict[str, Any]] = []
-    for model in models:
-        candidate = config.model_copy(update={"model": model})
-        results.append(
-            _probe_generation_single(candidate, token=token, client=client)
-        )
-    primary = dict(results[0])
-    primary["probed_models"] = list(models)
-    primary["model_probes"] = results
+    result = _probe_generation_single(config, token=token, client=client)
+    primary = dict(result)
+    primary["probed_models"] = [config.model]
+    primary["model_probes"] = [result]
     return primary
 
 
@@ -309,4 +297,57 @@ def probe_embedding_api(
         provider.close()
 
 
-__all__ = ["probe_embedding_api", "probe_generation"]
+def discover_embedding_dimensions(
+    config: EmbeddingApiConfig,
+    *,
+    token: str,
+    client: httpx.Client | None = None,
+) -> int:
+    """Infer vector width from one real embedding instead of user input."""
+
+    if not token:
+        raise ProviderProbeError("embedding token is empty")
+    owns_client = client is None
+    active = client or httpx.Client(timeout=config.timeout_seconds)
+    endpoint = config.endpoint.rstrip("/") + "/embeddings"
+    try:
+        response = active.post(
+            endpoint,
+            headers=provider_request_headers(endpoint, token),
+            json={"model": config.model, "input": ["LedgerMind dimension probe"]},
+            timeout=config.timeout_seconds,
+        )
+        _safe_status(response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ProviderProbeError("embedding response is not JSON") from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
+        embedding = (
+            data[0].get("embedding")
+            if isinstance(data, list) and data and isinstance(data[0], dict)
+            else None
+        )
+        if (
+            not isinstance(embedding, list)
+            or not embedding
+            or any(not isinstance(value, (int, float)) for value in embedding)
+        ):
+            raise ProviderProbeError("embedding response has no numeric vector")
+        return len(embedding)
+    except httpx.TimeoutException as exc:
+        raise ProviderProbeError("embedding dimension probe timed out") from exc
+    except httpx.RequestError as exc:
+        raise ProviderProbeError(
+            f"embedding dimension probe failed: {type(exc).__name__}"
+        ) from exc
+    finally:
+        if owns_client:
+            active.close()
+
+
+__all__ = [
+    "discover_embedding_dimensions",
+    "probe_embedding_api",
+    "probe_generation",
+]

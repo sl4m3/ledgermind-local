@@ -36,9 +36,16 @@ def install_runtime(
     ensure_private_dir(destination.parent)
     shutil.copytree(source, destination)
     for name, expected in dict(entry.get("runtime_sha256", {})).items():
-        file_path = destination / str(name)
+        relative = Path(str(name).replace("\\", "/"))
+        if relative.is_absolute() or ".." in relative.parts or relative == Path("."):
+            raise ConfigurationError("embedding runtime contains an unsafe file path")
+        file_path = destination / relative
         if not file_path.is_file() or sha256_file(file_path) != str(expected).lower():
             raise ConfigurationError(f"embedding runtime checksum mismatch: {name}")
+    runtime_python = destination / "bin" / "python3"
+    if not runtime_python.is_file():
+        raise ConfigurationError("embedding runtime has no bin/python3 executable")
+    runtime_python.chmod(0o700)
     return destination
 
 

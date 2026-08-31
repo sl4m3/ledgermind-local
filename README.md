@@ -131,11 +131,15 @@ ledgermind doctor --json
 ledgermind runtime status --json
 ```
 
-Without arguments, `install.sh` starts the human wizard. It asks for the
-semantic language, generation endpoint and models, an optional OpenRouter
-provider chain, embeddings, shared or per-agent memory, and the agents to
-connect. It then shows a review screen before changing the system. Provider
-credentials and persisted configuration are private (`0600`).
+Without arguments, `install.sh` starts a navigable terminal wizard (with a
+line-mode fallback for restricted terminals and SSH). It checks the Linux
+host, lets the user choose English, Spanish, German, French, Russian, or any
+custom BCP-47 memory language, detects agents, selects shared or per-agent
+memory, and then configures generation and embeddings. One generation model is
+used throughout the complete knowledge pipeline; there is no separate Object
+Resolution model prompt. The token is entered privately and displayed only as
+a masked fingerprint during review. Nothing is installed before confirmation.
+Provider credentials and persisted configuration are private (`0600`).
 
 Use a generation model with at least 120B parameters. Its provider endpoint
 must implement strict JSON Schema structured outputs; plain JSON mode is not a
@@ -143,11 +147,19 @@ substitute. All full provider-backed benchmark and integration runs reported
 for the current implementation used the tested reference model
 `deepseek/deepseek-v4-flash-0731`. Alternative models are supported only when
 they satisfy the same capability requirements. The installer verifies strict
-structured-output support with a provider probe. For OpenRouter it also asks
-for an exact provider route (for example `baidu/fp8`), sends that route during
-the probe and every production request, and permits at most one explicit
-fallback. A capability verified on one model/route cannot be reused after
-either changes.
+structured-output support with a real provider probe. For OpenRouter it queries
+the selected model's current endpoints, lists only providers advertising
+strict structured outputs, and lets the user choose one primary route and at
+most one fallback. The same restricted route chain and
+`require_parameters=true` are used during the probe and every production
+request; automatic provider routing is disabled. A capability verified on one
+model/route cannot be reused after either changes.
+
+API embedding dimensions are detected from an actual vector response rather
+than entered by hand. Releases that include the signed local catalog also
+offer `nvidia/Nemotron-3-Embed-1B-BF16` (2048 dimensions) on CPU, NVIDIA CUDA,
+or AMD ROCm. Model files are pinned to an upstream revision and verified by
+size and SHA-256; the matching device runtime is part of the signed release.
 
 An agent can run the same installation non-interactively. It should first
 collect the deployment choices from the user, write the current-schema JSON,
@@ -209,16 +221,20 @@ interactive installer requires one explicit action:
 
 1. **Add an agent** connects one or more detected agents and leaves generation,
    embeddings, memory mode, storage, and existing integrations unchanged.
-2. **Repair** restores binaries, links, permissions, and already-selected
+2. **Update LedgerMind** installs the current signed release while preserving
+   provider configuration, agents, and memory.
+3. **Repair** restores binaries, links, permissions, and already-selected
    integrations, then runs diagnostics. It does not select new models.
-3. **Reconfigure providers** probes and replaces only generation and embedding
+4. **Reconfigure providers** probes and replaces only generation and embedding
    profiles. Memory, agents, language, runtime settings, and storage remain
    unchanged.
+5. **Exit** makes no changes.
 
 The same actions are available without prompts:
 
 ```bash
 ledgermind install --existing-mode add-agent --agent opencode --non-interactive
+ledgermind install --existing-mode update --non-interactive
 ledgermind install --existing-mode repair --non-interactive
 ledgermind install --existing-mode reconfigure \
   --non-interactive --config /secure/providers.json

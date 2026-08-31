@@ -14,7 +14,7 @@ from typing import Any
 
 from ledgermind_local.runtime.supervisor import RuntimeSupervisor
 
-from .errors import ConfigurationError, ExitCode, InstallerError
+from .errors import ConfigurationError, ExitCode, InstallerError, ProviderProbeError
 from .models import InstallerConfig
 from .non_interactive import load_non_interactive_config
 from .operations.configure import configure
@@ -106,7 +106,7 @@ def _build_parser() -> argparse.ArgumentParser:
         option.add_argument("--skip-provider-probe", action="store_true")
         option.add_argument(
             "--existing-mode",
-            choices=("add-agent", "repair", "reconfigure"),
+            choices=("add-agent", "update", "repair", "reconfigure", "exit"),
             help="safe action when LedgerMind is already installed",
         )
         option.add_argument(
@@ -268,10 +268,32 @@ def _runtime(paths: InstallerPaths) -> RuntimeSupervisor:
         model_path = local_config.model_path or local_config.model_storage_path
         if model_path is None:
             model_path = str(paths.models_dir / local_config.catalog_id)
+        runtime_path = (
+            Path(local_config.runtime_path).expanduser()
+            if local_config.runtime_path
+            else None
+        )
+        runtime_python = runtime_path / "bin" / "python3" if runtime_path else None
+        if runtime_python is None or not runtime_python.is_file():
+            raise ConfigurationError(
+                "signed local embedding runtime is missing; run ledgermind repair"
+            )
+        local_embedding_token_file = paths.data_dir / "embedding" / "server.token"
+        if not local_embedding_token_file.is_file():
+            raise ConfigurationError(
+                "local embedding credential is missing; run ledgermind repair"
+            )
+        module_bootstrap = (
+            "import runpy,sys;"
+            f"sys.path[:0]=[{str(paths.current_link / 'python' / 'local')!r},"
+            f"{str(paths.current_link / 'python' / 'site-packages')!r}];"
+            "runpy.run_module('ledgermind_local.installer.embeddings.serve',"
+            "run_name='__main__')"
+        )
         commands["embedding"] = (
-            sys.executable,
-            "-m",
-            "ledgermind_local.installer.embeddings.serve",
+            str(runtime_python),
+            "-c",
+            module_bootstrap,
             "--model-path",
             str(Path(model_path).expanduser()),
             "--device",
@@ -280,8 +302,12 @@ def _runtime(paths: InstallerPaths) -> RuntimeSupervisor:
             str(local_config.threads or 4),
             "--gpu-layers",
             "99" if device != "cpu" else "0",
+            "--dimensions",
+            str(local_config.dimensions),
             "--port",
             "8766",
+            "--token-file",
+            str(local_embedding_token_file),
         )
     return RuntimeSupervisor(
         paths,
@@ -328,7 +354,35 @@ def _config(args: argparse.Namespace) -> tuple[InstallerConfig, str | None, str 
         raise InstallerError("--config is required in non-interactive mode")
     from .wizard import build_interactive_config
 
-    return build_interactive_config(), None, None
+    embedding_catalog: Sequence[dict[str, object]] = ()
+    if getattr(args, "manifest", None) is not None:
+        from .manifest import load_manifest
+
+        embedding_catalog = load_manifest(args.manifest).embedding_catalog
+    else:
+        try:
+            from .operations.common import fetch_manifest
+            from .verify import public_key_from_environment
+
+            manifest_path, signature_path, manifest = fetch_manifest(
+                _paths(args), public_key=public_key_from_environment()
+            )
+            args.manifest = manifest_path
+            args.manifest_signature = signature_path
+            embedding_catalog = manifest.embedding_catalog
+        except InstallerError:
+            # API embeddings remain available. A local option is never shown
+            # without a verified signed catalog from this release.
+            embedding_catalog = ()
+
+    return (
+        build_interactive_config(
+            preflight_home=getattr(args, "home", None),
+            embedding_catalog=embedding_catalog,
+        ),
+        None,
+        None,
+    )
 
 
 def _existing_install(
@@ -349,9 +403,37 @@ def _existing_install(
         if args.non_interactive:
             raise ConfigurationError(
                 "LedgerMind is already installed; --existing-mode is required "
-                "(add-agent, repair, or reconfigure)"
+                "(add-agent, update, repair, reconfigure, or exit)"
             )
         mode = choose_existing_install_action()
+    if mode == "exit":
+        return {
+            "status": "success",
+            "existing_install_action": "exit",
+            "readiness": {
+                "platform": "linux",
+                "core": "unchanged",
+                "generation": "preserved",
+                "embeddings": "preserved",
+                "agents": "preserved",
+                "memory_mode": existing.memory_mode,
+            },
+        }
+    if mode == "update":
+        from .operations.common import fetch_release
+        from .verify import public_key_from_environment
+
+        manifest_path, _signature_path, bundle_path = fetch_release(
+            paths, public_key=public_key_from_environment()
+        )
+        return update(
+            config=existing,
+            paths=paths,
+            manifest_path=manifest_path,
+            bundle=bundle_path,
+            skip_provider_probe=bool(args.skip_provider_probe),
+            dry_run=bool(args.dry_run),
+        )
     if mode == "repair":
         return repair(paths=paths, dry_run=bool(args.dry_run))
     if mode == "add-agent":
@@ -397,7 +479,22 @@ def _existing_install(
             raise ConfigurationError(
                 "--config is required with --existing-mode reconfigure"
             )
-        candidate = build_interactive_config(existing_config=existing)
+        embedding_catalog: Sequence[dict[str, object]] = ()
+        try:
+            from .operations.common import fetch_manifest
+            from .verify import public_key_from_environment
+
+            _manifest_path, _signature_path, manifest = fetch_manifest(
+                paths, public_key=public_key_from_environment()
+            )
+            embedding_catalog = manifest.embedding_catalog
+        except InstallerError:
+            embedding_catalog = ()
+        candidate = build_interactive_config(
+            existing_config=existing,
+            preflight_home=getattr(args, "home", None),
+            embedding_catalog=embedding_catalog,
+        )
         generation_stdin = None
         embedding_stdin = None
     # Reconfiguration owns provider identities only.  Agent selection, memory
@@ -625,7 +722,8 @@ def _emit_install_details(result: InstallResult) -> None:
     readiness = step.data.get("readiness")
     if not isinstance(readiness, dict):
         return
-    print("\nReadiness:")
+    print("\n8/8  COMPLETE")
+    print("Readiness:")
     for label, key in (
         ("Platform", "platform"),
         ("Core", "core"),
@@ -669,7 +767,11 @@ def _terminal_progress(phase: str, message: str) -> None:
         "agents": "AGENTS",
         "complete": "DONE",
     }
-    print(f"  [{labels.get(phase, phase.upper())}] {message}", file=sys.stderr)
+    stage = "8/8" if phase == "complete" else "7/8"
+    print(
+        f"  {stage} [{labels.get(phase, phase.upper())}] {message}",
+        file=sys.stderr,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -745,18 +847,44 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not bool(args.non_interactive) and not bool(args.json_output)
                 else None
             )
-            payload = install(
-                config=config,
-                paths=paths,
-                manifest_path=args.manifest,
-                bundle=args.bundle,
-                manifest_signature=args.manifest_signature,
-                dry_run=bool(args.dry_run),
-                skip_provider_probe=bool(args.skip_provider_probe),
-                generation_stdin=generation_stdin,
-                embedding_stdin=embedding_stdin,
-                progress=interactive_progress,
-            )
+            while True:
+                try:
+                    payload = install(
+                        config=config,
+                        paths=paths,
+                        manifest_path=args.manifest,
+                        bundle=args.bundle,
+                        manifest_signature=args.manifest_signature,
+                        dry_run=bool(args.dry_run),
+                        skip_provider_probe=bool(args.skip_provider_probe),
+                        generation_stdin=generation_stdin,
+                        embedding_stdin=embedding_stdin,
+                        progress=interactive_progress,
+                    )
+                    break
+                except ProviderProbeError as exc:
+                    if bool(args.non_interactive) or bool(args.json_output):
+                        raise
+                    print(f"\n  Provider check failed: {exc}", file=sys.stderr)
+                    print(
+                        "  No files were installed. Review the provider settings and retry.",
+                        file=sys.stderr,
+                    )
+                    from .wizard import build_interactive_config
+
+                    retry_catalog: Sequence[dict[str, object]] = ()
+                    if args.manifest is not None:
+                        from .manifest import load_manifest
+
+                        retry_catalog = load_manifest(args.manifest).embedding_catalog
+
+                    config = build_interactive_config(
+                        existing_config=config,
+                        preflight_home=getattr(args, "home", None),
+                        embedding_catalog=retry_catalog,
+                    )
+                    generation_stdin = None
+                    embedding_stdin = None
             result = _result("install", payload=payload, paths=paths)
             return _emit(result, json_output=bool(args.json_output))
         if operation == "configure":

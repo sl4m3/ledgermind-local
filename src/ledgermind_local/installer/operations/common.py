@@ -52,6 +52,18 @@ def fetch_release(
 ) -> tuple[Path, Path, Path]:
     """Fetch stable release assets using the signed manifest contract."""
 
+    manifest_path, signature_path, manifest = fetch_manifest(
+        paths, public_key=public_key
+    )
+    bundle_path = fetch_bundle(paths, manifest, public_key=public_key)
+    return manifest_path, signature_path, bundle_path
+
+
+def fetch_manifest(
+    paths: InstallerPaths, *, public_key: bytes | str | None = None
+) -> tuple[Path, Path, InstallManifest]:
+    """Fetch and verify release metadata without downloading the bundle."""
+
     base_url = os.environ.get("LEDGERMIND_RELEASE_BASE_URL", "").strip()
     if not base_url:
         raise ConfigurationError(
@@ -68,8 +80,7 @@ def fetch_release(
         signature_path.read_bytes(),
         public_key=public_key,
     )
-    bundle_path = fetch_bundle(paths, manifest, public_key=public_key)
-    return manifest_path, signature_path, bundle_path
+    return manifest_path, signature_path, manifest
 
 
 def fetch_bundle(
@@ -199,6 +210,7 @@ def platform_manifest(manifest: InstallManifest) -> Any:
 __all__ = [
     "config_from_path",
     "fetch_bundle",
+    "fetch_manifest",
     "fetch_release",
     "install_bin_link",
     "platform_manifest",

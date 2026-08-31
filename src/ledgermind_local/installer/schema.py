@@ -11,7 +11,11 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "schema_version": {"const": 2},
-        "semantic_language": {"enum": ["ru", "en", "es", "pt", "fr", "de", "uk"]},
+        "semantic_language": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2,8}(?:[-_][A-Za-z0-9]{1,8})*$",
+            "examples": ["en", "pt", "uk", "zh-Hans"],
+        },
         "memory_mode": {"enum": ["shared", "per_agent"]},
         "integrations": {
             "type": "array",
@@ -25,6 +29,9 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
             "additionalProperties": False,
             "properties": {
                 "endpoint": {"type": "string", "format": "uri"},
+                "provider_profile": {
+                    "enum": ["openai_compatible", "openrouter", "nvidia_nim"]
+                },
                 "route": {"type": ["string", "null"]},
                 "fallback_routes": {
                     "type": "array",
@@ -141,6 +148,9 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
                 "device": {"enum": ["auto", "cpu", "cuda", "rocm"]},
                 "model_path": {"type": ["string", "null"]},
                 "model_storage_path": {"type": ["string", "null"]},
+                "runtime_id": {"type": ["string", "null"]},
+                "runtime_path": {"type": ["string", "null"]},
+                "dimensions": {"type": "integer", "minimum": 1},
                 "batch_size": {"type": "integer", "minimum": 1},
                 "concurrency": {"type": "integer", "minimum": 1},
                 "threads": {"type": "integer", "minimum": 0},

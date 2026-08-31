@@ -12,13 +12,6 @@ from ..secret_refs import GENERATION_SECRET_REF
 def build_generation_profiles(
     config: GenerationConfig,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    operational = config.operational_model or config.model
-    object_resolution = config.object_resolution_model
-    if not object_resolution:
-        raise ValueError(
-            "generation.object_resolution_model is required; refusing operational fallback"
-        )
-    background = config.background_model or config.model
     provider = generation_provider_profile(config.provider_profile)
     # Reasoning is disabled for every semantic generation role. The selected
     # provider profile owns the wire dialect; URL guessing never changes a
@@ -30,6 +23,7 @@ def build_generation_profiles(
             "order": routes,
             "only": routes,
             "allow_fallbacks": bool(config.fallback_routes),
+            "require_parameters": True,
         }
     common = {
         "endpoint": config.endpoint,
@@ -45,19 +39,19 @@ def build_generation_profiles(
         {
             "profile_id": "generation-operational",
             "slot": "operational",
-            "model": operational,
+            "model": config.model,
             **common,
         },
         {
             "profile_id": "generation-object-resolution",
             "slot": "object_resolution",
-            "model": object_resolution,
+            "model": config.model,
             **common,
         },
         {
             "profile_id": "generation-background",
             "slot": "background",
-            "model": background,
+            "model": config.model,
             **common,
         },
     )

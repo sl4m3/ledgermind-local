@@ -8,6 +8,7 @@ import pytest
 from ledgermind_local.installer.errors import ProviderProbeError
 from ledgermind_local.installer.models import EmbeddingApiConfig, GenerationConfig
 from ledgermind_local.installer.profiles.probes import (
+    discover_embedding_dimensions,
     probe_embedding_api,
     probe_generation,
 )
@@ -59,7 +60,9 @@ def test_openrouter_generation_probe_disables_reasoning() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.update(json.loads(request.content))
-        seen_headers.update({key.lower(): value for key, value in request.headers.items()})
+        seen_headers.update(
+            {key.lower(): value for key, value in request.headers.items()}
+        )
         return httpx.Response(
             200,
             json={
@@ -91,6 +94,7 @@ def test_openrouter_generation_probe_disables_reasoning() -> None:
         "order": ["baidu/fp8", "deepinfra/fp8"],
         "only": ["baidu/fp8", "deepinfra/fp8"],
         "allow_fallbacks": True,
+        "require_parameters": True,
     }
 
 
@@ -223,3 +227,25 @@ def test_embedding_probe_reports_provider_message_model_and_endpoint() -> None:
     assert "https://openrouter.ai/api/v1" in message
     assert "HTTP 404" in message
     assert "No endpoints found for this model" in message
+
+
+def test_embedding_dimensions_are_inferred_from_real_vector() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/embeddings")
+        return httpx.Response(
+            200,
+            json={"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3, 0.4]}]},
+        )
+
+    config = EmbeddingApiConfig(
+        endpoint="https://provider.example/v1",
+        token="secret",
+        model="embedding-model",
+        dimensions=1,
+    )
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        dimensions = discover_embedding_dimensions(
+            config, token="secret", client=client
+        )
+
+    assert dimensions == 4

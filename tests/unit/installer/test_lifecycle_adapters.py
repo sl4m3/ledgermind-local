@@ -29,7 +29,6 @@ def _config() -> InstallerConfig:
             endpoint="https://provider.example/v1",
             token="token",
             model="model",
-            object_resolution_model="resolution",
         ),
         embedding=EmbeddingConfig(
             mode="api",

@@ -10,6 +10,14 @@ from ..errors import ConfigurationError
 from ..paths import InstallerPaths
 
 
+def _relative_model_path(value: object) -> Path:
+    name = str(value or "").strip().replace("\\", "/")
+    path = Path(name)
+    if not name or path.is_absolute() or ".." in path.parts or path == Path("."):
+        raise ConfigurationError("embedding model file path is invalid")
+    return path
+
+
 def _file_records(entry: dict[str, Any]) -> list[dict[str, Any]]:
     records = entry.get("files", [])
     if isinstance(records, dict):
@@ -42,18 +50,21 @@ def download_model(entry: dict[str, Any], paths: InstallerPaths) -> Path:
     target_dir = paths.models_dir / model_id
     target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     for record in _file_records(entry):
-        name = str(record.get("name", "")).strip()
+        relative = _relative_model_path(record.get("name"))
         url = str(record.get("url", "")).strip()
-        if not name or not url or Path(name).name != name:
-            raise ConfigurationError("embedding model file name or URL is invalid")
-        destination = target_dir / name
+        if not url:
+            raise ConfigurationError("embedding model file URL is invalid")
+        if record.get("size") is None or not record.get("sha256"):
+            raise ConfigurationError(
+                "signed embedding catalog requires size and SHA-256 for every file"
+            )
+        destination = target_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         download_artifact(
             url,
             destination,
-            expected_size=int(record["size"])
-            if record.get("size") is not None
-            else None,
-            expected_sha256=str(record["sha256"]) if record.get("sha256") else None,
+            expected_size=int(record["size"]),
+            expected_sha256=str(record["sha256"]),
         )
     return target_dir
 

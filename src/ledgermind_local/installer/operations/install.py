@@ -17,7 +17,10 @@ from ..config_writer import (
 )
 from ..embeddings.model_download import download_model
 from ..embeddings.runtime_install import install_runtime
-from ..embeddings.verification import verify_model_files
+from ..embeddings.verification import (
+    verify_local_runtime_inference,
+    verify_model_files,
+)
 from ..errors import ConfigurationError, InstallerError
 from ..lock import InstallerLock
 from ..manifest import InstallManifest
@@ -37,7 +40,7 @@ from ..verify import (
 )
 from .common import (
     fetch_bundle,
-    fetch_release,
+    fetch_manifest,
     install_bin_link,
     platform_manifest,
     resolve_manifest,
@@ -119,6 +122,35 @@ def install(
         plan = install_plan(config, paths=paths, manifest=manifest)
         plan["status"] = "dry_run"
         return plan
+    if manifest is None:
+        report("download", "Downloading the signed release manifest")
+        fetched_manifest, fetched_signature, manifest = fetch_manifest(
+            paths,
+            public_key=public_key or public_key_from_environment(),
+        )
+        manifest_path = fetched_manifest
+        manifest_signature = fetched_signature
+    manifest_file = (
+        Path(manifest_path).expanduser()
+        if manifest_path
+        else (Path(bundle_root) / "install-manifest.json" if bundle_root else None)
+    )
+    signature_file = (
+        Path(manifest_signature).expanduser()
+        if manifest_signature
+        else (manifest_file.with_suffix(".sig") if manifest_file else None)
+    )
+    if manifest_file is None or signature_file is None or not signature_file.is_file():
+        raise ConfigurationError("manifest signature is required")
+    verify_manifest_signature(
+        manifest_file, signature_file, public_key or public_key_from_environment()
+    )
+    release_record = platform_manifest(manifest)
+    preflight = check_preflight(
+        paths,
+        required_bytes=release_record.bundle.size,
+        minimum_glibc=release_record.bundle.minimum_glibc,
+    )
     # Validate user-supplied provider settings before downloading or unpacking
     # the platform bundle. A bad endpoint/model should fail fast and cheaply.
     provider_probes: dict[str, Any] = {}
@@ -138,33 +170,6 @@ def install(
             provider_probes["embedding_probe"] = probe_embedding_api(
                 config.embedding.api, token=embedding_token
             )
-    if manifest is None:
-        report("download", "Downloading the signed LedgerMind release")
-        fetched_manifest, fetched_signature, fetched_bundle = fetch_release(
-            paths,
-            public_key=public_key or public_key_from_environment(),
-        )
-        manifest_path = fetched_manifest
-        manifest_signature = fetched_signature
-        bundle_root = fetched_bundle
-        manifest, _ = resolve_manifest(manifest_path, bundle_root)
-    if manifest is None:
-        raise ConfigurationError("a signed install manifest is required")
-    manifest_file = (
-        Path(manifest_path).expanduser()
-        if manifest_path
-        else (Path(bundle_root) / "install-manifest.json" if bundle_root else None)
-    )
-    signature_file = (
-        Path(manifest_signature).expanduser()
-        if manifest_signature
-        else (manifest_file.with_suffix(".sig") if manifest_file else None)
-    )
-    if manifest_file is None or signature_file is None or not signature_file.is_file():
-        raise ConfigurationError("manifest signature is required")
-    verify_manifest_signature(
-        manifest_file, signature_file, public_key or public_key_from_environment()
-    )
     report("verify", "Verifying release signatures and platform compatibility")
     if bundle_root is None:
         bundle_root = fetch_bundle(
@@ -172,8 +177,6 @@ def install(
             manifest,
             public_key=public_key or public_key_from_environment(),
         )
-    platform_manifest(manifest)
-    preflight = check_preflight(paths)
     plan = install_plan(config, paths=paths, manifest=manifest)
     plan.update(provider_probes)
     bundle_source = Path(bundle_root)
@@ -195,17 +198,6 @@ def install(
         report("embeddings", "Preparing the signed local embedding model")
         entry = manifest.catalog_entry(config.embedding.local.catalog_id)
         local_plan = build_local_embedding_plan(config.embedding.local, entry)
-        effective_config = config.model_copy(
-            update={
-                "embedding": config.embedding.model_copy(
-                    update={
-                        "local": config.embedding.local.model_copy(
-                            update={"device": local_plan["device"]}
-                        )
-                    }
-                )
-            }
-        )
         if config.embedding.local.model_path is not None:
             model_path = Path(config.embedding.local.model_path).expanduser()
             if not model_path.is_file():
@@ -239,11 +231,36 @@ def install(
         else:
             model_dir = download_model(entry, paths)
             local_plan["model"] = verify_model_files(model_dir, entry)
-        local_plan["runtime"] = install_runtime(
+            model_path = model_dir
+        runtime_path = install_runtime(
             entry,
             device=str(local_plan["device"]),
             bundle_root=bundle_path,
             paths=paths,
+        )
+        local_plan["runtime"] = runtime_path
+        local_plan["inference_smoke"] = verify_local_runtime_inference(
+            runtime_path=runtime_path,
+            model_path=model_path,
+            device=str(local_plan["device"]),
+            dimensions=int(local_plan["dimensions"]),
+        )
+        effective_config = config.model_copy(
+            update={
+                "embedding": config.embedding.model_copy(
+                    update={
+                        "local": config.embedding.local.model_copy(
+                            update={
+                                "device": local_plan["device"],
+                                "model_storage_path": str(model_path),
+                                "runtime_id": str(local_plan["runtime_id"]),
+                                "runtime_path": str(runtime_path),
+                                "dimensions": int(local_plan["dimensions"]),
+                            }
+                        )
+                    }
+                )
+            }
         )
         local_embedding_metadata = local_plan
     release_dir = paths.release_dir(manifest.release_version)
@@ -275,6 +292,7 @@ def install(
                 paths.config_dir / "local-config.json",
                 paths.data_dir / "local" / "config.json",
                 paths.data_dir / "local" / "server.token",
+                paths.data_dir / "embedding" / "server.token",
                 local_database_path,
                 Path(f"{local_database_path}-wal"),
                 Path(f"{local_database_path}-shm"),

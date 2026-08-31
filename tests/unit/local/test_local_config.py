@@ -18,6 +18,14 @@ def test_semantic_language_is_required_from_configuration() -> None:
         LocalConfig.model_validate({"config_version": 1})
 
 
+def test_custom_semantic_language_tag_is_canonicalized() -> None:
+    config = LocalConfig.model_validate(
+        {"config_version": 2, "semantic_language": "zh_hans"}
+    )
+
+    assert config.semantic_language == "zh-Hans"
+
+
 def test_unknown_fields_are_rejected() -> None:
     with pytest.raises(ValidationError):
         LocalConfig.model_validate({"config_version": 1, "secret_api_key": "x"})
@@ -62,7 +70,9 @@ def test_config_has_expected_6_2_shape() -> None:
 
 
 def test_process_core_backend_is_the_only_default() -> None:
-    config = LocalConfig.model_validate({"config_version": 1, "semantic_language": "ru"})
+    config = LocalConfig.model_validate(
+        {"config_version": 1, "semantic_language": "ru"}
+    )
 
     assert config.core_backend == "process"
 

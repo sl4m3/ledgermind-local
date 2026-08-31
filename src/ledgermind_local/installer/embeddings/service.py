@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-EmbeddingBackend = Callable[[Sequence[str]], Sequence[Sequence[float]]]
+EmbeddingBackend = Callable[..., Sequence[Sequence[float]]]
 
 
 class EmbeddingService:
@@ -99,7 +99,16 @@ class EmbeddingService:
                         service.model,
                     }:
                         raise ValueError("model does not match the configured runtime")
-                    vectors = list(service.backend(texts))
+                    raw_role = (
+                        payload.get("input_type") if isinstance(payload, dict) else None
+                    )
+                    if raw_role not in {None, "query", "passage"}:
+                        raise ValueError("input_type must be query or passage")
+                    vectors = list(
+                        service.backend(texts, role=raw_role)
+                        if raw_role is not None
+                        else service.backend(texts)
+                    )
                     if len(vectors) != len(texts):
                         raise ValueError("embedding backend returned an invalid batch")
                     for vector in vectors:

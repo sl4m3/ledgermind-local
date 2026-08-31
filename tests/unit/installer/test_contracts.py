@@ -36,6 +36,9 @@ from ledgermind_local.installer.models import (
     GenerationConfig,
     InstallerConfig,
 )
+from ledgermind_local.installer.models import (
+    LocalEmbeddingConfig as InstallerLocalEmbeddingConfig,
+)
 from ledgermind_local.installer.paths import InstallerPaths
 from ledgermind_local.installer.verify import verify_ed25519
 from ledgermind_local.runtime.supervisor import RuntimeSupervisor
@@ -48,7 +51,6 @@ def _config() -> InstallerConfig:
             endpoint="https://provider.example/v1",
             token="generation-secret",
             model="generation-model",
-            object_resolution_model="object-resolution-model",
         ),
         embedding=EmbeddingConfig(
             mode="api",
@@ -709,6 +711,36 @@ def test_local_embedding_service_is_openai_compatible() -> None:
         service.stop()
 
 
+def test_local_embedding_service_forwards_query_passage_role() -> None:
+    roles: list[str | None] = []
+
+    def backend(texts: list[str], *, role: str | None = None) -> list[list[float]]:
+        roles.append(role)
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+    service = EmbeddingService(
+        backend=backend,
+        model="local-model",
+        dimensions=3,
+        device="cpu",
+    )
+    endpoint = service.start()
+    try:
+        request = Request(
+            endpoint + "/embeddings",
+            data=json.dumps(
+                {"model": "local-model", "input": ["hello"], "input_type": "query"}
+            ).encode(),
+            headers={"content-type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=2) as response:
+            assert response.status == 200
+        assert roles == ["query"]
+    finally:
+        service.stop()
+
+
 def test_api_embedding_profile_does_not_spawn_local_embedding_service() -> None:
     config = LocalConfig(
         config_version=2,
@@ -719,11 +751,55 @@ def test_api_embedding_profile_does_not_spawn_local_embedding_service() -> None:
             endpoint="https://provider.example/v1",
             model="embedding-model",
             dimensions=3,
-        )
+        ),
     )
 
-    supervisor = _build_runtime_supervisor(
-        config=config, host="127.0.0.1", port=8765
-    )
+    supervisor = _build_runtime_supervisor(config=config, host="127.0.0.1", port=8765)
 
     assert "embedding" not in supervisor.commands
+
+
+def test_installed_local_embedding_uses_its_signed_device_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LEDGERMIND_SECRET_BACKEND", "file")
+    paths = InstallerPaths(home_override=tmp_path)
+    paths.ensure()
+    release = paths.release_dir("test")
+    (release / "bin").mkdir(parents=True)
+    local = release / "bin" / "ledgermind-local"
+    local.write_text("#!/bin/sh\n", encoding="utf-8")
+    local.chmod(0o700)
+    paths.current_link.symlink_to(release)
+    runtime = paths.data_dir / "embedding-runtimes" / "nemotron" / "cpu"
+    runtime_python = runtime / "bin" / "python3"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    runtime_python.chmod(0o700)
+    config = _config().model_copy(
+        update={
+            "embedding": EmbeddingConfig(
+                mode="local",
+                local=InstallerLocalEmbeddingConfig(
+                    catalog_id="nemotron",
+                    device="cpu",
+                    model_storage_path=str(paths.models_dir / "nemotron"),
+                    runtime_id="nemotron",
+                    runtime_path=str(runtime),
+                    dimensions=2048,
+                ),
+            )
+        }
+    )
+    write_installer_config(config, paths)
+
+    command = tuple(_runtime(paths).commands["embedding"])
+
+    assert command[0] == str(runtime_python)
+    assert "sentence_transformers" not in " ".join(command)
+    assert command[command.index("--dimensions") + 1] == "2048"
+    assert "--token-file" in command
+    assert (
+        paths.data_dir / "embedding" / "server.token"
+    ).stat().st_mode & 0o777 == 0o600
+    assert "embedding-local" not in " ".join(command)

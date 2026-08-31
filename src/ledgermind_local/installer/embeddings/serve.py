@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event
 
 from ...inference.gguf_vectorizer import GGUFVectorizer
+from ...inference.sentence_transformer_vectorizer import SentenceTransformerVectorizer
 from .service import EmbeddingService
 
 
@@ -20,19 +21,33 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", choices=("cpu", "cuda", "rocm"), default="cpu")
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--gpu-layers", type=int, default=0)
+    parser.add_argument("--dimensions", type=int, default=2048)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--token")
+    parser.add_argument("--token-file", type=Path)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    vectorizer = GGUFVectorizer(
-        model_path=args.model_path,
-        n_threads=args.threads,
-        gpu_layers=args.gpu_layers,
-    )
+    if args.model_path.suffix.lower() == ".gguf":
+        vectorizer = GGUFVectorizer(
+            model_path=args.model_path,
+            n_threads=args.threads,
+            gpu_layers=args.gpu_layers,
+        )
+    else:
+        vectorizer = SentenceTransformerVectorizer(
+            model_path=args.model_path,
+            device=args.device,
+            expected_dimension=args.dimensions,
+        )
+    token = args.token
+    if args.token_file is not None:
+        token = args.token_file.read_text(encoding="utf-8").strip()
+        if not token:
+            raise RuntimeError("local embedding token file is empty")
     service = EmbeddingService(
         backend=vectorizer.encode,
         model=args.model or vectorizer.fingerprint,
@@ -40,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
         host=args.host,
         port=args.port,
-        token=args.token,
+        token=token,
     )
     stopped = Event()
 

@@ -7,6 +7,7 @@ import json
 import os
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -43,7 +44,6 @@ def _config() -> InstallerConfig:
             endpoint="https://provider.example/v1",
             token="generation-secret",
             model="generation",
-            object_resolution_model="resolution",
         ),
         embedding=EmbeddingConfig(
             mode="api",
@@ -87,11 +87,33 @@ def test_memory_mode_resolves_shared_or_per_agent_spaces() -> None:
     assert shared.memory_space_id_for("codex") == "shared-default"
 
 
+def test_semantic_language_accepts_and_canonicalizes_custom_bcp47_tag() -> None:
+    assert (
+        _config().model_copy(update={"semantic_language": "en"}).semantic_language
+        == "en"
+    )
+    payload = _config().model_dump(mode="json")
+    payload["semantic_language"] = "zh_hans"
+
+    assert InstallerConfig.model_validate(payload).semantic_language == "zh-Hans"
+
+
+def test_generation_rejects_different_legacy_semantic_models() -> None:
+    with pytest.raises(ValueError, match="one model"):
+        GenerationConfig(
+            endpoint="https://provider.example/v1",
+            token="secret",
+            model="one",
+            object_resolution_model="another",
+        )
+
+
 def test_operation_urls_are_normalized_to_openai_api_base() -> None:
     generation = GenerationConfig(
         endpoint="https://openrouter.ai/api/v1/chat/completions",
         token="secret",
         model="model",
+        route="provider/fp8",
     )
     embedding = EmbeddingApiConfig(
         endpoint="https://openrouter.ai/api/v1/embeddings",
@@ -120,22 +142,20 @@ def test_terminal_wizard_uses_reference_openrouter_configuration(
     )
     answers = iter(
         (
-            "",  # Russian
+            "",  # English
+            "",  # all detected agents
+            "2",  # shared memory
+            "",  # recommended runtime settings
             "",  # OpenRouter
             "",  # reference generation model
-            "",  # same Object Resolution model
+            "",  # choose discovered routes
             "2",  # primary + fallback
-            "",  # no provider is selected implicitly
-            "baidu/fp8",  # explicit primary provider
-            "deepinfra/fp8",  # explicit fallback provider
+            "",  # Baidu primary
+            "",  # DeepInfra fallback
             "",  # API embeddings
             "",  # same API base
             "",  # reuse token
             "",  # reference embedding model
-            "",  # 2048 dimensions
-            "2",  # shared memory
-            "",  # recommended runtime settings
-            "1",  # Codex
             "",  # install
         )
     )
@@ -145,9 +165,30 @@ def test_terminal_wizard_uses_reference_openrouter_configuration(
         input_fn=lambda _prompt: next(answers),
         secret_fn=lambda _prompt: "secret",
         output=output,
+        openrouter_endpoint_loader=lambda _model, _token: (
+            wizard.OpenRouterEndpoint(
+                route="baidu/fp8",
+                provider="Baidu",
+                quantization="FP8",
+                context_length=163840,
+                prompt_price=None,
+                completion_price=None,
+                supported_parameters=("response_format", "structured_outputs"),
+            ),
+            wizard.OpenRouterEndpoint(
+                route="deepinfra/fp8",
+                provider="DeepInfra",
+                quantization="FP8",
+                context_length=163840,
+                prompt_price=None,
+                completion_price=None,
+                supported_parameters=("response_format", "structured_outputs"),
+            ),
+        ),
+        embedding_dimension_loader=lambda _config, _token: 2048,
     )
 
-    assert config.semantic_language == "ru"
+    assert config.semantic_language == "en"
     assert config.generation.endpoint == "https://openrouter.ai/api/v1"
     assert config.generation.route == "baidu/fp8"
     assert config.generation.fallback_routes == ("deepinfra/fp8",)
@@ -160,8 +201,46 @@ def test_terminal_wizard_uses_reference_openrouter_configuration(
     assert [item.id for item in config.integrations] == ["codex"]
     assert "LEDGERMIND SETUP" in output.getvalue()
     assert "REVIEW" in output.getvalue()
-    assert "A value is required." in output.getvalue()
+    assert "Token accepted:" in output.getvalue()
+    assert "secret" not in output.getvalue()
     assert "baidu/fp8 → deepinfra/fp8 (restricted)" in output.getvalue()
+
+
+def test_terminal_wizard_offers_local_embedding_only_from_signed_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(registry, "target_ids", lambda: ())
+    answers = iter(
+        (
+            "",  # English
+            "",  # per-agent memory
+            "",  # runtime defaults
+            "3",  # custom generation endpoint
+            "https://provider.example/v1",
+            "generation-model",
+            "2",  # local embeddings
+            "",  # automatic device
+            "",  # install
+        )
+    )
+
+    config = wizard.build_interactive_config(
+        input_fn=lambda _prompt: next(answers),
+        secret_fn=lambda _prompt: "secret",
+        output=io.StringIO(),
+        embedding_catalog=(
+            {
+                "id": wizard.REFERENCE_LOCAL_EMBEDDING_CATALOG_ID,
+                "devices": ["cpu", "cuda", "rocm"],
+            },
+        ),
+    )
+
+    assert config.embedding.mode == "local"
+    assert config.embedding.local is not None
+    assert (
+        config.embedding.local.catalog_id == wizard.REFERENCE_LOCAL_EMBEDDING_CATALOG_ID
+    )
 
 
 def test_install_fails_provider_preflight_before_release_download(
@@ -180,8 +259,33 @@ def test_install_fails_provider_preflight_before_release_download(
         fetched = True
         raise AssertionError("release download must not start")
 
+    manifest_path = tmp_path / "install-manifest.json"
+    signature_path = tmp_path / "install-manifest.sig"
+    manifest_path.write_text("{}", encoding="utf-8")
+    signature_path.write_bytes(b"signature")
+    manifest = SimpleNamespace()
     monkeypatch.setattr(install_module, "probe_generation", fail_probe)
-    monkeypatch.setattr(install_module, "fetch_release", unexpected_fetch)
+    monkeypatch.setattr(
+        install_module,
+        "fetch_manifest",
+        lambda *_args, **_kwargs: (manifest_path, signature_path, manifest),
+    )
+    monkeypatch.setattr(
+        install_module, "verify_manifest_signature", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        install_module,
+        "platform_manifest",
+        lambda _manifest: SimpleNamespace(
+            bundle=SimpleNamespace(size=0, minimum_glibc=None)
+        ),
+    )
+    monkeypatch.setattr(
+        install_module,
+        "check_preflight",
+        lambda *_args, **_kwargs: {"platform": "linux-x86_64"},
+    )
+    monkeypatch.setattr(install_module, "fetch_bundle", unexpected_fetch)
 
     with pytest.raises(ProviderProbeError, match="unavailable"):
         install_module.install(
@@ -259,7 +363,7 @@ def test_no_arguments_starts_the_interactive_install(
         assert kwargs["config"].semantic_language == "en"
         return {"status": "success"}
 
-    monkeypatch.setattr(wizard, "build_interactive_config", _config)
+    monkeypatch.setattr(wizard, "build_interactive_config", lambda **_kwargs: _config())
     monkeypatch.setattr(cli, "install", fake_install)
     monkeypatch.setattr(
         cli,
@@ -463,12 +567,10 @@ def test_provider_reconfiguration_preserves_memory_and_agents() -> None:
             "3",  # custom provider
             "https://new-provider.example/v1",
             "new-generation",
-            "",  # same OR model
             "",  # API embeddings
             "",  # same endpoint
             "",  # reuse generation token
             "new-embedding",
-            "",  # 1536 dimensions
             "",  # apply
         )
     )
@@ -478,6 +580,7 @@ def test_provider_reconfiguration_preserves_memory_and_agents() -> None:
         secret_fn=lambda _prompt: "new-secret",
         output=io.StringIO(),
         existing_config=existing,
+        embedding_dimension_loader=lambda _config, _token: 1536,
     )
 
     assert updated.generation.model == "new-generation"

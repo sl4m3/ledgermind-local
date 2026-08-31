@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import subprocess
+import textwrap
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from ..verify import sha256_file
+
+
+def _checked_model_path(root: Path, value: object) -> Path:
+    relative = Path(str(value).replace("\\", "/"))
+    if relative.is_absolute() or ".." in relative.parts or relative == Path("."):
+        raise ValueError("model catalog contains an unsafe file path")
+    return root / relative
 
 
 def verify_model_files(model_dir: str | Path, entry: dict[str, Any]) -> dict[str, Any]:
@@ -21,7 +32,7 @@ def verify_model_files(model_dir: str | Path, entry: dict[str, Any]) -> dict[str
             if isinstance(record, dict) and record.get("name") and record.get("sha256")
         }
     for name, expected in expected_files.items():
-        path = root / str(name)
+        path = _checked_model_path(root, name)
         if not path.is_file() or sha256_file(path).lower() != str(expected).lower():
             raise ValueError(f"model checksum mismatch: {name}")
         checked += 1
@@ -65,4 +76,79 @@ def run_embedding_smoke(
     }
 
 
-__all__ = ["run_embedding_smoke", "verify_model_files"]
+def verify_local_runtime_inference(
+    *,
+    runtime_path: str | Path,
+    model_path: str | Path,
+    device: str,
+    dimensions: int,
+    timeout_seconds: float = 900.0,
+) -> dict[str, Any]:
+    """Load the signed runtime and execute both retrieval roles once."""
+
+    runtime_python = Path(runtime_path) / "bin" / "python3"
+    if not runtime_python.is_file():
+        raise ValueError("signed local embedding runtime has no Python executable")
+    source_root = Path(__file__).resolve().parents[3]
+    script = textwrap.dedent(
+        """
+        import json
+        import sys
+        from ledgermind_local.inference.sentence_transformer_vectorizer import SentenceTransformerVectorizer
+
+        vectorizer = SentenceTransformerVectorizer(
+            model_path=sys.argv[1],
+            device=sys.argv[2],
+            expected_dimension=int(sys.argv[3]),
+        )
+        query = vectorizer.encode(["LedgerMind query smoke"], role="query")
+        passage = vectorizer.encode(["LedgerMind passage smoke"], role="passage")
+        if len(query) != 1 or len(passage) != 1:
+            raise RuntimeError("local embedding runtime returned an invalid batch")
+        print(json.dumps({"status": "passed", "dimensions": len(query[0])}))
+        vectorizer.close()
+        """
+    )
+    environment = dict(os.environ)
+    existing_pythonpath = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = str(source_root) + (
+        os.pathsep + existing_pythonpath if existing_pythonpath else ""
+    )
+    try:
+        completed = subprocess.run(
+            (
+                str(runtime_python),
+                "-c",
+                script,
+                str(Path(model_path).expanduser()),
+                device,
+                str(dimensions),
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=environment,
+        )
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        IndexError,
+    ) as exc:
+        raise ValueError(
+            "signed local embedding runtime inference smoke failed"
+        ) from exc
+    if payload != {"status": "passed", "dimensions": dimensions}:
+        raise ValueError(
+            "signed local embedding runtime returned invalid smoke metadata"
+        )
+    return payload
+
+
+__all__ = [
+    "run_embedding_smoke",
+    "verify_local_runtime_inference",
+    "verify_model_files",
+]

@@ -36,6 +36,34 @@ def _http_url(value: str, field_name: str = "endpoint") -> str:
     return normalized
 
 
+def _language_tag(value: str) -> str:
+    """Validate and canonicalize one deployment-owned BCP-47-like tag."""
+
+    raw = _text(value, "semantic_language").replace("_", "-")
+    subtags = raw.split("-")
+    primary = subtags[0]
+    if not (2 <= len(primary) <= 8) or not primary.isascii() or not primary.isalpha():
+        raise ValueError(
+            "semantic_language must be a valid language tag such as en, pt, or zh-Hans"
+        )
+    if any(
+        not subtag or len(subtag) > 8 or not subtag.isascii() or not subtag.isalnum()
+        for subtag in subtags[1:]
+    ):
+        raise ValueError(
+            "semantic_language must be a valid language tag such as en, pt, or zh-Hans"
+        )
+    canonical = [primary.lower()]
+    for subtag in subtags[1:]:
+        if len(subtag) == 2 and subtag.isalpha():
+            canonical.append(subtag.upper())
+        elif len(subtag) == 4 and subtag.isalpha():
+            canonical.append(subtag[0].upper() + subtag[1:].lower())
+        else:
+            canonical.append(subtag.lower())
+    return "-".join(canonical)
+
+
 class GenerationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -81,7 +109,9 @@ class GenerationConfig(BaseModel):
     def validate_endpoint(cls, value: str) -> str:
         return _http_url(value)
 
-    @field_validator("model", "operational_model", "object_resolution_model", "background_model")
+    @field_validator(
+        "model", "operational_model", "object_resolution_model", "background_model"
+    )
     @classmethod
     def validate_models(cls, value: str | None, info: object) -> str | None:
         if value is None:
@@ -112,14 +142,42 @@ class GenerationConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_route_endpoint(self) -> GenerationConfig:
-        if (self.route or self.fallback_routes) and self.provider_profile != "openrouter":
+        if (
+            self.route or self.fallback_routes
+        ) and self.provider_profile != "openrouter":
             raise ValueError("generation routes are supported only for OpenRouter")
         if self.fallback_routes and not self.route:
             raise ValueError("generation fallback routes require a primary route")
         if self.route and self.route in self.fallback_routes:
-            raise ValueError("primary generation route must not be repeated as a fallback")
-        if self.provider_profile == "openrouter" and "openrouter.ai" not in self.endpoint.lower():
-            raise ValueError("OpenRouter provider profile requires an OpenRouter endpoint")
+            raise ValueError(
+                "primary generation route must not be repeated as a fallback"
+            )
+        if (
+            self.provider_profile == "openrouter"
+            and "openrouter.ai" not in self.endpoint.lower()
+        ):
+            raise ValueError(
+                "OpenRouter provider profile requires an OpenRouter endpoint"
+            )
+        if self.provider_profile == "openrouter" and not self.route:
+            raise ValueError(
+                "OpenRouter requires one explicit provider route; automatic routing is disabled"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_single_semantic_model(self) -> GenerationConfig:
+        for field_name in (
+            "operational_model",
+            "object_resolution_model",
+            "background_model",
+        ):
+            legacy_value = getattr(self, field_name)
+            if legacy_value is not None and legacy_value != self.model:
+                raise ValueError(
+                    f"generation.{field_name} must match generation.model; "
+                    "LedgerMind uses one model for the complete knowledge pipeline"
+                )
         return self
 
     @model_validator(mode="after")
@@ -175,6 +233,9 @@ class LocalEmbeddingConfig(BaseModel):
     device: Literal["auto", "cpu", "cuda", "rocm"] = "auto"
     model_storage_path: str | None = None
     model_path: str | None = None
+    runtime_id: str | None = None
+    runtime_path: str | None = None
+    dimensions: int = Field(default=2048, gt=0)
     batch_size: int = Field(default=32, ge=1, le=4096)
     concurrency: int = Field(default=1, ge=1, le=64)
     threads: int = Field(default=0, ge=0, le=512)
@@ -184,6 +245,13 @@ class LocalEmbeddingConfig(BaseModel):
     @field_validator("catalog_id", "gpu_allocation")
     @classmethod
     def validate_text(cls, value: str, info: object) -> str:
+        return _text(value, getattr(info, "field_name", "value"))
+
+    @field_validator("runtime_id", "runtime_path")
+    @classmethod
+    def validate_optional_text(cls, value: str | None, info: object) -> str | None:
+        if value is None:
+            return None
         return _text(value, getattr(info, "field_name", "value"))
 
 
@@ -251,7 +319,7 @@ class InstallerConfig(BaseModel):
     integrations: tuple[IntegrationConfig, ...] = ()
     # Installation must make the semantic language an explicit deployment
     # choice; it is never inferred from user text or the host locale.
-    semantic_language: Literal["ru", "en", "es", "pt", "fr", "de", "uk"]
+    semantic_language: str
     # Agents may either share one logical knowledge space or keep independent
     # spaces while still using the same Local/Core runtime.
     memory_mode: Literal["shared", "per_agent"] = "per_agent"
@@ -260,6 +328,11 @@ class InstallerConfig(BaseModel):
     embedding: EmbeddingConfig
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
+
+    @field_validator("semantic_language")
+    @classmethod
+    def validate_semantic_language(cls, value: str) -> str:
+        return _language_tag(value)
 
     @model_validator(mode="before")
     @classmethod
