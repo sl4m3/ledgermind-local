@@ -284,9 +284,10 @@ def test_interactive_cancellation_is_not_reported_as_failure(
 def test_bootstrap_reports_large_installer_download_progress() -> None:
     bootstrap = Path("scripts/install.sh").read_text(encoding="utf-8")
 
-    assert "LedgerMind: downloading $asset" in bootstrap
-    assert "--progress-bar" in bootstrap
-    assert "LedgerMind: download complete; starting setup" in bootstrap
+    assert "download_with_status" in bootstrap
+    assert "Downloading LedgerMind installer" in bootstrap
+    assert "Installer downloaded" in bootstrap
+    assert "--progress-bar" not in bootstrap
 
 
 def test_terminal_wizard_offers_local_embedding_only_from_signed_catalog(

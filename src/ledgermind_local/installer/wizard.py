@@ -56,6 +56,7 @@ class _TerminalWizard:
         self.output = output
         self.color = bool(getattr(output, "isatty", lambda: False)())
         self.navigation = self.color and input_fn is input and sys.stdin.isatty()
+        self._brand_visible = False
 
     def _style(self, text: str, code: str) -> str:
         if not self.color:
@@ -65,17 +66,39 @@ class _TerminalWizard:
     def line(self, text: str = "") -> None:
         print(text, file=self.output)
 
-    def banner(self) -> None:
-        self.line()
+    def _clear_screen(self) -> None:
+        if self.navigation:
+            self.output.write("\033[2J\033[H")
+
+    def _brand(self) -> None:
         self.line(self._style("  LEDGERMIND SETUP", "1;36"))
         self.line("  Private memory for your local agents")
-        self.line("  " + "─" * 48)
+        self.line("  " + "─" * 56)
+
+    def banner(self) -> None:
+        self._clear_screen()
+        if not self.navigation:
+            self.line()
+        self._brand()
+        self._brand_visible = True
         self.line(self._style("  Esc/Q cancels menus · Ctrl+C or :q exits anytime", "2"))
 
     def section(self, number: int, title: str, detail: str, *, total: int = 8) -> None:
+        if self.navigation:
+            self._clear_screen()
+            self._brand()
+            width = 32
+            filled = min(width, max(0, round(width * number / max(total, 1))))
+            progress = "━" * filled + "─" * (width - filled)
+            self.line(self._style(f"  {progress}  {number}/{total}", "36"))
+            self._brand_visible = True
+        elif not self._brand_visible:
+            self.banner()
         self.line()
         self.line(self._style(f"  {number}/{total}  {title}", "1;34"))
         self.line(f"  {detail}")
+        if self.navigation:
+            self.line(self._style("  Esc/Q cancel · Enter confirm", "2"))
 
     def token_preview(self, token: str) -> str:
         if len(token) <= 8:
@@ -142,7 +165,13 @@ class _TerminalWizard:
 
     def ask(self, prompt: str, *, default: str | None = None) -> str:
         suffix = f" [{default}]" if default else ""
-        value = self.input_fn(f"  {prompt}{suffix}: ").strip()
+        if self.navigation:
+            self.line()
+            self.line(self._style(f"  {prompt}{suffix}", "1"))
+            self.line(self._style("  Type a value, then press Enter · :q cancel", "2"))
+            value = self.input_fn("  > ").strip()
+        else:
+            value = self.input_fn(f"  {prompt}{suffix}: ").strip()
         if value.lower() in {":q", ":quit", ":exit"}:
             raise UserCancelledError("installation cancelled by user")
         return value or (default or "")
@@ -156,7 +185,18 @@ class _TerminalWizard:
 
     def secret(self, prompt: str) -> str:
         while True:
-            value = self.secret_fn(f"  {prompt}: ").strip()
+            if self.navigation:
+                self.line()
+                self.line(self._style(f"  {prompt}", "1"))
+                self.line(
+                    self._style(
+                        "  Input is hidden · Enter confirm · type :q to cancel",
+                        "2",
+                    )
+                )
+                value = self.secret_fn("  > ").strip()
+            else:
+                value = self.secret_fn(f"  {prompt}: ").strip()
             if value.lower() in {":q", ":quit", ":exit"}:
                 raise UserCancelledError("installation cancelled by user")
             if value:
@@ -189,6 +229,13 @@ class _TerminalWizard:
             self.line(self._style("  Select one of the listed options.", "31"))
 
     def confirm(self, prompt: str, *, default: bool = True) -> bool:
+        if self.navigation:
+            answer = self.choose(
+                prompt,
+                (_Choice("yes", "Yes"), _Choice("no", "No")),
+                default=1 if default else 2,
+            )
+            return answer == "yes"
         answer = self.ask(prompt, default="yes" if default else "no").lower()
         while answer not in {"yes", "no", "y", "n"}:
             self.line(self._style("  Enter yes or no.", "31"))
@@ -293,7 +340,6 @@ def build_interactive_config(
 ) -> InstallerConfig:
     ui = _TerminalWizard(input_fn=input_fn, secret_fn=secret_fn, output=output)
     try:
-        ui.banner()
         ui.section(0, "PREFLIGHT", "Linux host and installed agents", total=8)
         from .hardware import detect_devices
         from .paths import InstallerPaths
@@ -718,7 +764,6 @@ def choose_existing_install_action(
     """Select one safe operation when the installer finds an existing deployment."""
 
     ui = _TerminalWizard(input_fn=input_fn, secret_fn=getpass.getpass, output=output)
-    ui.banner()
     ui.section(
         1,
         "EXISTING INSTALLATION",
