@@ -6,12 +6,12 @@ import pytest
 from ledgermind_local.installer.errors import ProviderProbeError
 from ledgermind_local.installer.openrouter import list_openrouter_model_endpoints
 
+MODEL = "deepseek/deepseek-v4-flash-0731"
+
 
 def test_openrouter_discovery_keeps_only_strict_schema_endpoints() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path.endswith(
-            "/models/deepseek/deepseek-v4-flash-0731/endpoints"
-        )
+        assert request.url.path.endswith(f"/models/{MODEL}/endpoints")
         return httpx.Response(
             200,
             json={
@@ -42,7 +42,7 @@ def test_openrouter_discovery_keeps_only_strict_schema_endpoints() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         endpoints = list_openrouter_model_endpoints(
-            "deepseek/deepseek-v4-flash-0731", token="secret", client=client
+            MODEL, token="secret", client=client
         )
 
     assert [endpoint.route for endpoint in endpoints] == ["baidu/fp8"]

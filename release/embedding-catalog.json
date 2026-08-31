@@ -8,7 +8,7 @@
       "license": "NVIDIA Open Model License",
       "dimensions": 2048,
       "devices": ["cpu", "cuda", "rocm"],
-      "runtime_id": "sentence-transformers-nemotron-v1",
+      "runtime_id": "sentence-transformers-nemotron",
       "runtime_compatibility": {
         "engine": "sentence-transformers",
         "query_method": "encode_query",

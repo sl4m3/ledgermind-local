@@ -17,14 +17,25 @@ destination=${TMPDIR:-/tmp}/"$asset.$$"
 cleanup() { rm -f "$destination"; }
 trap cleanup EXIT INT TERM
 
+printf '%s\n' "LedgerMind: downloading $asset" >&2
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$base_url/$asset" -o "$destination"
+  if [ -t 2 ]; then
+    curl --fail --location --show-error --progress-bar \
+      "$base_url/$asset" -o "$destination"
+  else
+    curl -fsSL "$base_url/$asset" -o "$destination"
+  fi
 elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$destination" "$base_url/$asset"
+  if [ -t 2 ]; then
+    wget -O "$destination" "$base_url/$asset"
+  else
+    wget -qO "$destination" "$base_url/$asset"
+  fi
 else
   printf '%s\n' "curl or wget is required" >&2
   exit 5
 fi
+printf '%s\n' "LedgerMind: download complete; starting setup" >&2
 
 chmod 700 "$destination"
 export LEDGERMIND_RELEASE_BASE_URL="$base_url"

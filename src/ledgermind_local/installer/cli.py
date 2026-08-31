@@ -14,7 +14,13 @@ from typing import Any
 
 from ledgermind_local.runtime.supervisor import RuntimeSupervisor
 
-from .errors import ConfigurationError, ExitCode, InstallerError, ProviderProbeError
+from .errors import (
+    ConfigurationError,
+    ExitCode,
+    InstallerError,
+    ProviderProbeError,
+    UserCancelledError,
+)
 from .models import InstallerConfig
 from .non_interactive import load_non_interactive_config
 from .operations.configure import configure
@@ -1032,6 +1038,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json_output=bool(args.json_output),
             )
         parser.error("unsupported installer command")
+    except UserCancelledError:
+        result = InstallResult(
+            operation,
+            exit_code=ExitCode.USER_CANCELLED,
+            status="cancelled",
+        )
+        return _emit(result, json_output=bool(getattr(args, "json_output", False)))
     except InstallerError as exc:
         result = InstallResult(operation, exit_code=exc.exit_code)
         result.fail(exc.exit_code, str(exc))

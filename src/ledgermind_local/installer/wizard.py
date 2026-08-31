@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import select
 import sys
 import termios
 import tty
@@ -69,6 +70,7 @@ class _TerminalWizard:
         self.line(self._style("  LEDGERMIND SETUP", "1;36"))
         self.line("  Private memory for your local agents")
         self.line("  " + "─" * 48)
+        self.line(self._style("  Esc/Q cancels menus · Ctrl+C or :q exits anytime", "2"))
 
     def section(self, number: int, title: str, detail: str, *, total: int = 8) -> None:
         self.line()
@@ -90,34 +92,59 @@ class _TerminalWizard:
             tty.setraw(descriptor)
             while True:
                 self.output.write("\033[?25l")
-                self.line(f"  {prompt}")
+                self._menu_line(f"  {prompt}")
                 for index, choice in enumerate(choices):
                     marker = self._style("›", "1;36") if index == selected else " "
                     detail = f" — {choice.detail}" if choice.detail else ""
-                    self.line(f"  {marker} {choice.label}{detail}")
-                self.line(self._style("  ↑/↓ move   Enter select", "2"))
+                    self._menu_line(f"  {marker} {choice.label}{detail}")
+                self._menu_line(
+                    self._style("  ↑/↓ move   Enter select   Esc/Q cancel", "2")
+                )
                 self.output.flush()
                 key = os.read(descriptor, 1)
                 if key == b"\x1b":
-                    tail = os.read(descriptor, 2)
+                    tail = self._escape_tail(descriptor)
                     if tail == b"[A":
                         selected = (selected - 1) % len(choices)
                     elif tail == b"[B":
                         selected = (selected + 1) % len(choices)
+                    else:
+                        raise UserCancelledError("installation cancelled by user")
                 elif key in {b"\r", b"\n"}:
                     return choices[selected].value
+                elif key in {b"q", b"Q"}:
+                    raise UserCancelledError("installation cancelled by user")
                 elif key == b"\x03":
                     raise KeyboardInterrupt
                 # Redraw only this compact selector.
-                self.output.write(f"\033[{len(choices) + 2}A\033[J")
+                self.output.write(f"\r\033[{len(choices) + 2}A\033[J")
         finally:
             termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
             self.output.write("\033[?25h")
             self.output.flush()
 
+    def _menu_line(self, text: str) -> None:
+        """Render a selector row independently of raw-terminal newline rules."""
+
+        self.output.write(f"\r\033[2K{text}\r\n")
+
+    @staticmethod
+    def _escape_tail(descriptor: int) -> bytes:
+        """Read a bounded arrow-key suffix without blocking on a bare Escape."""
+
+        tail = bytearray()
+        for _ in range(2):
+            readable, _, _ = select.select((descriptor,), (), (), 0.05)
+            if not readable:
+                break
+            tail.extend(os.read(descriptor, 1))
+        return bytes(tail)
+
     def ask(self, prompt: str, *, default: str | None = None) -> str:
         suffix = f" [{default}]" if default else ""
         value = self.input_fn(f"  {prompt}{suffix}: ").strip()
+        if value.lower() in {":q", ":quit", ":exit"}:
+            raise UserCancelledError("installation cancelled by user")
         return value or (default or "")
 
     def required(self, prompt: str, *, default: str | None = None) -> str:
@@ -130,6 +157,8 @@ class _TerminalWizard:
     def secret(self, prompt: str) -> str:
         while True:
             value = self.secret_fn(f"  {prompt}: ").strip()
+            if value.lower() in {":q", ":quit", ":exit"}:
+                raise UserCancelledError("installation cancelled by user")
             if value:
                 return value
             self.line(self._style("  A token is required.", "31"))
@@ -150,6 +179,8 @@ class _TerminalWizard:
             self.line(f"    {marker}. {choice.label}{detail}")
         while True:
             raw = self.ask("Select", default=str(default)).lower()
+            if raw in {"q", "quit", "exit"}:
+                raise UserCancelledError("installation cancelled by user")
             if raw.isdigit() and 1 <= int(raw) <= len(choices):
                 return choices[int(raw) - 1].value
             for choice in choices:
@@ -177,22 +208,29 @@ class _TerminalWizard:
                 tty.setraw(descriptor)
                 while True:
                     self.output.write("\033[?25l")
-                    self.line("  Select agents")
+                    self._menu_line("  Select agents")
                     for index, (_, label) in enumerate(discovered):
                         pointer = self._style("›", "1;36") if index == cursor else " "
                         checked = "[x]" if index in selected else "[ ]"
-                        self.line(f"  {pointer} {checked} {label}")
-                    self.line(
-                        self._style("  ↑/↓ move   Space toggle   Enter continue", "2")
+                        self._menu_line(f"  {pointer} {checked} {label}")
+                    self._menu_line(
+                        self._style(
+                            "  ↑/↓ move   Space toggle   Enter continue   Esc/Q cancel",
+                            "2",
+                        )
                     )
                     self.output.flush()
                     key = os.read(descriptor, 1)
                     if key == b"\x1b":
-                        tail = os.read(descriptor, 2)
+                        tail = self._escape_tail(descriptor)
                         if tail == b"[A":
                             cursor = (cursor - 1) % len(discovered)
                         elif tail == b"[B":
                             cursor = (cursor + 1) % len(discovered)
+                        else:
+                            raise UserCancelledError(
+                                "installation cancelled by user"
+                            )
                     elif key == b" ":
                         if cursor in selected:
                             selected.remove(cursor)
@@ -204,9 +242,11 @@ class _TerminalWizard:
                             for index, (identifier, _) in enumerate(discovered)
                             if index in selected
                         )
+                    elif key in {b"q", b"Q"}:
+                        raise UserCancelledError("installation cancelled by user")
                     elif key == b"\x03":
                         raise KeyboardInterrupt
-                    self.output.write(f"\033[{len(discovered) + 2}A\033[J")
+                    self.output.write(f"\r\033[{len(discovered) + 2}A\033[J")
             finally:
                 termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
                 self.output.write("\033[?25h")
@@ -217,6 +257,8 @@ class _TerminalWizard:
         self.line("  Enter comma-separated numbers, 'all', or 'none'.")
         while True:
             raw = self.ask("Connect", default="all").lower()
+            if raw in {"q", "quit", "exit"}:
+                raise UserCancelledError("installation cancelled by user")
             if raw == "all":
                 return tuple(identifier for identifier, _ in discovered)
             if raw == "none":

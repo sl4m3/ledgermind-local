@@ -17,7 +17,7 @@ from ledgermind_local.installer.config_writer import (
     load_installer_config,
     write_installer_config,
 )
-from ledgermind_local.installer.errors import ProviderProbeError
+from ledgermind_local.installer.errors import ProviderProbeError, UserCancelledError
 from ledgermind_local.installer.models import (
     EmbeddingApiConfig,
     EmbeddingConfig,
@@ -204,6 +204,89 @@ def test_terminal_wizard_uses_reference_openrouter_configuration(
     assert "Token accepted:" in output.getvalue()
     assert "secret" not in output.getvalue()
     assert "baidu/fp8 → deepinfra/fp8 (restricted)" in output.getvalue()
+
+
+def test_navigation_menu_keeps_rows_aligned_and_q_cancels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeStdin:
+        @staticmethod
+        def fileno() -> int:
+            return 41
+
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    output = io.StringIO()
+    terminal = wizard._TerminalWizard(
+        input_fn=input,
+        secret_fn=lambda _prompt: "secret",
+        output=output,
+    )
+    terminal.color = False
+    terminal.navigation = True
+    monkeypatch.setattr(wizard.sys, "stdin", _FakeStdin())
+    monkeypatch.setattr(wizard.termios, "tcgetattr", lambda _descriptor: [])
+    monkeypatch.setattr(wizard.termios, "tcsetattr", lambda *_arguments: None)
+    monkeypatch.setattr(wizard.tty, "setraw", lambda _descriptor: None)
+    monkeypatch.setattr(wizard.os, "read", lambda _descriptor, _size: b"q")
+
+    with pytest.raises(UserCancelledError, match="cancelled"):
+        terminal.choose(
+            "Choose a semantic language",
+            (wizard._Choice("en", "English"), wizard._Choice("es", "Spanish")),
+        )
+
+    rendered = output.getvalue()
+    assert "\r\033[2K  Choose a semantic language\r\n" in rendered
+    assert "\r\033[2K  › English\r\n" in rendered
+    assert "Esc/Q cancel" in rendered
+
+
+def test_bare_escape_is_bounded_and_line_mode_has_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wizard.select, "select", lambda *_arguments: ((), (), ()))
+    assert wizard._TerminalWizard._escape_tail(41) == b""
+
+    terminal = wizard._TerminalWizard(
+        input_fn=lambda _prompt: ":q",
+        secret_fn=lambda _prompt: "secret",
+        output=io.StringIO(),
+    )
+    with pytest.raises(UserCancelledError, match="cancelled"):
+        terminal.ask("Model")
+
+
+def test_interactive_cancellation_is_not_reported_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_config",
+        lambda _args: (_ for _ in ()).throw(
+            UserCancelledError("installation cancelled by user")
+        ),
+    )
+
+    exit_code = cli.main(("install", "--home", str(tmp_path / "home")))
+
+    captured = capsys.readouterr()
+    assert exit_code == 15
+    assert "install: cancelled (exit_code=15)" in captured.out
+    assert "failed" not in captured.out
+    assert "error:" not in captured.err
+
+
+def test_bootstrap_reports_large_installer_download_progress() -> None:
+    bootstrap = Path("scripts/install.sh").read_text(encoding="utf-8")
+
+    assert "LedgerMind: downloading $asset" in bootstrap
+    assert "--progress-bar" in bootstrap
+    assert "LedgerMind: download complete; starting setup" in bootstrap
 
 
 def test_terminal_wizard_offers_local_embedding_only_from_signed_catalog(
