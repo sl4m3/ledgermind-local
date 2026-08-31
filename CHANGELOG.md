@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.0.0 - 2026-08-31
+
+- Promoted the verified Linux memory pipeline to the first stable 4.0 release.
+- Includes transactional configuration, bounded recovery, provider retry
+  classification, quiescence-aware lifecycle management, and authenticated
+  memory-health diagnostics validated throughout the 4.0 beta cycle.
+
 ## 4.0.0b5 - 2026-08-31
 
 - Classified embedding timeouts, transport failures, HTTP 429 responses, and
