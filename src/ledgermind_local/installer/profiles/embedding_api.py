@@ -30,6 +30,23 @@ class EmbeddingProviderTimeoutError(EmbeddingProviderError):
 EmbeddingRole: TypeAlias = Literal["query", "passage"]
 
 
+def _response_model_matches(
+    *, endpoint: str, configured: str, returned: object
+) -> bool:
+    if returned == configured:
+        return True
+    # OpenRouter's :free suffix selects a routing variant. Its embeddings
+    # response may report the canonical model id without that request suffix
+    # and may expose its internal `private/openrouter/` namespace. Normalize
+    # only these two observed OpenRouter wrappers, then compare exactly.
+    host = (urlparse(endpoint).hostname or "").lower()
+    if host != "openrouter.ai" or not isinstance(returned, str):
+        return False
+    configured_canonical = configured.removesuffix(":free")
+    returned_canonical = returned.removeprefix("private/openrouter/")
+    return returned_canonical == configured_canonical
+
+
 class OpenAICompatibleEmbeddingProvider:
     def __init__(
         self,
@@ -174,22 +191,28 @@ class OpenAICompatibleEmbeddingProvider:
                 "embedding authentication failed"
             )
         if response.status_code >= 400:
+            provider_detail = _provider_error_detail(response_payload)
+            suffix = f": {provider_detail}" if provider_detail else ""
             raise EmbeddingProviderError(
-                f"embedding provider returned {response.status_code}"
+                f"embedding provider returned HTTP {response.status_code}{suffix}"
             )
-        try:
-            envelope = response_payload
-        except ValueError as exc:
-            raise EmbeddingProviderError("embedding response is not JSON") from exc
+        if response_payload is None:
+            raise EmbeddingProviderError("embedding response is not JSON")
+        envelope = response_payload
         data = envelope.get("data") if isinstance(envelope, dict) else None
         if not isinstance(data, list) or len(data) != len(texts):
             raise EmbeddingProviderError(
                 "embedding response has an invalid data length"
             )
         response_model = envelope.get("model") if isinstance(envelope, dict) else None
-        if response_model is not None and response_model != self.model:
+        if response_model is not None and not _response_model_matches(
+            endpoint=self.endpoint,
+            configured=self.model,
+            returned=response_model,
+        ):
             raise EmbeddingProviderError(
-                "embedding response model does not match configuration"
+                "embedding response model does not match configuration "
+                f"(configured {self.model!r}, provider returned {response_model!r})"
             )
         ordered = sorted(
             data,
@@ -203,7 +226,8 @@ class OpenAICompatibleEmbeddingProvider:
             values = tuple(float(value) for value in vector)
             if len(values) != self.dimensions:
                 raise EmbeddingProviderError(
-                    "embedding dimensions do not match configuration"
+                    "embedding dimensions do not match configuration "
+                    f"(configured {self.dimensions}, provider returned {len(values)})"
                 )
             if not all(math.isfinite(value) for value in values):
                 raise EmbeddingProviderError(
@@ -211,6 +235,23 @@ class OpenAICompatibleEmbeddingProvider:
                 )
             vectors.append(values)
         return tuple(vectors)
+
+
+def _provider_error_detail(payload: object) -> str | None:
+    """Extract a bounded provider message without exposing request secrets."""
+
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+    elif isinstance(error, str):
+        message = error
+    else:
+        message = payload.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return None
+    return " ".join(message.split())[:300]
 
 
 __all__ = [

@@ -19,9 +19,9 @@ from ledgermind_local.cli import (
     _build_core_gateway,
     _coalesce_optional,
     _command_serve,
-    _embedding_recovery_pending,
     _install_signal_handlers,
     _restore_signal_handlers,
+    _worker_recovery_pending,
 )
 from ledgermind_local.config import LocalConfig
 from ledgermind_local.core_gateway import (
@@ -30,11 +30,11 @@ from ledgermind_local.core_gateway import (
     ObjectFacetStatistics,
     ProcessCoreGateway,
 )
-from ledgermind_local.core_gateway.signing import CoreBinaryVerificationError
 from ledgermind_local.core_gateway.compatibility import (
     SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
     SUPPORTED_PROTOCOL_MAX,
 )
+from ledgermind_local.core_gateway.signing import CoreBinaryVerificationError
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.service_lock import ServiceLockError
 
@@ -150,7 +150,17 @@ def test_coalesce_optional_returns_fallback() -> None:
     assert _coalesce_optional("0.0.0.0", "default") == "0.0.0.0"
 
 
-def test_embedding_only_backlog_can_recover_during_secure_startup() -> None:
+@pytest.mark.parametrize(
+    "backlog",
+    [
+        {"embedding_backlog": 5},
+        {"operational_backlog": 1},
+        {"background_backlog": 2},
+    ],
+)
+def test_healthy_backlog_can_recover_during_secure_startup(
+    backlog: dict[str, int],
+) -> None:
     report = {
         "readiness_reason": "object_facet_not_ready",
         "terminal_worker_failure": False,
@@ -159,45 +169,47 @@ def test_embedding_only_backlog_can_recover_during_secure_startup() -> None:
             "inference": {"ready": True},
             "workers": {"ready": True},
             "object_facet": {
-                "embedding_backlog": 5,
+                "embedding_backlog": 0,
                 "operational_backlog": 0,
                 "background_backlog": 0,
+                **backlog,
             },
         },
     }
 
-    assert _embedding_recovery_pending(report) is True
+    assert _worker_recovery_pending(report) is True
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("operational_backlog", 1),
-        ("background_backlog", 1),
-        ("embedding_backlog", 0),
+        ("terminal_worker_failure", True),
+        ("core_ready", False),
+        ("empty_backlog", True),
     ],
 )
-def test_embedding_recovery_does_not_hide_other_startup_failures(
-    field: str, value: int
+def test_worker_recovery_does_not_hide_other_startup_failures(
+    field: str, value: object
 ) -> None:
     object_facet = {
         "embedding_backlog": 5,
         "operational_backlog": 0,
         "background_backlog": 0,
-        field: value,
     }
+    if field == "empty_backlog":
+        object_facet["embedding_backlog"] = 0
     report = {
         "readiness_reason": "object_facet_not_ready",
-        "terminal_worker_failure": False,
+        "terminal_worker_failure": value if field == "terminal_worker_failure" else False,
         "components": {
-            "core": {"ready": True},
+            "core": {"ready": value if field == "core_ready" else True},
             "inference": {"ready": True},
             "workers": {"ready": True},
             "object_facet": object_facet,
         },
     }
 
-    assert _embedding_recovery_pending(report) is False
+    assert _worker_recovery_pending(report) is False
 
 
 def test_process_core_backend_builds_process_gateway_without_starting_core(

@@ -17,11 +17,12 @@ from ..secret_refs import (
     LEGACY_EMBEDDING_SECRET_REF,
     LEGACY_GENERATION_SECRET_REF,
 )
+from ..secrets.base import SecretBackend
 
 
-def _get_secret(backend: object, *refs: str) -> str | None:
+def _get_secret(backend: SecretBackend, *refs: str) -> str | None:
     for ref in refs:
-        value = backend.get(ref)  # type: ignore[attr-defined]
+        value = backend.get(ref)
         if value:
             return value
     return None

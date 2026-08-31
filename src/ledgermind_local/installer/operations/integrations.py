@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 def _installed_config(paths: InstallerPaths) -> InstallerConfig:
     if not paths.config_file.is_file():
-        raise ConfigurationError("LedgerMind must be installed before connecting agents")
+        raise ConfigurationError(
+            "LedgerMind must be installed before connecting agents"
+        )
     return load_installer_config(paths.config_file)
 
 
@@ -51,7 +53,11 @@ def discover_integrations() -> dict[str, Any]:
 
 
 def connect_integration(
-    *, paths: InstallerPaths, target_id: str, enabled: bool = True, dry_run: bool = False
+    *,
+    paths: InstallerPaths,
+    target_id: str,
+    enabled: bool = True,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     config = _installed_config(paths)
     adapter = get_target_adapter(target_id)
@@ -79,9 +85,6 @@ def connect_integration(
         installed = adapter.install(context)
         verified = adapter.verify(context)
         persist_installer_config(updated, paths)
-        from ..config_writer import write_local_profiles
-
-        write_local_profiles(updated, paths)
     except Exception:
         try:
             adapter.uninstall(context, purge=False)
@@ -108,6 +111,17 @@ def connect_integration(
         "preflight": preflight,
         "install": installed,
         "verify": verified,
+        "summary": {
+            "label": adapter.label,
+            "agent_location": str(discovery.config_dir or discovery.home or ""),
+            "connected": True,
+            "enabled": enabled,
+            "verification": verified.get("status", "unknown"),
+            "activation_required": verified.get("activation_required"),
+            "memory_mode": config.memory_mode,
+            "memory_space_id": config.memory_space_id_for(target_id),
+            "inference_profiles_preserved": True,
+        },
     }
 
 
@@ -171,6 +185,16 @@ def set_integration_enabled(
         "connected": True,
         "enabled": enabled,
         "config": str(target),
+        "summary": {
+            "label": adapter.label,
+            "agent_location": str(discovery.config_dir or discovery.home or ""),
+            "connected": True,
+            "enabled": enabled,
+            "verification": "not_repeated",
+            "memory_mode": config.memory_mode,
+            "memory_space_id": config.memory_space_id_for(target_id),
+            "inference_profiles_preserved": True,
+        },
     }
 
 
@@ -193,6 +217,14 @@ def disconnect_integration(
         "integration": target_id,
         "connected": False,
         "uninstall": result,
+        "summary": {
+            "label": adapter.label,
+            "agent_location": str(discovery.config_dir or discovery.home or ""),
+            "connected": False,
+            "enabled": False,
+            "verification": "disconnected",
+            "inference_profiles_preserved": True,
+        },
     }
 
 

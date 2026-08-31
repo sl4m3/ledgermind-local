@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,38 @@ from .paths import InstallerPaths
 from .result import InstallResult, ResultStep
 from .schema import schema
 from .targets.registry import target_ids
+
+
+def _record_integration_hook_failure(
+    config_path: Path, event: str, exc: BaseException
+) -> Path | None:
+    """Record a redacted hook failure without exposing prompts or credentials."""
+
+    diagnostic_path = config_path.parent / "hook-errors.jsonl"
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "event": event,
+        "error_type": type(exc).__name__,
+        "error": str(exc)[:1000],
+    }
+    encoded = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    try:
+        diagnostic_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(
+            diagnostic_path,
+            os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+            0o600,
+        )
+        try:
+            os.write(descriptor, encoded)
+        finally:
+            os.close(descriptor)
+        os.chmod(diagnostic_path, 0o600)
+    except OSError:
+        return None
+    return diagnostic_path
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
@@ -70,6 +104,18 @@ def _build_parser() -> argparse.ArgumentParser:
         option.add_argument("--bundle", type=Path)
         option.add_argument("--manifest-signature", type=Path)
         option.add_argument("--skip-provider-probe", action="store_true")
+        option.add_argument(
+            "--existing-mode",
+            choices=("add-agent", "repair", "reconfigure"),
+            help="safe action when LedgerMind is already installed",
+        )
+        option.add_argument(
+            "--agent",
+            action="append",
+            choices=target_ids(),
+            default=[],
+            help="agent to connect with --existing-mode add-agent",
+        )
 
     configure_parser = subparsers.add_parser("configure")
     _common(configure_parser)
@@ -283,6 +329,93 @@ def _config(args: argparse.Namespace) -> tuple[InstallerConfig, str | None, str 
     return build_interactive_config(), None, None
 
 
+def _existing_install(
+    args: argparse.Namespace, paths: InstallerPaths
+) -> dict[str, Any]:
+    """Route a repeated install into one explicit, non-destructive operation."""
+
+    from .config_writer import load_installer_config
+    from .wizard import (
+        build_interactive_config,
+        choose_existing_install_action,
+        choose_integrations_to_connect,
+    )
+
+    existing = load_installer_config(paths.config_file)
+    mode = args.existing_mode
+    if mode is None:
+        if args.non_interactive:
+            raise ConfigurationError(
+                "LedgerMind is already installed; --existing-mode is required "
+                "(add-agent, repair, or reconfigure)"
+            )
+        mode = choose_existing_install_action()
+    if mode == "repair":
+        return repair(paths=paths, dry_run=bool(args.dry_run))
+    if mode == "add-agent":
+        selected = tuple(dict.fromkeys(args.agent))
+        if not selected:
+            if args.non_interactive:
+                raise ConfigurationError(
+                    "--agent is required with --existing-mode add-agent"
+                )
+            selected = choose_integrations_to_connect(existing)
+        if not selected:
+            raise ConfigurationError("no unconnected supported agents were selected")
+        results: dict[str, Any] = {}
+        failures: list[str] = []
+        for target_id in selected:
+            try:
+                results[target_id] = connect_integration(
+                    paths=paths,
+                    target_id=target_id,
+                    dry_run=bool(args.dry_run),
+                )
+            except Exception as exc:  # noqa: BLE001
+                results[target_id] = {"status": "failed", "error": str(exc)}
+                failures.append(target_id)
+        return {
+            "status": "partial" if failures else "success",
+            "existing_install_action": "add-agent",
+            "integrations": results,
+            "integration_failures": failures,
+            "readiness": {
+                "platform": "linux",
+                "core": "unchanged",
+                "generation": "preserved",
+                "embeddings": "preserved",
+                "agents": f"{len(selected) - len(failures)}/{len(selected)} connected",
+                "memory_mode": existing.memory_mode,
+            },
+        }
+    if args.config is not None:
+        candidate, generation_stdin, embedding_stdin = _config(args)
+    else:
+        if args.non_interactive:
+            raise ConfigurationError(
+                "--config is required with --existing-mode reconfigure"
+            )
+        candidate = build_interactive_config(existing_config=existing)
+        generation_stdin = None
+        embedding_stdin = None
+    # Reconfiguration owns provider identities only.  Agent selection, memory
+    # topology, language, runtime settings, and storage paths remain stable.
+    provider_config = existing.model_copy(
+        update={
+            "generation": candidate.generation,
+            "embedding": candidate.embedding,
+        }
+    )
+    return configure(
+        config=provider_config,
+        paths=paths,
+        validate_providers=True,
+        generation_stdin=generation_stdin,
+        embedding_stdin=embedding_stdin,
+        dry_run=bool(args.dry_run),
+    )
+
+
 def _result(
     operation: str,
     *,
@@ -350,11 +483,162 @@ def _emit(result: InstallResult, *, json_output: bool) -> int:
         )
         for step in result.steps:
             print(f"- {step.name}: {step.status}")
+        _emit_integration_details(result)
+        _emit_install_details(result)
+        _emit_uninstall_details(result)
         for warning in result.warnings:
             print(f"warning: {warning}", file=sys.stderr)
         for error in result.errors:
             print(f"error: {error}", file=sys.stderr)
     return int(result.exit_code)
+
+
+def _emit_integration_details(result: InstallResult) -> None:
+    if result.operation not in {
+        "integrations discover",
+        "integrations status",
+        "integrations connect",
+        "integrations enable",
+        "integrations disable",
+        "integrations disconnect",
+    }:
+        return
+    if result.operation not in {"integrations discover", "integrations status"}:
+        step = result.steps[-1] if result.steps else None
+        if step is None:
+            return
+        data = step.data
+        summary = data.get("summary")
+        if not isinstance(summary, dict):
+            return
+        print("\nIntegration result:")
+        print(
+            f"  Agent:        {summary.get('label', data.get('integration', 'unknown'))}"
+        )
+        if summary.get("agent_location"):
+            print(f"  Location:     {summary['agent_location']}")
+        print(f"  Connected:    {'yes' if summary.get('connected') else 'no'}")
+        print(f"  Enabled:      {'yes' if summary.get('enabled') else 'no'}")
+        if summary.get("verification"):
+            print(f"  Verification: {summary['verification']}")
+        if summary.get("memory_space_id"):
+            print(f"  Memory space: {summary['memory_space_id']}")
+        print("  Models:       preserved")
+        activation = summary.get("activation_required")
+        if activation:
+            print(f"  Next step:    {activation}")
+        else:
+            print("  Next step:    send a message to the agent")
+        return
+    step = next(
+        (
+            item
+            for item in result.steps
+            if isinstance(item.data.get("integrations"), dict)
+        ),
+        None,
+    )
+    if step is None:
+        return
+    integrations = step.data["integrations"]
+    heading = (
+        "Detected agents:"
+        if result.operation == "integrations discover"
+        else "Agent integrations:"
+    )
+    print(f"\n{heading}")
+    for target_id, raw_item in integrations.items():
+        if not isinstance(raw_item, dict):
+            continue
+        discovery = (
+            raw_item.get("discovery", raw_item)
+            if result.operation == "integrations status"
+            else raw_item
+        )
+        if not isinstance(discovery, dict):
+            discovery = {}
+        label = str(discovery.get("label") or target_id)
+        detected = bool(discovery.get("detected"))
+        if result.operation == "integrations discover":
+            location = discovery.get("config_dir") or discovery.get("home")
+            detail = str(discovery.get("detail") or "").strip()
+            suffix = f" — {location}" if detected and location else ""
+            if not detected and detail:
+                suffix = f" — {detail}"
+            print(
+                f"  {label} ({target_id}): "
+                f"{'found' if detected else 'not found'}{suffix}"
+            )
+            continue
+        fields = [
+            f"detected={'yes' if detected else 'no'}",
+            f"connected={'yes' if raw_item.get('connected') else 'no'}",
+            f"enabled={'yes' if raw_item.get('enabled') else 'no'}",
+        ]
+        verification = raw_item.get("verify")
+        if isinstance(verification, dict) and verification.get("status"):
+            fields.append(f"verify={verification['status']}")
+        print(f"  {label} ({target_id}): {', '.join(fields)}")
+        if not detected and discovery.get("detail"):
+            print(f"    {discovery['detail']}")
+        if isinstance(verification, dict) and verification.get("activation_required"):
+            print(f"    note: {verification['activation_required']}")
+
+
+def _emit_install_details(result: InstallResult) -> None:
+    if result.operation not in {"install", "configure", "repair", "update"}:
+        return
+    step = result.steps[-1] if result.steps else None
+    if step is None:
+        return
+    readiness = step.data.get("readiness")
+    if not isinstance(readiness, dict):
+        return
+    print("\nReadiness:")
+    for label, key in (
+        ("Platform", "platform"),
+        ("Core", "core"),
+        ("Generation", "generation"),
+        ("Embeddings", "embeddings"),
+        ("Smoke test", "smoke_test"),
+        ("Agents", "agents"),
+        ("Memory", "memory_mode"),
+    ):
+        value = readiness.get(key)
+        if value is not None:
+            print(f"  {label + ':':12} {value}")
+    print("  Diagnose:    ledgermind doctor")
+
+
+def _emit_uninstall_details(result: InstallResult) -> None:
+    if result.operation != "uninstall" or not result.steps:
+        return
+    data = result.steps[-1].data
+    print("\nRemoval result:")
+    print(f"  Memory:      {'preserved' if data.get('preserved_data') else 'removed'}")
+    print(
+        f"  Config:      {'preserved' if data.get('preserved_config') else 'removed'}"
+    )
+    backup = data.get("memory_backup")
+    if backup:
+        print(f"  Backup:      {backup}")
+    elif data.get("backup_status"):
+        print(f"  Backup:      {data['backup_status']}")
+
+
+def _terminal_progress(phase: str, message: str) -> None:
+    """Small stable progress surface for the interactive terminal installer."""
+
+    labels = {
+        "providers": "CHECK",
+        "download": "FETCH",
+        "verify": "VERIFY",
+        "embeddings": "MODEL",
+        "install": "INSTALL",
+        "agents": "AGENTS",
+        "complete": "DONE",
+    }
+    print(f"  [{labels.get(phase, phase.upper())}] {message}", file=sys.stderr)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -376,7 +660,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 response = lifecycle.handle_hook(
                     lifecycle.load_lifecycle_config(args.config), args.event, payload
                 )
-            except Exception:  # noqa: BLE001 -- hooks must never break the agent
+            except Exception as exc:  # noqa: BLE001 -- hooks must never break the agent
+                diagnostic_path = _record_integration_hook_failure(
+                    args.config, args.event, exc
+                )
+                location = (
+                    f"; diagnostic: {diagnostic_path}"
+                    if diagnostic_path is not None
+                    else ""
+                )
+                print(
+                    f"ledgermind: {args.event} hook failed: "
+                    f"{type(exc).__name__}: {str(exc)[:500]}{location}",
+                    file=sys.stderr,
+                )
                 response = {}
             if response:
                 context = response.get("additional_context")
@@ -407,7 +704,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return _emit(result, json_output=bool(args.json_output))
         if operation == "install":
+            if paths.config_file.is_file():
+                payload = _existing_install(args, paths)
+                result = _result("install", payload=payload, paths=paths)
+                return _emit(result, json_output=bool(args.json_output))
             config, generation_stdin, embedding_stdin = _config(args)
+            interactive_progress = (
+                _terminal_progress
+                if not bool(args.non_interactive) and not bool(args.json_output)
+                else None
+            )
             payload = install(
                 config=config,
                 paths=paths,
@@ -418,6 +724,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 skip_provider_probe=bool(args.skip_provider_probe),
                 generation_stdin=generation_stdin,
                 embedding_stdin=embedding_stdin,
+                progress=interactive_progress,
             )
             result = _result("install", payload=payload, paths=paths)
             return _emit(result, json_output=bool(args.json_output))
@@ -448,7 +755,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json_output=bool(args.json_output),
             )
         if operation == "update":
-            config, generation_stdin, embedding_stdin = _config(args)
+            if args.config is not None:
+                raise ConfigurationError(
+                    "update preserves provider configuration; use configure to change it"
+                )
+            if not paths.config_file.is_file():
+                raise ConfigurationError("LedgerMind must be installed before update")
+            from .config_writer import load_installer_config
+
+            config = load_installer_config(paths.config_file)
             payload = update(
                 config=config,
                 paths=paths,
@@ -456,8 +771,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 bundle=args.bundle,
                 dry_run=bool(args.dry_run),
                 skip_provider_probe=bool(args.skip_provider_probe),
-                generation_stdin=generation_stdin,
-                embedding_stdin=embedding_stdin,
+                generation_stdin=None,
+                embedding_stdin=None,
             )
             return _emit(
                 _result("update", payload=payload, paths=paths),

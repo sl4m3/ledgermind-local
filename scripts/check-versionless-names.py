@@ -155,7 +155,7 @@ def _is_explicit_version_value(path: str, line: str, start: int) -> bool:
             cursor += 1
         if cursor >= len(line):
             continue
-        if line[cursor] in {"\"", "'"}:
+        if line[cursor] in {'"', "'"}:
             quote = line[cursor]
             stop = line.find(quote, cursor + 1)
             if stop >= 0 and cursor < start < stop:
@@ -186,6 +186,21 @@ def _is_external_provider_url(line: str, start: int, end: int) -> bool:
             continue
         return True
     return False
+
+
+def _is_external_model_identifier(line: str, start: int) -> bool:
+    """Allow a provider-owned model id without weakening product-name checks."""
+
+    if "model" not in line.lower():
+        return False
+    left = start
+    while left > 0 and line[left - 1] not in " \t\"'`=,()[]{}":
+        left -= 1
+    candidate = line[left:]
+    stop = re.search(r"[ \t\"'`,()\[\]{}]", candidate)
+    if stop is not None:
+        candidate = candidate[: stop.start()]
+    return re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+", candidate) is not None
 
 
 def _is_uuid_v4(path: str, line: str, token: str) -> bool:
@@ -224,6 +239,8 @@ def _allowed(
         return True
     if _is_git_porcelain(path, line, token):
         return True
+    if _is_external_model_identifier(line, start):
+        return True
     return _is_external_provider_url(line, start, start + len(token))
 
 
@@ -235,7 +252,11 @@ def _category(path: str, line: str) -> str:
         return "versioned-operation"
     if "capabilit" in context:
         return "versioned-capability"
-    if "route" in context or "router" in context or re.search(r"[\"']/(?:v[0-9]+)", line):
+    if (
+        "route" in context
+        or "router" in context
+        or re.search(r"[\"']/(?:v[0-9]+)", line)
+    ):
         return "versioned-route"
     if "extension" in context:
         return "versioned-extension"
@@ -297,7 +318,13 @@ def scan(root: Path = ROOT) -> tuple[Violation, ...]:
     return tuple(
         sorted(
             violations,
-            key=lambda item: (item.path, item.line, item.column, item.source, item.token),
+            key=lambda item: (
+                item.path,
+                item.line,
+                item.column,
+                item.source,
+                item.token,
+            ),
         )
     )
 

@@ -466,6 +466,7 @@ def _build_bwrap_prefix(
 
     prefix: list[str] = [
         bwrap,
+        "--unshare-user",
         "--unshare-net",
         "--die-with-parent",
         "--new-session",

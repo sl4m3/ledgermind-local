@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from ..config_writer import (
     build_local_config,
+    persist_generation_probe,
     resolve_provider_tokens,
     write_installer_config,
     write_local_config,
@@ -103,10 +105,12 @@ def install(
     bundle_root_override: str | Path | None = None,
     generation_stdin: str | None = None,
     embedding_stdin: str | None = None,
+    progress: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     """Install one release and return safe operation metadata."""
 
     paths.ensure()
+    report = progress or (lambda _phase, _message: None)
     manifest, bundle_root = resolve_manifest(
         manifest_path, bundle_root_override or bundle
     )
@@ -114,7 +118,27 @@ def install(
         plan = install_plan(config, paths=paths, manifest=manifest)
         plan["status"] = "dry_run"
         return plan
+    # Validate user-supplied provider settings before downloading or unpacking
+    # the platform bundle. A bad endpoint/model should fail fast and cheaply.
+    provider_probes: dict[str, Any] = {}
+    if not skip_provider_probe:
+        report("providers", "Checking generation and embedding providers")
+        generation_token, embedding_token = resolve_provider_tokens(
+            config,
+            paths,
+            generation_stdin=generation_stdin,
+            embedding_stdin=embedding_stdin,
+        )
+        provider_probes["generation_probe"] = probe_generation(
+            config.generation, token=generation_token
+        )
+        if config.embedding.mode == "api" and config.embedding.api is not None:
+            assert embedding_token is not None
+            provider_probes["embedding_probe"] = probe_embedding_api(
+                config.embedding.api, token=embedding_token
+            )
     if manifest is None:
+        report("download", "Downloading the signed LedgerMind release")
         fetched_manifest, fetched_signature, fetched_bundle = fetch_release(
             paths,
             public_key=public_key or public_key_from_environment(),
@@ -140,6 +164,7 @@ def install(
     verify_manifest_signature(
         manifest_file, signature_file, public_key or public_key_from_environment()
     )
+    report("verify", "Verifying release signatures and platform compatibility")
     if bundle_root is None:
         bundle_root = fetch_bundle(
             paths,
@@ -149,6 +174,7 @@ def install(
     platform_manifest(manifest)
     preflight = check_preflight(paths)
     plan = install_plan(config, paths=paths, manifest=manifest)
+    plan.update(provider_probes)
     bundle_source = Path(bundle_root)
     if bundle_source.is_file():
         bundle_record = platform_manifest(manifest).bundle
@@ -165,6 +191,7 @@ def install(
     local_embedding_metadata: dict[str, Any] | None = None
     effective_config = config
     if config.embedding.mode == "local" and config.embedding.local is not None:
+        report("embeddings", "Preparing the signed local embedding model")
         entry = manifest.catalog_entry(config.embedding.local.catalog_id)
         local_plan = build_local_embedding_plan(config.embedding.local, entry)
         effective_config = config.model_copy(
@@ -218,27 +245,13 @@ def install(
             paths=paths,
         )
         local_embedding_metadata = local_plan
-    if not skip_provider_probe:
-        generation_token, embedding_token = resolve_provider_tokens(
-            config,
-            paths,
-            generation_stdin=generation_stdin,
-            embedding_stdin=embedding_stdin,
-        )
-        plan["generation_probe"] = probe_generation(
-            config.generation, token=generation_token
-        )
-        if config.embedding.mode == "api" and config.embedding.api is not None:
-            assert embedding_token is not None
-            plan["embedding_probe"] = probe_embedding_api(
-                config.embedding.api, token=embedding_token
-            )
     release_dir = paths.release_dir(manifest.release_version)
     platform_config = effective_config.model_copy(update={"integrations": ()})
     local_database_path = Path(
         build_local_config(platform_config, paths).rounds_database_path
     )
     doctor_report: dict[str, Any] = {}
+    report("install", "Installing the local runtime")
     with (
         InstallerLock(paths.install_lock),
         InstallTransaction(
@@ -260,6 +273,7 @@ def install(
                 paths.secrets_file,
                 paths.config_dir / "local-config.json",
                 paths.data_dir / "local" / "config.json",
+                paths.data_dir / "local" / "server.token",
                 local_database_path,
                 Path(f"{local_database_path}-wal"),
                 Path(f"{local_database_path}-shm"),
@@ -277,12 +291,20 @@ def install(
             config_metadata["local_profiles"] = write_local_profiles(
                 platform_config, paths
             )
+            if not skip_provider_probe:
+                config_metadata["generation_capabilities"] = persist_generation_probe(
+                    platform_config,
+                    paths,
+                    provider_probes["generation_probe"],
+                )
             transaction.switch_current()
             install_bin_link(paths)
             doctor_report = doctor(
                 paths=paths,
                 full_smoke=True,
-                probe_providers=not skip_provider_probe,
+                # Providers were already validated before any download. Do
+                # not spend more API calls repeating the same probe here.
+                probe_providers=False,
                 verify_integrations=False,
             )
             if doctor_report.get("status") != "passed":
@@ -293,6 +315,7 @@ def install(
             raise
     integration_results: dict[str, Any] = {}
     integration_failures: list[str] = []
+    report("agents", "Connecting selected agents")
     for selected in effective_config.integrations:
         try:
             integration_results[selected.id] = connect_integration(
@@ -314,6 +337,60 @@ def install(
             "current": str(paths.current_link),
         },
     )
+    report("complete", "Installation completed")
+    connected_agents = sum(
+        1
+        for item in integration_results.values()
+        if isinstance(item, dict) and item.get("status") == "passed"
+    )
+    total_agents = len(effective_config.integrations)
+    generation_status = (
+        "skipped"
+        if skip_provider_probe
+        else str(provider_probes.get("generation_probe", {}).get("status", "passed"))
+    )
+    if effective_config.embedding.mode == "local":
+        embedding_status = "local-ready"
+    elif skip_provider_probe:
+        embedding_status = "skipped"
+    else:
+        embedding_status = str(
+            provider_probes.get("embedding_probe", {}).get("status", "passed")
+        )
+    generation_route = " -> ".join(
+        item
+        for item in (
+            effective_config.generation.route,
+            *effective_config.generation.fallback_routes,
+        )
+        if item
+    )
+    generation_readiness = (
+        f"{generation_status}; model={effective_config.generation.model}"
+        + (f"; route={generation_route}" if generation_route else "")
+    )
+    if effective_config.embedding.mode == "api":
+        assert effective_config.embedding.api is not None
+        embedding_readiness = (
+            f"{embedding_status}; model={effective_config.embedding.api.model}; "
+            f"dimensions={effective_config.embedding.api.dimensions}"
+        )
+    else:
+        assert effective_config.embedding.local is not None
+        embedding_readiness = (
+            f"{embedding_status}; model={effective_config.embedding.local.catalog_id}"
+        )
+    readiness = {
+        "platform": preflight["platform"],
+        "core": doctor_report.get("status", "unknown"),
+        "generation": generation_readiness,
+        "embeddings": embedding_readiness,
+        "smoke_test": doctor_report.get("smoke_test", {}).get("status", "unknown"),
+        "agents": f"{connected_agents}/{total_agents} connected"
+        if total_agents
+        else "none selected",
+        "memory_mode": effective_config.memory_mode,
+    }
     return {
         "status": "partial" if integration_failures else "success",
         "release_version": manifest.release_version,
@@ -330,6 +407,7 @@ def install(
         "release_dir": str(release_dir),
         "doctor_required": True,
         "smoke_test_required": True,
+        "readiness": readiness,
     }
 
 

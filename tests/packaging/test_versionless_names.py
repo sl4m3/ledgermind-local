@@ -12,7 +12,9 @@ SCRIPT = ROOT / "scripts" / "check-versionless-names.py"
 
 
 def _load_gate():
-    specification = importlib.util.spec_from_file_location("local_versionless_gate", SCRIPT)
+    specification = importlib.util.spec_from_file_location(
+        "local_versionless_gate", SCRIPT
+    )
     if specification is None or specification.loader is None:
         raise RuntimeError("cannot load versionless-name gate")
     module = importlib.util.module_from_spec(specification)
@@ -38,17 +40,14 @@ class LocalVersionlessNamesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             files = {
-                "pyproject.toml": (
-                    "[project]\n"
-                    'version = "v1"\n'
-                    'name = "product-v2"\n'
-                ),
+                "pyproject.toml": ('[project]\nversion = "v1"\nname = "product-v2"\n'),
                 "src/contracts.py": (
                     'payload = { "schema_version": "v1", "protocol_version": "v2", '
                     '"not_schema_version": "v3" }\n'
                     'provider = "https://provider.example/v1"\n'
                     'local = "http://127.0.0.1:8765/v1"\n'
                     "uuid.uuid4();\n"
+                    'model = "provider/model-v4-fast"\n'
                 ),
                 "migrations/0001_historical-v2.sql": "SELECT 1;\n",
                 "src/ledgermind_local/persistence/contract_migration.py": (
@@ -75,6 +74,7 @@ class LocalVersionlessNamesTests(unittest.TestCase):
         self.assertNotIn("untracked_v9.py", rendered)
         self.assertNotIn("provider.example/v1", rendered)
         self.assertNotIn("new_v4", rendered)
+        self.assertNotIn("model-v4-fast", rendered)
         self.assertNotIn("porcelain=v1", rendered)
         self.assertNotIn("0001_historical-v2.sql:0:", rendered)
         self.assertNotIn("contract_migration.py:1:", rendered)

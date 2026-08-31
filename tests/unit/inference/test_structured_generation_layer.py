@@ -589,6 +589,72 @@ def test_malformed_completion_keeps_verified_capability_for_bounded_retry(tmp_pa
         connection.close()
 
 
+def test_provider_shape_failure_keeps_capability_and_allows_fresh_retry(
+    tmp_path,
+) -> None:
+    connection, store = _store()
+    try:
+        store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id="profile",
+                structured_output_mode=STRICT_JSON_SCHEMA_MODE,
+                structured_json_schema=True,
+                native_schema_strictness=True,
+                probe_contract_digest=STRICT_CONTRACT["schema_digest"],
+                probe_status="passed",
+                probe_result="passed",
+            )
+        )
+
+        class FailOnceProvider(_FakeProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attempts = 0
+
+            def complete_json(
+                self, request: ModelRequest, **kwargs: object
+            ) -> ModelResponse:
+                self.attempts += 1
+                if self.attempts == 1:
+                    self.requests.append(request)
+                    raise ProviderResponseError("incomplete provider envelope")
+                return super().complete_json(request, **kwargs)
+
+        fake = FailOnceProvider()
+        provider = StructuredJsonProvider(
+            profile_resolver=StoreBackedProfileResolver(store),
+            secret_store=_secret_store(tmp_path),
+            capability_store=store,
+            provider_factory=lambda _profile, _secret: fake,
+        )
+        request = {
+            "memory_space_id": "space",
+            "messages": (ChatMessage(role="user", content="return"),),
+            "max_output_tokens": 20,
+            "profile_slot": ProfileSlot.OPERATIONAL,
+            "output_contract": STRICT_CONTRACT,
+            "structured_output_requirement": strict_requirement_for_contract(
+                STRICT_CONTRACT
+            ),
+            "mode": STRICT_JSON_SCHEMA_MODE,
+        }
+
+        with pytest.raises(ProviderResponseError):
+            provider.generate_json(**request)
+
+        cached = store.get_capabilities("profile")
+        assert cached is not None
+        assert cached.probe_status == "passed"
+        assert cached.is_fresh(profile_fingerprint="fixture-profile") is True
+
+        result = provider.generate_json(**request)
+
+        assert result.data == {"ok": True}
+        assert fake.attempts == 2
+    finally:
+        connection.close()
+
+
 def test_structured_provider_falls_back_once_after_automatic_mode_rejection(
     tmp_path,
 ) -> None:

@@ -89,9 +89,15 @@ def doctor(
                 paths.config_file,
                 paths.profiles_file,
                 paths.config_dir / "runtime.token",
+                paths.data_dir / "local" / "server.token",
             ):
-                if path.is_file():
-                    assert_private(path, directory=False)
+                if not path.is_file():
+                    raise FileNotFoundError(f"required private file is missing: {path}")
+                assert_private(path, directory=False)
+                if path.name.endswith(".token") and not path.read_text(
+                    encoding="utf-8"
+                ).strip():
+                    raise ValueError(f"required token is empty: {path}")
             for selected in config.integrations:
                 adapter = get_target_adapter(selected.id)
                 discovery = adapter.discover()

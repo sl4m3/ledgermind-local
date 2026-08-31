@@ -33,6 +33,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--signing-key", type=Path, required=True)
     parser.add_argument("--public-key", type=Path)
     parser.add_argument("--site-packages", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--python-runtime",
+        type=Path,
+        help="CPython runtime root containing bin/python3.12",
+    )
     parser.add_argument("--embedding-runtime-cpu", type=Path)
     parser.add_argument("--embedding-runtime-cuda", type=Path)
     parser.add_argument("--embedding-runtime-rocm", type=Path)
@@ -293,17 +298,45 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "prebuilt Python site-packages are required for the Local bundle"
         )
+    required_integration_runtime = (
+        "ledgermind_integrations/adapters/lifecycle/__init__.py",
+        "ledgermind_integrations/adapters/lifecycle/bridge.py",
+        "ledgermind_integrations/adapters/lifecycle/config.py",
+    )
+    missing_integration_runtime = [
+        relative
+        for relative in required_integration_runtime
+        if not (dependency_root / relative).is_file()
+    ]
+    if missing_integration_runtime:
+        raise SystemExit(
+            "prebuilt Python site-packages are missing the lifecycle integration runtime: "
+            + ", ".join(missing_integration_runtime)
+        )
+    python_runtime = args.python_runtime or (installer.parent / "runtime")
+    python_binary = python_runtime / "bin" / "python3.12"
+    if not python_binary.is_file():
+        raise SystemExit(
+            "a bundled CPython 3.12 runtime is required for the Local bundle; "
+            "pass --python-runtime"
+        )
+    _copy_source(python_runtime, bundle / "python" / "runtime")
     local_launcher = bundle / "bin" / "ledgermind-local"
     local_launcher.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
         'root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\n'
+        'runtime="$root/python/runtime/bin/python3.12"\n'
+        'if [ ! -x "$runtime" ]; then\n'
+        "  printf '%s\\n' 'bundled Python 3.12 runtime is missing' >&2\n"
+        "  exit 6\n"
+        "fi\n"
         'if [ -d "$root/python/local/src" ]; then\n'
         '  export PYTHONPATH="$root/python/local/src:$root/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"\n'
         "else\n"
         '  export PYTHONPATH="$root/python/local:$root/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"\n'
         "fi\n"
-        'exec python3 -m ledgermind_local.cli "$@"\n',
+        'exec "$runtime" -m ledgermind_local.cli "$@"\n',
         encoding="utf-8",
     )
     os.chmod(local_launcher, 0o700)

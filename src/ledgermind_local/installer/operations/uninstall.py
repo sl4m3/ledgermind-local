@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import tarfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,29 @@ from ..secret_refs import (
 from ..targets.base import AdapterContext
 from ..targets.registry import get_target_adapter
 from .common import remove_bin_link
+
+
+def _backup_preserved_memory(
+    *, paths: InstallerPaths, config: Any | None
+) -> Path | None:
+    source = paths.memory_data_dir
+    if config is not None and config.memory_data_path:
+        source = Path(config.memory_data_path).expanduser()
+    if not source.is_dir():
+        return None
+    backup_dir = paths.state_dir / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(backup_dir, 0o700)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive = backup_dir / f"ledgermind-memory-uninstall-{stamp}.tar.gz"
+    suffix = 1
+    while archive.exists():
+        archive = backup_dir / f"ledgermind-memory-uninstall-{stamp}-{suffix}.tar.gz"
+        suffix += 1
+    with tarfile.open(archive, "x:gz") as handle:
+        handle.add(source, arcname="memory-data", recursive=True)
+    os.chmod(archive, 0o600)
+    return archive
 
 
 def uninstall(
@@ -44,6 +70,9 @@ def uninstall(
 
         config = load_installer_config(paths.config_file)
     RuntimeSupervisor(paths).stop(force=True)
+    backup_path = (
+        None if purge_data else _backup_preserved_memory(paths=paths, config=config)
+    )
     adapter_result: dict[str, Any] = {}
     if config is not None:
         for selected in config.integrations:
@@ -88,4 +117,10 @@ def uninstall(
         "releases_removed": releases_removed,
         "preserved_data": not purge_data,
         "preserved_config": not purge_config,
+        "memory_backup": str(backup_path) if backup_path is not None else None,
+        "backup_status": (
+            "skipped_purge"
+            if purge_data
+            else ("created" if backup_path is not None else "no_memory_data")
+        ),
     }

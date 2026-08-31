@@ -825,10 +825,10 @@ def _command_serve(args: argparse.Namespace) -> int:
         # content-free bootstrap projection drains; every other not-ready
         # condition remains a hard startup failure.
         bootstrap_initializing = report.get("readiness_reason") == "object_facet_initializing"
-        embedding_recovery = _embedding_recovery_pending(report)
-        if bootstrap_initializing or embedding_recovery:
+        worker_recovery = _worker_recovery_pending(report)
+        if bootstrap_initializing or worker_recovery:
             print(
-                "secure runtime is serving while Core embedding projection is pending",
+                "secure runtime is serving while healthy workers drain Core backlog",
                 file=sys.stderr,
             )
         else:
@@ -877,8 +877,14 @@ def _command_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _embedding_recovery_pending(report: dict[str, Any]) -> bool:
-    """Allow healthy workers to drain an embedding-only startup backlog."""
+def _worker_recovery_pending(report: dict[str, Any]) -> bool:
+    """Allow healthy workers to drain bounded Core work during startup.
+
+    A non-empty operational, background, or embedding queue is work for the
+    Local-owned workers, not a reason to stop those workers before they can
+    process it. All security and execution dependencies must still be ready,
+    and terminal worker failures remain fatal.
+    """
 
     if report.get("readiness_reason") != "object_facet_not_ready":
         return False
@@ -895,12 +901,15 @@ def _embedding_recovery_pending(report: dict[str, Any]) -> bool:
         for name in required_ready
     ):
         return False
-    return (
-        int(object_facet.get("embedding_backlog") or 0) > 0
-        and int(object_facet.get("operational_backlog") or 0) == 0
-        and int(object_facet.get("background_backlog") or 0) == 0
-        and not bool(report.get("terminal_worker_failure"))
+    backlog = sum(
+        max(int(object_facet.get(name) or 0), 0)
+        for name in (
+            "operational_backlog",
+            "background_backlog",
+            "embedding_backlog",
+        )
     )
+    return backlog > 0 and not bool(report.get("terminal_worker_failure"))
 
 
 def _build_runtime_supervisor(*, config: LocalConfig, host: str, port: int) -> object:
@@ -909,7 +918,7 @@ def _build_runtime_supervisor(*, config: LocalConfig, host: str, port: int) -> o
 
     endpoint_host = host if host in {"127.0.0.1", "localhost", "::1"} else "127.0.0.1"
     embedding_command: tuple[str, ...] | None = None
-    if config.embedding.enabled:
+    if config.embedding.enabled and config.embedding.provider_mode == "local":
         embedding_command = (
             sys.executable,
             "-m",

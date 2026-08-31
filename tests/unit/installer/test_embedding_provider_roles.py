@@ -4,13 +4,12 @@ import json
 
 import httpx
 import pytest
-
 from ledgermind_local.inference.gguf_vectorizer import GGUFVectorizer
 from ledgermind_local.inference.openai_vectorizer import OpenAIEmbeddingVectorizer
+from ledgermind_local.inference.vectorizer import VectorizerRoleError
 from ledgermind_local.installer.profiles.embedding_api import (
     OpenAICompatibleEmbeddingProvider,
 )
-from ledgermind_local.inference.vectorizer import VectorizerRoleError
 
 
 def _provider(seen: list[dict[str, object]]) -> OpenAICompatibleEmbeddingProvider:
@@ -53,6 +52,79 @@ def test_openai_embedding_wire_preserves_role(role: str) -> None:
             "input_type": role,
         }
     ]
+
+
+def test_openrouter_accepts_canonical_model_for_free_routing_variant() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "nvidia/nemotron-3-embed-1b",
+                "data": [{"index": 0, "embedding": [1.0, 0.0]}],
+            },
+        )
+
+    provider = OpenAICompatibleEmbeddingProvider(
+        endpoint="https://openrouter.ai/api/v1",
+        token="secret",
+        model="nvidia/nemotron-3-embed-1b:free",
+        dimensions=2,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        assert provider.embed(("probe",)) == ((1.0, 0.0),)
+    finally:
+        provider.close()
+
+
+def test_openrouter_accepts_internal_namespace_for_canonical_model() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "private/openrouter/nvidia/nemotron-3-embed-1b",
+                "data": [{"index": 0, "embedding": [1.0, 0.0]}],
+            },
+        )
+
+    provider = OpenAICompatibleEmbeddingProvider(
+        endpoint="https://openrouter.ai/api/v1",
+        token="secret",
+        model="nvidia/nemotron-3-embed-1b:free",
+        dimensions=2,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        assert provider.embed(("probe",)) == ((1.0, 0.0),)
+    finally:
+        provider.close()
+
+
+def test_embedding_provider_still_rejects_a_different_model() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "nvidia/different-embed-model",
+                "data": [{"index": 0, "embedding": [1.0, 0.0]}],
+            },
+        )
+
+    provider = OpenAICompatibleEmbeddingProvider(
+        endpoint="https://openrouter.ai/api/v1",
+        token="secret",
+        model="nvidia/nemotron-3-embed-1b:free",
+        dimensions=2,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="configured 'nvidia/nemotron-3-embed-1b:free'.*different",
+        ):
+            provider.embed(("probe",))
+    finally:
+        provider.close()
 
 
 def test_openai_vectorizer_keeps_one_role_for_every_batch() -> None:

@@ -26,7 +26,7 @@ cat > /tmp/ledgermind-smoke-install.json <<'JSON'
   "schema_version": 2,
   "semantic_language": "en",
   "generation": {
-    "endpoint": "http://127.0.0.1:65534/v1",
+    "endpoint": "http://127.0.0.1:65534",
     "token_env": "LEDGERMIND_SMOKE_GENERATION_TOKEN",
     "model": "smoke-generation",
     "object_resolution_model": "smoke-generation"
@@ -34,7 +34,7 @@ cat > /tmp/ledgermind-smoke-install.json <<'JSON'
   "embedding": {
     "mode": "api",
     "api": {
-      "endpoint": "http://127.0.0.1:65534/v1",
+      "endpoint": "http://127.0.0.1:65534",
       "token_env": "LEDGERMIND_SMOKE_EMBEDDING_TOKEN",
       "model": "smoke-embedding",
       "dimensions": 3

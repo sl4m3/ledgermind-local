@@ -28,6 +28,7 @@ class LifecycleTargetSpec:
     events: tuple[tuple[str, str, int], ...]
     format: str = "claude"
     executable_aliases: tuple[str, ...] = ()
+    background_events: tuple[str, ...] = ()
 
 
 SPECS = (
@@ -39,12 +40,13 @@ SPECS = (
         (".codex",),
         "hooks.json",
         (
-            ("UserPromptSubmit", "UserPromptSubmit", 5),
+            ("UserPromptSubmit", "UserPromptSubmit", 30),
             ("PreToolUse", "PreToolUse", 5),
             ("PostToolUse", "PostToolUse", 5),
-            ("Stop", "Stop", 10),
+            ("Stop", "Stop", 600),
             ("SessionEnd", "SessionEnd", 3),
         ),
+        background_events=("Stop",),
     ),
     LifecycleTargetSpec(
         "claude-code",
@@ -118,7 +120,9 @@ def _write_object(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _hook_command(context: AdapterContext, target: str, event: str, config: Path) -> str:
+def _hook_command(
+    context: AdapterContext, target: str, event: str, config: Path
+) -> str:
     return shlex.join(
         (
             str(context.paths.bin_link),
@@ -136,7 +140,9 @@ def _owned(command: object) -> bool:
 
 
 def _merge_hooks(
-    payload: dict[str, Any], spec: LifecycleTargetSpec, commands: dict[str, tuple[str, int]]
+    payload: dict[str, Any],
+    spec: LifecycleTargetSpec,
+    commands: dict[str, tuple[str, int]],
 ) -> None:
     hooks = payload.setdefault("hooks", {})
     if not isinstance(hooks, dict):
@@ -147,8 +153,15 @@ def _merge_hooks(
             entries = hooks.setdefault(host_event, [])
             if not isinstance(entries, list):
                 raise AdapterError(f"agent hook {host_event} must be a list")
-            entries[:] = [entry for entry in entries if not (isinstance(entry, dict) and _owned(entry.get("command")))]
-            entries.append({"command": command, "timeout": timeout})
+            entries[:] = [
+                entry
+                for entry in entries
+                if not (isinstance(entry, dict) and _owned(entry.get("command")))
+            ]
+            handler: dict[str, Any] = {"command": command, "timeout": timeout}
+            if host_event in spec.background_events:
+                handler["async"] = True
+            entries.append(handler)
         return
     for host_event, (command, timeout) in commands.items():
         groups = hooks.setdefault(host_event, [])
@@ -172,9 +185,10 @@ def _merge_hooks(
                 copy = dict(group)
                 copy["hooks"] = retained
                 cleaned.append(copy)
-        cleaned.append(
-            {"hooks": [{"type": "command", "command": command, "timeout": timeout}]}
-        )
+        handler = {"type": "command", "command": command, "timeout": timeout}
+        if host_event in spec.background_events:
+            handler["async"] = True
+        cleaned.append({"hooks": [handler]})
         hooks[host_event] = cleaned
 
 
@@ -269,7 +283,11 @@ class LifecycleTargetAdapter(BaseTargetAdapter):
         target = self._agent_config(context)
         config_path = self._config_path(context)
         if context.dry_run:
-            return {"status": "dry_run", "config": str(config_path), "agent_config": str(target)}
+            return {
+                "status": "dry_run",
+                "config": str(config_path),
+                "agent_config": str(target),
+            }
         ensure_private_dir(self._integration_dir(context))
         previous = _read_object(config_path) if config_path.is_file() else {}
         source_instance_id = previous.get("source_instance_id")
@@ -290,7 +308,10 @@ class LifecycleTargetAdapter(BaseTargetAdapter):
         _write_object(config_path, runtime)
         payload = _read_object(target)
         commands = {
-            host_event: (_hook_command(context, self.id, bridge_event, config_path), timeout)
+            host_event: (
+                _hook_command(context, self.id, bridge_event, config_path),
+                timeout,
+            )
             for host_event, bridge_event, timeout in self.spec.events
         }
         _merge_hooks(payload, self.spec, commands)
@@ -321,16 +342,22 @@ class LifecycleTargetAdapter(BaseTargetAdapter):
         expected = len(self.spec.events)
         actual = serialized.count(" integration-hook ")
         if actual != expected:
-            raise AdapterError(f"{self.label} requires {expected} LedgerMind hooks, found {actual}")
+            raise AdapterError(
+                f"{self.label} requires {expected} LedgerMind hooks, found {actual}"
+            )
         result: dict[str, Any] = {"status": "passed", "hooks": actual}
         if self.id == "codex":
-            result["activation_required"] = "Review and trust LedgerMind hooks with /hooks"
+            result["activation_required"] = (
+                "Review and trust LedgerMind hooks with /hooks"
+            )
         return result
 
     def repair(self, context: AdapterContext) -> dict[str, Any]:
         return self.install(context)
 
-    def uninstall(self, context: AdapterContext, *, purge: bool = False) -> dict[str, Any]:
+    def uninstall(
+        self, context: AdapterContext, *, purge: bool = False
+    ) -> dict[str, Any]:
         target = self._agent_config(context)
         removed = 0
         if target.is_file():
@@ -347,15 +374,30 @@ class LifecycleTargetAdapter(BaseTargetAdapter):
 
     def runtime_environment(self, context: AdapterContext) -> dict[str, str]:
         key = f"LEDGERMIND_{self.id.upper().replace('-', '_')}_CONFIG"
-        return {key: str(self._config_path(context)), "LEDGERMIND_RUNTIME_ENDPOINT": "http://127.0.0.1:8765"}
+        return {
+            key: str(self._config_path(context)),
+            "LEDGERMIND_RUNTIME_ENDPOINT": "http://127.0.0.1:8765",
+        }
 
 
 PLUGIN_SPECS = (
     LifecycleTargetSpec(
-        "opencode", "OpenCode", "opencode", "OPENCODE_CONFIG_DIR", (".config", "opencode"), "opencode.json", ()
+        "opencode",
+        "OpenCode",
+        "opencode",
+        "OPENCODE_CONFIG_DIR",
+        (".config", "opencode"),
+        "opencode.json",
+        (),
     ),
     LifecycleTargetSpec(
-        "openclaw", "OpenClaw", "openclaw", "OPENCLAW_HOME", (".openclaw",), "openclaw.json", ()
+        "openclaw",
+        "OpenClaw",
+        "openclaw",
+        "OPENCLAW_HOME",
+        (".openclaw",),
+        "openclaw.json",
+        (),
     ),
 )
 
@@ -365,10 +407,14 @@ class PluginTargetAdapter(LifecycleTargetAdapter):
 
     def _payload(self, context: AdapterContext) -> Path:
         if context.bundle_root is None:
-            raise AdapterError(f"signed {self.label} payload is missing from platform bundle")
+            raise AdapterError(
+                f"signed {self.label} payload is missing from platform bundle"
+            )
         payload = context.bundle_root / "integrations" / self.id / "plugin"
         if not payload.is_dir():
-            raise AdapterError(f"signed {self.label} payload is missing from platform bundle")
+            raise AdapterError(
+                f"signed {self.label} payload is missing from platform bundle"
+            )
         return payload
 
     def _plugin_root(self, context: AdapterContext) -> Path:
@@ -417,7 +463,11 @@ class PluginTargetAdapter(LifecycleTargetAdapter):
         plugin_root = self._plugin_root(context)
         config_path = self._config_path(context)
         if context.dry_run:
-            return {"status": "dry_run", "plugin_root": str(plugin_root), "config": str(config_path)}
+            return {
+                "status": "dry_run",
+                "plugin_root": str(plugin_root),
+                "config": str(config_path),
+            }
         config_path = self._write_runtime_config(context)
         plugin_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         record_path = self._integration_dir(context) / "installation-record.json"
@@ -435,11 +485,15 @@ class PluginTargetAdapter(LifecycleTargetAdapter):
             raise AdapterError(f"signed {self.label} payload is empty")
         for source in sources:
             relative = source.relative_to(payload)
-            destination = plugin_root / ("ledgermind.js" if self.id == "opencode" else relative)
+            destination = plugin_root / (
+                "ledgermind.js" if self.id == "opencode" else relative
+            )
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             before = self._record(destination)
             content = source.read_text(encoding="utf-8")
-            content = content.replace("__LEDGERMIND_COMMAND__", str(context.paths.bin_link))
+            content = content.replace(
+                "__LEDGERMIND_COMMAND__", str(context.paths.bin_link)
+            )
             content = content.replace("__LEDGERMIND_CONFIG__", str(config_path))
             destination.write_text(content, encoding="utf-8")
             os.chmod(destination, 0o600)
@@ -476,21 +530,33 @@ class PluginTargetAdapter(LifecycleTargetAdapter):
                 previous_record.get("openclaw_allow_added") or not already_allowed
             )
         _write_object(record_path, record)
-        return {"status": "passed", "plugin_root": str(plugin_root), "config": str(config_path)}
+        return {
+            "status": "passed",
+            "plugin_root": str(plugin_root),
+            "config": str(config_path),
+        }
 
     def verify(self, context: AdapterContext) -> dict[str, Any]:
         root = self._plugin_root(context)
         required = (
             (root / "ledgermind.js",)
             if self.id == "opencode"
-            else (root / "index.js", root / "package.json", root / "openclaw.plugin.json")
+            else (
+                root / "index.js",
+                root / "package.json",
+                root / "openclaw.plugin.json",
+            )
         )
         missing = [str(path) for path in required if not path.is_file()]
         if missing or not self._config_path(context).is_file():
-            raise AdapterError(f"{self.label} integration files are missing: {', '.join(missing)}")
+            raise AdapterError(
+                f"{self.label} integration files are missing: {', '.join(missing)}"
+            )
         return {"status": "passed", "plugin_root": str(root)}
 
-    def uninstall(self, context: AdapterContext, *, purge: bool = False) -> dict[str, Any]:
+    def uninstall(
+        self, context: AdapterContext, *, purge: bool = False
+    ) -> dict[str, Any]:
         record_path = self._integration_dir(context) / "installation-record.json"
         record = _read_object(record_path) if record_path.is_file() else {"files": {}}
         restored = 0
@@ -500,7 +566,9 @@ class PluginTargetAdapter(LifecycleTargetAdapter):
             config = _read_object(agent_config)
             plugins = config.get("plugins")
             entries = plugins.get("entries") if isinstance(plugins, dict) else None
-            current = entries.get("ledgermind-memory") if isinstance(entries, dict) else None
+            current = (
+                entries.get("ledgermind-memory") if isinstance(entries, dict) else None
+            )
             if current == record.get("openclaw_entry"):
                 assert isinstance(entries, dict)
                 entries.pop("ledgermind-memory", None)
@@ -508,11 +576,16 @@ class PluginTargetAdapter(LifecycleTargetAdapter):
             elif current is not None:
                 skipped += 1
             allowed = plugins.get("allow") if isinstance(plugins, dict) else None
-            if record.get("openclaw_allow_added") and isinstance(allowed, list):
-                plugins["allow"] = [
+            if (
+                record.get("openclaw_allow_added")
+                and isinstance(plugins, dict)
+                and isinstance(allowed, list)
+            ):
+                filtered_allow = [
                     item for item in allowed if item != "ledgermind-memory"
                 ]
-                restored += len(allowed) - len(plugins["allow"])
+                plugins["allow"] = filtered_allow
+                restored += len(allowed) - len(filtered_allow)
             _write_object(agent_config, config)
         for name, details in dict(record.get("files", {})).items():
             path = Path(name)
@@ -534,7 +607,11 @@ class PluginTargetAdapter(LifecycleTargetAdapter):
         else:
             self._config_path(context).unlink(missing_ok=True)
             record_path.unlink(missing_ok=True)
-        return {"status": "passed", "restored": restored, "skipped_user_changes": skipped}
+        return {
+            "status": "passed",
+            "restored": restored,
+            "skipped_user_changes": skipped,
+        }
 
 
 __all__ = [

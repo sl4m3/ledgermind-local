@@ -8,26 +8,50 @@ from typing import Any
 
 import httpx
 
-from ..errors import ProviderProbeError
+from ...inference.providers.openai_compatible import provider_request_headers
 from ...inference.strict import (
     STRICT_SCHEMA_PROFILE_VERSION,
     canonical_digest,
     validate_strict_schema_profile,
 )
-from ...inference.providers.openai_compatible import provider_request_headers
+from ..errors import ProviderProbeError
 from ..models import EmbeddingApiConfig, GenerationConfig
-from .embedding_api import OpenAICompatibleEmbeddingProvider
+from ..provider_profiles import generation_provider_profile
+from .embedding_api import EmbeddingProviderError, OpenAICompatibleEmbeddingProvider
+
+
+def _response_error_detail(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+    elif isinstance(error, str):
+        message = error
+    else:
+        message = payload.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return None
+    return " ".join(message.split())[:300]
 
 
 def _safe_status(response: httpx.Response) -> None:
+    detail = _response_error_detail(response)
+    suffix = f": {detail}" if detail else ""
     if response.status_code in {401, 403}:
-        raise ProviderProbeError("provider authentication failed")
+        raise ProviderProbeError(f"provider authentication failed{suffix}")
     if response.status_code == 404:
-        raise ProviderProbeError("provider endpoint or model was not found")
+        raise ProviderProbeError(f"provider endpoint or model was not found{suffix}")
     if response.status_code == 429:
-        raise ProviderProbeError("provider rate limit was reached")
+        raise ProviderProbeError(f"provider rate limit was reached{suffix}")
     if response.status_code >= 400:
-        raise ProviderProbeError(f"provider returned HTTP {response.status_code}")
+        raise ProviderProbeError(
+            f"provider returned HTTP {response.status_code}{suffix}"
+        )
 
 
 _STRICT_PROBE_SCHEMA: dict[str, object] = {
@@ -46,6 +70,8 @@ _STRICT_PROBE_SCHEMA: dict[str, object] = {
     "required": ["schema_version", "state", "items"],
 }
 
+_GENERATION_PROBE_MAX_TOKENS = 256
+
 
 def _strict_probe_output(payload: object) -> bool:
     if not isinstance(payload, dict):
@@ -60,7 +86,34 @@ def _strict_probe_output(payload: object) -> bool:
     )
 
 
-def probe_generation(
+def _empty_generation_detail(payload: object) -> str:
+    """Describe an empty successful response without echoing model output."""
+
+    if not isinstance(payload, dict):
+        return ""
+    choices = payload.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    if not isinstance(choice, dict):
+        choice = {}
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    completion_details = usage.get("completion_tokens_details")
+    if not isinstance(completion_details, dict):
+        completion_details = {}
+    values = {
+        "finish_reason": choice.get("finish_reason"),
+        "native_finish_reason": choice.get("native_finish_reason"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "reasoning_tokens": completion_details.get("reasoning_tokens"),
+    }
+    rendered = ", ".join(
+        f"{name}={value!r}" for name, value in values.items() if value is not None
+    )
+    return f" ({rendered})" if rendered else ""
+
+
+def _probe_generation_single(
     config: GenerationConfig, *, token: str, client: httpx.Client | None = None
 ) -> dict[str, Any]:
     if not token:
@@ -71,31 +124,47 @@ def probe_generation(
         endpoint = config.endpoint.rstrip("/")
         if not endpoint.endswith("/chat/completions"):
             endpoint += "/chat/completions"
+        request_payload: dict[str, Any] = {
+            "model": config.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Return exactly one JSON object matching the strict capability probe schema.",
+                },
+                {
+                    "role": "user",
+                    "content": 'Return {"schema_version":1,"state":"ok","items":[1]}.',
+                },
+            ],
+            # A tiny budget can be consumed entirely by hidden reasoning before
+            # the model emits JSON. This probe tests schema transport, not IQ.
+            "max_tokens": _GENERATION_PROBE_MAX_TOKENS,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "ledgermind_strict_probe",
+                    "strict": True,
+                    "schema": _STRICT_PROBE_SCHEMA,
+                },
+            },
+        }
+        provider = generation_provider_profile(config.provider_profile)
+        request_payload.update(provider.reasoning_extra_body)
+        if provider.profile_id == "openrouter":
+            if config.route:
+                routes = [config.route, *config.fallback_routes]
+                request_payload["provider"] = {
+                    "order": routes,
+                    "only": routes,
+                    "allow_fallbacks": bool(config.fallback_routes),
+                }
+        elif provider.profile_id == "nvidia_nim":
+            request_payload.pop("response_format")
+            request_payload["guided_json"] = _STRICT_PROBE_SCHEMA
         response = active.post(
             endpoint,
             headers=provider_request_headers(endpoint, token),
-            json={
-                "model": config.model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Return exactly one JSON object matching the strict capability probe schema.",
-                    },
-                    {
-                        "role": "user",
-                        "content": 'Return {"schema_version":1,"state":"ok","items":[1]}.',
-                    },
-                ],
-                "max_tokens": 32,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "ledgermind_strict_probe",
-                        "strict": True,
-                        "schema": _STRICT_PROBE_SCHEMA,
-                    },
-                },
-            },
+            json=request_payload,
             timeout=config.timeout_seconds,
         )
         _safe_status(response)
@@ -110,8 +179,11 @@ def probe_generation(
             and payload["choices"]
             else None
         )
-        if not isinstance(content, str):
-            raise ProviderProbeError("generation response has no message content")
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderProbeError(
+                "generation response has no message content"
+                + _empty_generation_detail(payload)
+            )
         try:
             decoded = json.loads(content)
         except json.JSONDecodeError as exc:
@@ -132,18 +204,58 @@ def probe_generation(
             "status_code": response.status_code,
             "structured_json": True,
             "strict_structured_outputs": True,
+            "route": config.route,
             "schema_profile_version": STRICT_SCHEMA_PROFILE_VERSION,
             "probe_contract_digest": canonical_digest(
                 validate_strict_schema_profile(_STRICT_PROBE_SCHEMA)
             ),
         }
+    except ProviderProbeError as exc:
+        raise ProviderProbeError(
+            f"generation probe failed for model {config.model!r} at "
+            f"{config.endpoint!r}: {exc}"
+        ) from exc
     except httpx.TimeoutException as exc:
-        raise ProviderProbeError("generation provider timed out") from exc
+        raise ProviderProbeError(
+            f"generation probe timed out for model {config.model!r} at "
+            f"{config.endpoint!r}"
+        ) from exc
     except httpx.RequestError as exc:
-        raise ProviderProbeError("generation provider request failed") from exc
+        raise ProviderProbeError(
+            f"generation probe request failed for model {config.model!r} at "
+            f"{config.endpoint!r}: {type(exc).__name__}"
+        ) from exc
     finally:
         if owns_client:
             active.close()
+
+
+def probe_generation(
+    config: GenerationConfig, *, token: str, client: httpx.Client | None = None
+) -> dict[str, Any]:
+    """Verify every distinct configured generation model on the exact route."""
+
+    models = tuple(
+        dict.fromkeys(
+            model
+            for model in (
+                config.operational_model or config.model,
+                config.object_resolution_model,
+                config.background_model or config.model,
+            )
+            if model
+        )
+    )
+    results: list[dict[str, Any]] = []
+    for model in models:
+        candidate = config.model_copy(update={"model": model})
+        results.append(
+            _probe_generation_single(candidate, token=token, client=client)
+        )
+    primary = dict(results[0])
+    primary["probed_models"] = list(models)
+    primary["model_probes"] = results
+    return primary
 
 
 def probe_embedding_api(
@@ -183,8 +295,16 @@ def probe_embedding_api(
         }
     except ProviderProbeError:
         raise
+    except EmbeddingProviderError as exc:
+        raise ProviderProbeError(
+            f"embedding probe failed for model {config.model!r} at "
+            f"{config.endpoint!r}: {exc}"
+        ) from exc
     except Exception as exc:
-        raise ProviderProbeError("embedding provider probe failed") from exc
+        raise ProviderProbeError(
+            f"embedding probe failed for model {config.model!r} at "
+            f"{config.endpoint!r}: {type(exc).__name__}"
+        ) from exc
     finally:
         provider.close()
 

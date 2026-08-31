@@ -6,11 +6,13 @@ import json
 import os
 import secrets
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ledgermind_local.config import EmbeddingConfig as LocalEmbeddingConfig
 from ledgermind_local.config import LocalConfig, ProfileSlotsConfig
+from ledgermind_local.inference.profiles import ProviderKind
 
 from .models import InstallerConfig
 from .paths import InstallerPaths
@@ -52,6 +54,21 @@ def _ensure_runtime_token(paths: InstallerPaths) -> Path:
     target = paths.config_dir / "runtime.token"
     if not target.exists():
         ensure_private_dir(target.parent)
+        target.write_text(secrets.token_urlsafe(32) + "\n", encoding="utf-8")
+    os.chmod(target, 0o600)
+    return target
+
+
+def _ensure_local_server_token(paths: InstallerPaths) -> Path:
+    """Create the bearer token consumed by the Local API and agent adapters."""
+
+    target = paths.data_dir / "local" / "server.token"
+    ensure_private_dir(target.parent)
+    try:
+        current = target.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        current = ""
+    if not current:
         target.write_text(secrets.token_urlsafe(32) + "\n", encoding="utf-8")
     os.chmod(target, 0o600)
     return target
@@ -110,7 +127,11 @@ def resolve_provider_tokens(
     backend = select_secret_backend(paths)
     generation = (
         config.generation.token
-        or (os.environ.get(config.generation.token_env, "") if config.generation.token_env else None)
+        or (
+            os.environ.get(config.generation.token_env, "")
+            if config.generation.token_env
+            else None
+        )
         or (generation_stdin if config.generation.token_stdin else None)
         or _stored_secret_value(
             backend,
@@ -175,6 +196,7 @@ def write_installer_config(
 
     paths.ensure()
     runtime_token = _ensure_runtime_token(paths)
+    server_token = _ensure_local_server_token(paths)
     backend = select_secret_backend(paths)
     generation_token = _secret_value(
         config.generation.token,
@@ -244,13 +266,12 @@ def write_installer_config(
         if isinstance(backend, FileSecretStore)
         else "secret-service",
         "runtime_token_file": str(runtime_token),
+        "server_token_file": str(server_token),
         "profile_ids": [item["profile_id"] for item in profiles],
     }
 
 
-def persist_installer_config(
-    config: InstallerConfig, paths: InstallerPaths
-) -> Path:
+def persist_installer_config(config: InstallerConfig, paths: InstallerPaths) -> Path:
     """Persist an already-secret-free installer configuration.
 
     Integration lifecycle commands use this helper so enabling or disabling an
@@ -387,6 +408,7 @@ def write_local_profiles(
         for profile in build_generation_profiles(config.generation):
             materialized = InferenceProfile(
                 profile_id=str(profile["profile_id"]),
+                provider_kind=cast(ProviderKind, profile["provider_kind"]),
                 base_url=str(profile["endpoint"]),
                 model=str(profile["model"]),
                 secret_ref=GENERATION_SECRET_REF,
@@ -394,6 +416,8 @@ def write_local_profiles(
                 max_retries=max_retries,
                 max_input_tokens=max_input,
                 max_output_tokens=max_output,
+                extra_body=dict(profile.get("extra_body", {})),
+                structured_output_preference="strict_json_schema",
             )
             store.upsert(materialized)
             for memory_space_id in memory_spaces.values():
@@ -447,9 +471,90 @@ def write_local_profiles(
     }
 
 
+def persist_generation_probe(
+    config: InstallerConfig,
+    paths: InstallerPaths,
+    probe_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist the installer's successful strict probe for runtime use.
+
+    The installer and runtime share the exact materialized profile identity.
+    This avoids both an unverified first semantic task and a second set of
+    provider calls immediately after installation.
+    """
+
+    from ledgermind_local.inference.profile_store import InferenceProfileStore
+    from ledgermind_local.inference.profiles import (
+        ProviderCapabilities,
+        generation_profile_fingerprint,
+    )
+    from ledgermind_local.persistence import open_sqlite_connection
+    from ledgermind_local.persistence import rounds_migrations as migrations
+
+    if probe_result.get("strict_structured_outputs") is not True:
+        raise ValueError("generation probe did not verify strict structured outputs")
+    probed_models = probe_result.get("probed_models")
+    if not isinstance(probed_models, list) or not all(
+        isinstance(item, str) and item for item in probed_models
+    ):
+        probed_models = [config.generation.model]
+    verified_models = set(probed_models)
+    local = build_local_config(config, paths)
+    database_path = Path(local.rounds_database_path).expanduser()
+    connection = open_sqlite_connection(database_path)
+    persisted: list[str] = []
+    try:
+        migrations.apply_migrations(connection)
+        store = InferenceProfileStore(connection)
+        now = datetime.now(timezone.utc)
+        timestamp = now.isoformat(timespec="seconds")
+        for profile_spec in build_generation_profiles(config.generation):
+            profile_id = str(profile_spec["profile_id"])
+            profile = store.get(profile_id)
+            if profile is None:
+                raise ValueError(
+                    f"materialized generation profile is missing: {profile_id}"
+                )
+            if profile.model not in verified_models:
+                raise ValueError(
+                    f"generation profile model was not probed: {profile.model}"
+                )
+            store.upsert_capabilities(
+                ProviderCapabilities(
+                    profile_id=profile.profile_id,
+                    profile_fingerprint=generation_profile_fingerprint(profile),
+                    transport=profile.provider_kind,
+                    model=profile.model,
+                    structured_output_mode="strict_json_schema",
+                    json_schema_supported=True,
+                    structured_json_schema=True,
+                    native_schema_strictness=True,
+                    detected_capabilities={
+                        "structured_json_schema": True,
+                        "native_schema_strictness": True,
+                    },
+                    probe_contract_digest=str(
+                        probe_result.get("probe_contract_digest", "")
+                    )
+                    or None,
+                    probe_status="passed",
+                    last_probed_at=timestamp,
+                    probed_at=timestamp,
+                    expires_at=(now + timedelta(days=1)).isoformat(timespec="seconds"),
+                    probe_result="passed",
+                )
+            )
+            persisted.append(profile.profile_id)
+        connection.commit()
+    finally:
+        connection.close()
+    return {"status": "passed", "profile_ids": persisted}
+
+
 __all__ = [
     "build_local_config",
     "load_installer_config",
+    "persist_generation_probe",
     "resolve_provider_tokens",
     "select_secret_backend",
     "write_installer_config",

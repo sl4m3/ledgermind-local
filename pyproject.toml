@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ledgermind-local"
-version = "4.0.0a1"
+version = "4.0.0b1"
 description = "LedgerMind local service bootstrap"
 license = "BUSL-1.1"
 license-files = ["LICENSE", "NOTICE", "COPYING"]
@@ -16,7 +16,7 @@ dependencies = [
     "fastapi>=0.111,<1",
     "PyYAML>=6.0,<7",
     "zstandard>=0.23,<1",
-    "ledgermind-protocol>=2.0.0a1,<2.1",
+    "ledgermind-protocol>=2.0.0b1,<2.1",
     "uvicorn>=0.30,<1"
 ]
 

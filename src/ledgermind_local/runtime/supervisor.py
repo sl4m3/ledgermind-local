@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import time
 from collections.abc import Sequence
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from ledgermind_local.installer.lock import InstallerLock
 from ledgermind_local.installer.paths import InstallerPaths
@@ -52,7 +55,12 @@ class RuntimeSupervisor:
             commands = {}
         local = self.paths.current_link / "bin" / "ledgermind-local"
         if "local" not in commands and local.is_file() and os.access(local, os.X_OK):
-            commands["local"] = (str(local), "serve")
+            commands["local"] = (
+                str(local),
+                "--home",
+                str(self.paths.data_dir / "local"),
+                "serve",
+            )
         if self.embedding_command is not None:
             commands["embedding"] = self.embedding_command
         return commands
@@ -85,7 +93,10 @@ class RuntimeSupervisor:
         own_processes = {
             name: item.as_dict() for name, item in self.processes.running().items()
         }
-        processes = own_processes or self._live_records(current.get("processes", {}))
+        processes = {
+            **self._live_records(current.get("processes", {})),
+            **own_processes,
+        }
         current.update(
             {
                 "schema_version": 1,
@@ -100,9 +111,68 @@ class RuntimeSupervisor:
             current["last_release_at"] = last_release_at
         write_state(self.paths.runtime_state, current)
 
+    def _all_commands_running(self, records: object) -> bool:
+        if not self.commands:
+            return True
+        live = self._live_records(records)
+        return set(self.commands).issubset(live)
+
     def _start(self) -> None:
         self.processes.start(self.commands)
+        try:
+            self._wait_for_owned_local()
+        except BaseException:
+            self.processes.stop()
+            self._write(running=False)
+            raise
         self._write(running=True)
+
+    def _wait_for_owned_local(self, *, timeout_seconds: float = 5.0) -> None:
+        """Verify that the authenticated endpoint belongs to this installation."""
+
+        if "local" not in self.commands:
+            return
+        local_command = self.commands["local"]
+        if not local_command or os.path.basename(str(local_command[0])) != "ledgermind-local":
+            time.sleep(0.05)
+            if self.processes.running():
+                return
+            raise RuntimeError("managed Local process exited during startup")
+        token_file = self.paths.data_dir / "local" / "server.token"
+        if not token_file.is_file():
+            raise RuntimeError("Local API token is missing; run LedgerMind configure")
+        token = token_file.read_text(encoding="utf-8").strip()
+        if not token:
+            raise RuntimeError("Local API token is empty; run LedgerMind configure")
+        deadline = time.monotonic() + max(float(timeout_seconds), 0.1)
+        last_error: BaseException | None = None
+        while time.monotonic() < deadline:
+            if not self.processes.running():
+                break
+            request = Request(
+                self.endpoint + "/ping",
+                headers={"authorization": f"Bearer {token}", "accept": "application/json"},
+                method="GET",
+            )
+            try:
+                with urlopen(request, timeout=0.5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                if isinstance(payload, dict) and payload.get("pong") == "true":
+                    return
+                last_error = RuntimeError("unexpected authenticated ping response")
+            except HTTPError as exc:
+                last_error = exc
+                if exc.code in {401, 403}:
+                    raise RuntimeError(
+                        f"runtime endpoint conflict at {self.endpoint}: "
+                        "another service is using the configured address"
+                    ) from exc
+            except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+                last_error = exc
+            time.sleep(0.05)
+        raise RuntimeError(
+            f"LedgerMind Local failed to become ready at {self.endpoint}"
+        ) from last_error
 
     def _stop(self, *, force: bool = False) -> dict[str, object]:
         if not force and self.leases.active():
@@ -119,19 +189,21 @@ class RuntimeSupervisor:
     def acquire(self, *, client: str, session_id: str) -> dict[str, object]:
         with InstallerLock(self.paths.state_dir / "runtime.lock"):
             self.leases.reap_expired()
-            active_before = self.leases.active()
             state = load_state(self.paths.runtime_state)
             recorded_processes = self._live_records(state.get("processes", {}))
             started = (
-                not active_before
-                or not bool(state.get("running"))
-                or (bool(self.commands) and not recorded_processes)
+                not bool(state.get("running"))
+                or not self._all_commands_running(recorded_processes)
             )
             lease = self.leases.acquire(client=client, session_id=session_id)
-            if started:
-                self._start()
-            else:
-                self._write(running=True)
+            try:
+                if started:
+                    self._start()
+                else:
+                    self._write(running=True)
+            except BaseException:
+                self.leases.release(lease.lease_id)
+                raise
             return {
                 "lease_id": lease.lease_id,
                 "endpoint": self.endpoint,
@@ -144,8 +216,7 @@ class RuntimeSupervisor:
             lease = self.leases.heartbeat(lease_id)
             state = load_state(self.paths.runtime_state)
             if not state.get("running") or (
-                bool(self.commands)
-                and not self._live_records(state.get("processes", {}))
+                not self._all_commands_running(state.get("processes", {}))
             ):
                 self._start()
             self._write(running=True)
@@ -158,21 +229,21 @@ class RuntimeSupervisor:
             stopped = False
             if not active:
                 current = load_state(self.paths.runtime_state)
-                last_release = float(current.get("last_release_at") or time.time())
+                released_at = time.time()
                 if should_shutdown(
                     active_leases=0,
                     leased_tasks=0,
                     pending_writes=0,
-                    last_release_at=last_release,
+                    last_release_at=released_at,
                     idle_grace_seconds=self.idle_shutdown_seconds,
-                    now=time.time(),
+                    now=released_at,
                 ):
                     self._stop(force=True)
                     stopped = True
                 else:
                     self._write(
                         running=bool(current.get("running", True)),
-                        last_release_at=time.time(),
+                        last_release_at=released_at,
                     )
             else:
                 self._write(running=True)
@@ -188,6 +259,10 @@ class RuntimeSupervisor:
             active = self.leases.active()
             state = load_state(self.paths.runtime_state)
             running = bool(state.get("running"))
+            if running and not self._all_commands_running(state.get("processes", {})):
+                self._write(running=False)
+                state = load_state(self.paths.runtime_state)
+                running = False
             if (
                 running
                 and not active

@@ -15,10 +15,6 @@ from .profiles import (
     StructuredOutputMode,
     generation_profile_fingerprint,
 )
-from .strict import (
-    STRICT_JSON_SCHEMA_MODE,
-    validate_strict_requirement,
-)
 from .provider_telemetry import operation_context
 from .providers.base import (
     ChatMessage,
@@ -37,6 +33,10 @@ from .providers.openai_compatible import (
     decode_json_content,
 )
 from .secrets import SecretNotFoundError, SecretStore
+from .strict import (
+    STRICT_JSON_SCHEMA_MODE,
+    validate_strict_requirement,
+)
 from .token_budget import (
     InputBudgetExceededError,
     OutputBudgetExceededError,
@@ -617,35 +617,18 @@ class StructuredJsonProvider:
         selected_mode: StructuredOutputMode,
         error: BaseException,
     ) -> None:
-        """Invalidate only the affected cache entry after a format failure."""
+        """Keep probe-owned capability stable across individual executions.
 
-        # Transport outages, authentication failures and timeouts say nothing
-        # about the previously probed structured-output mode. Retain a still
-        # fresh capability observation and let the normal retry/outage policy
-        # report the execution failure. Only an actual provider response
-        # incompatibility can invalidate the selected mode.
-        if selected_mode == "auto" or isinstance(error, StructuredJsonResponseError):
-            # The provider returned an HTTP response, but this individual
-            # completion was not parseable as JSON (or exceeded the response
-            # bound).  That is a bounded model-output failure, not evidence
-            # that the probed transport capability has disappeared.  Keep
-            # the capability fresh so the worker's single structured retry
-            # can make another HTTP attempt.
-            return
-        if not isinstance(error, ProviderResponseError):
-            return
-        reason = f"capability_execution_failed:{selected_mode}:{normalize_error(error)['code']}"
-        stores: list[object] = []
-        if self._capability_store is not None:
-            stores.append(self._capability_store)
-        resolver_store = getattr(self._profile_resolver, "profile_store", None)
-        if resolver_store is not None:
-            stores.append(resolver_store)
-        for store in stores:
-            invalidator = getattr(store, "invalidate_capabilities", None)
-            if callable(invalidator):
-                invalidator(profile.profile_id, reason=reason)
-                return
+        A malformed or incomplete completion is evidence about that request,
+        not about the endpoint's general structured-output capability.  The
+        worker owns one bounded fresh retry; invalidating here would make that
+        retry fail its local capability preflight before reaching the provider.
+        Capability changes remain the responsibility of an explicit probe (or
+        a successful automatic-mode fallback), where compatibility is tested
+        deliberately rather than inferred from one completion.
+        """
+
+        del profile, selected_mode, error
 
     def _select_mode(
         self,

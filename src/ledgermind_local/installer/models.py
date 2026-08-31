@@ -7,6 +7,13 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .provider_profiles import (
+    GenerationProviderProfileId,
+    infer_generation_provider_profile,
+)
+
+_OPENAI_OPERATION_SUFFIXES = ("/chat/completions", "/embeddings")
+
 
 def _text(value: str, field_name: str) -> str:
     normalized = value.strip()
@@ -17,6 +24,12 @@ def _text(value: str, field_name: str) -> str:
 
 def _http_url(value: str, field_name: str = "endpoint") -> str:
     normalized = _text(value, field_name).rstrip("/")
+    # People commonly paste the operation URL shown in provider examples.
+    # Profiles store the API base because the runtime appends the operation.
+    for suffix in _OPENAI_OPERATION_SUFFIXES:
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)].rstrip("/")
+            break
     parsed = urlparse(normalized)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"{field_name} must be an absolute http(s) URL")
@@ -27,6 +40,16 @@ class GenerationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     endpoint: str
+    provider_profile: GenerationProviderProfileId = "openai_compatible"
+    # Optional provider route used by aggregators such as OpenRouter.  It is
+    # part of the generation identity and is therefore applied to probes and
+    # persisted inference profiles alike.
+    route: str | None = None
+    # Explicit, ordered OpenRouter fallbacks.  Keeping this list separate from
+    # the primary route lets us restrict routing to reviewed providers instead
+    # of allowing OpenRouter to select an arbitrary (and possibly expensive)
+    # endpoint.
+    fallback_routes: tuple[str, ...] = ()
     token: str | None = None
     token_env: str | None = None
     token_stdin: bool = False
@@ -42,6 +65,17 @@ class GenerationConfig(BaseModel):
     max_concurrency: int = Field(default=2, ge=1, le=64)
     structured_json_support: bool = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_provider_profile(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "provider_profile" in value:
+            return value
+        payload = dict(value)
+        endpoint = payload.get("endpoint")
+        if isinstance(endpoint, str):
+            payload["provider_profile"] = infer_generation_provider_profile(endpoint)
+        return payload
+
     @field_validator("endpoint")
     @classmethod
     def validate_endpoint(cls, value: str) -> str:
@@ -53,6 +87,40 @@ class GenerationConfig(BaseModel):
         if value is None:
             return None
         return _text(value, getattr(info, "field_name", "model"))
+
+    @field_validator("route")
+    @classmethod
+    def validate_route(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        route = _text(value, "route")
+        if any(character.isspace() for character in route):
+            raise ValueError("route must not contain whitespace")
+        return route
+
+    @field_validator("fallback_routes")
+    @classmethod
+    def validate_fallback_routes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(_text(item, "fallback_routes") for item in value)
+        if len(normalized) > 1:
+            raise ValueError("at most one fallback route is supported")
+        if any(any(character.isspace() for character in item) for item in normalized):
+            raise ValueError("fallback routes must not contain whitespace")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("fallback routes must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_route_endpoint(self) -> GenerationConfig:
+        if (self.route or self.fallback_routes) and self.provider_profile != "openrouter":
+            raise ValueError("generation routes are supported only for OpenRouter")
+        if self.fallback_routes and not self.route:
+            raise ValueError("generation fallback routes require a primary route")
+        if self.route and self.route in self.fallback_routes:
+            raise ValueError("primary generation route must not be repeated as a fallback")
+        if self.provider_profile == "openrouter" and "openrouter.ai" not in self.endpoint.lower():
+            raise ValueError("OpenRouter provider profile requires an OpenRouter endpoint")
+        return self
 
     @model_validator(mode="after")
     def validate_secret_source(self) -> GenerationConfig:

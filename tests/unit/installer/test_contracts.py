@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
+import os
 import stat
+import sys
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -10,13 +13,19 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from ledgermind_local.cli import _build_runtime_supervisor
+from ledgermind_local.config import EmbeddingConfig as LocalEmbeddingConfig
+from ledgermind_local.config import LocalConfig
+from ledgermind_local.inference.secrets import SecretStore
+from ledgermind_local.installer import cli as installer_cli
+from ledgermind_local.installer.cli import _emit, _result, _runtime
 from ledgermind_local.installer.config_writer import (
     load_installer_config,
+    persist_generation_probe,
     write_installer_config,
     write_local_config,
     write_local_profiles,
 )
-from ledgermind_local.installer.cli import _runtime
 from ledgermind_local.installer.embeddings.service import EmbeddingService
 from ledgermind_local.installer.errors import SignatureVerificationError
 from ledgermind_local.installer.models import (
@@ -27,7 +36,6 @@ from ledgermind_local.installer.models import (
 )
 from ledgermind_local.installer.paths import InstallerPaths
 from ledgermind_local.installer.verify import verify_ed25519
-from ledgermind_local.inference.secrets import SecretStore
 from ledgermind_local.runtime.supervisor import RuntimeSupervisor
 
 
@@ -52,6 +60,103 @@ def _config() -> InstallerConfig:
     )
 
 
+def test_integration_hook_records_redacted_import_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "codex" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", io.StringIO('{"prompt":"secret prompt"}'))
+
+    def fail_import(_name: str):
+        raise ModuleNotFoundError("missing lifecycle package")
+
+    monkeypatch.setattr(installer_cli.importlib, "import_module", fail_import)
+
+    exit_code = installer_cli.main(
+        [
+            "integration-hook",
+            "--config",
+            str(config_path),
+            "--event",
+            "UserPromptSubmit",
+        ]
+    )
+
+    assert exit_code == 0
+    diagnostic_path = config_path.parent / "hook-errors.jsonl"
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+    assert diagnostic["event"] == "UserPromptSubmit"
+    assert diagnostic["error_type"] == "ModuleNotFoundError"
+    assert diagnostic["error"] == "missing lifecycle package"
+    assert "secret prompt" not in diagnostic_path.read_text(encoding="utf-8")
+    assert stat.S_IMODE(diagnostic_path.stat().st_mode) == 0o600
+    assert "UserPromptSubmit hook failed" in capsys.readouterr().err
+
+
+def test_integrations_discover_human_output_lists_agents(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = _result(
+        "integrations discover",
+        payload={
+            "status": "passed",
+            "integrations": {
+                "codex": {
+                    "label": "Codex CLI",
+                    "detected": True,
+                    "config_dir": "/tmp/codex",
+                },
+                "openclaw": {
+                    "label": "OpenClaw",
+                    "detected": False,
+                    "detail": "OpenClaw was not found",
+                },
+            },
+        },
+    )
+
+    assert _emit(result, json_output=False) == 0
+    output = capsys.readouterr().out
+    assert "Codex CLI (codex): found — /tmp/codex" in output
+    assert "OpenClaw (openclaw): not found — OpenClaw was not found" in output
+
+
+def test_integrations_status_human_output_lists_connection_state(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = _result(
+        "integrations status",
+        payload={
+            "status": "passed",
+            "integrations": {
+                "codex": {
+                    "installed_agent": True,
+                    "connected": True,
+                    "enabled": True,
+                    "active": False,
+                    "discovery": {"label": "Codex CLI", "detected": True},
+                    "verify": {
+                        "status": "passed",
+                        "activation_required": "Review hooks",
+                    },
+                }
+            },
+        },
+    )
+
+    assert _emit(result, json_output=False) == 0
+    output = capsys.readouterr().out
+    assert (
+        "Codex CLI (codex): detected=yes, connected=yes, enabled=yes, "
+        "verify=passed" in output
+    )
+    assert "active=" not in output
+    assert "note: Review hooks" in output
+
+
 def test_config_writer_uses_0600_file_fallback_and_strips_tokens(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -69,6 +174,25 @@ def test_config_writer_uses_0600_file_fallback_and_strips_tokens(
     runtime_secrets = SecretStore(paths.secrets_file)
     assert runtime_secrets.get("generation-api") == "generation-secret"
     assert runtime_secrets.get("embedding-api") == "embedding-secret"
+    server_token = paths.data_dir / "local" / "server.token"
+    assert server_token.read_text(encoding="utf-8").strip()
+    assert stat.S_IMODE(server_token.stat().st_mode) == 0o600
+    assert "server.token" not in paths.config_file.read_text(encoding="utf-8")
+
+
+def test_config_writer_preserves_existing_local_server_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LEDGERMIND_SECRET_BACKEND", "file")
+    paths = InstallerPaths(home_override=tmp_path)
+    token_file = paths.data_dir / "local" / "server.token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text("stable-token\n", encoding="utf-8")
+
+    write_installer_config(_config(), paths)
+
+    assert token_file.read_text(encoding="utf-8") == "stable-token\n"
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
 
 
 def test_local_service_config_is_written_under_xdg_data(tmp_path: Path) -> None:
@@ -109,6 +233,44 @@ def test_installer_materializes_profiles_for_local_resolver(tmp_path: Path) -> N
         for profile in materialized
         if profile.profile_id.startswith("generation-")
     )
+    assert all(
+        profile.structured_output_preference == "strict_json_schema"
+        for profile in materialized
+        if profile.profile_id.startswith("generation-")
+    )
+
+
+def test_installer_persists_verified_generation_capabilities(tmp_path: Path) -> None:
+    from ledgermind_local.inference.profile_store import InferenceProfileStore
+    from ledgermind_local.inference.profiles import generation_profile_fingerprint
+    from ledgermind_local.persistence import open_sqlite_connection
+
+    paths = InstallerPaths(home_override=tmp_path)
+    config = _config()
+    profile_metadata = write_local_profiles(config, paths)
+    result = persist_generation_probe(
+        config,
+        paths,
+        {
+            "strict_structured_outputs": True,
+            "probed_models": ["generation-model", "object-resolution-model"],
+            "probe_contract_digest": "sha256:test",
+        },
+    )
+    connection = open_sqlite_connection(profile_metadata["database"])
+    try:
+        store = InferenceProfileStore(connection)
+        for profile_id in result["profile_ids"]:
+            profile = store.get(profile_id)
+            assert profile is not None
+            capabilities = store.get_capabilities(profile_id)
+            assert capabilities is not None
+            assert capabilities.supports("strict_json_schema")
+            assert capabilities.profile_fingerprint == generation_profile_fingerprint(
+                profile
+            )
+    finally:
+        connection.close()
 
 
 def test_installer_materializes_one_profile_space_for_shared_agent_memory(
@@ -188,6 +350,90 @@ def test_runtime_restarts_missing_process_while_a_lease_is_active(
         supervisor.stop(force=True)
 
 
+def test_runtime_reuses_live_process_after_last_lease_is_released(
+    tmp_path: Path,
+) -> None:
+    supervisor = RuntimeSupervisor(
+        InstallerPaths(home_override=tmp_path),
+        commands={"local": ("/bin/sleep", "60")},
+        idle_shutdown_seconds=60,
+    )
+    first = supervisor.acquire(client="agent", session_id="one")
+    try:
+        supervisor.release(str(first["lease_id"]))
+        second = supervisor.acquire(client="agent", session_id="two")
+        assert second["started"] is False
+    finally:
+        supervisor.stop(force=True)
+
+
+def test_runtime_idle_grace_starts_at_the_current_release(
+    tmp_path: Path,
+) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    supervisor = RuntimeSupervisor(
+        paths,
+        commands={"local": ("/bin/sleep", "60")},
+        idle_shutdown_seconds=60,
+    )
+    first = supervisor.acquire(client="agent", session_id="one")
+    try:
+        state = json.loads(paths.runtime_state.read_text(encoding="utf-8"))
+        state["last_release_at"] = time.time() - 120
+        paths.runtime_state.write_text(json.dumps(state), encoding="utf-8")
+
+        result = supervisor.release(str(first["lease_id"]))
+
+        assert result["stopped"] is False
+        assert supervisor.status()["running"] is True
+    finally:
+        supervisor.stop(force=True)
+
+
+def test_runtime_status_rejects_stale_running_state(tmp_path: Path) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    paths.ensure()
+    paths.runtime_state.write_text(
+        json.dumps(
+            {
+                "running": True,
+                "endpoint": "http://127.0.0.1:8765",
+                "processes": {"local": {"pid": 999_999_999}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    supervisor = RuntimeSupervisor(
+        paths,
+        commands={"local": ("/bin/sleep", "60")},
+    )
+
+    assert supervisor.status()["running"] is False
+
+
+def test_runtime_status_requires_every_configured_process(tmp_path: Path) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    paths.ensure()
+    paths.runtime_state.write_text(
+        json.dumps(
+            {
+                "running": True,
+                "endpoint": "http://127.0.0.1:8765",
+                "processes": {
+                    "embedding": {"pid": os.getpid(), "command": ["embedding"]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    supervisor = RuntimeSupervisor(
+        paths,
+        commands={"local": ("/bin/sleep", "60")},
+    )
+
+    assert supervisor.status()["running"] is False
+
+
 def test_installer_runtime_places_global_home_before_local_subcommand(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -203,6 +449,28 @@ def test_installer_runtime_places_global_home_before_local_subcommand(
     paths.current_link.symlink_to(release)
 
     supervisor = _runtime(paths)
+
+    assert tuple(supervisor.commands["local"]) == (
+        str(paths.current_link / "bin" / "ledgermind-local"),
+        "--home",
+        str(paths.data_dir / "local"),
+        "serve",
+    )
+
+
+def test_runtime_default_command_uses_installed_local_home(
+    tmp_path: Path,
+) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    paths.ensure()
+    release = paths.release_dir("test")
+    local = release / "bin" / "ledgermind-local"
+    local.parent.mkdir(parents=True)
+    local.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    local.chmod(0o700)
+    paths.current_link.symlink_to(release)
+
+    supervisor = RuntimeSupervisor(paths)
 
     assert tuple(supervisor.commands["local"]) == (
         str(paths.current_link / "bin" / "ledgermind-local"),
@@ -232,3 +500,23 @@ def test_local_embedding_service_is_openai_compatible() -> None:
         assert payload["data"][0]["embedding"] == [5.0, 1.0, 0.0]
     finally:
         service.stop()
+
+
+def test_api_embedding_profile_does_not_spawn_local_embedding_service() -> None:
+    config = LocalConfig(
+        config_version=2,
+        semantic_language="en",
+        embedding=LocalEmbeddingConfig(
+            enabled=True,
+            provider_mode="api",
+            endpoint="https://provider.example/v1",
+            model="embedding-model",
+            dimensions=3,
+        )
+    )
+
+    supervisor = _build_runtime_supervisor(
+        config=config, host="127.0.0.1", port=8765
+    )
+
+    assert "embedding" not in supervisor.commands

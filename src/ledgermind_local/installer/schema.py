@@ -25,6 +25,13 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
             "additionalProperties": False,
             "properties": {
                 "endpoint": {"type": "string", "format": "uri"},
+                "route": {"type": ["string", "null"]},
+                "fallback_routes": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": 1,
+                    "uniqueItems": True,
+                },
                 "token": {"type": ["string", "null"]},
                 "token_env": {"type": ["string", "null"]},
                 "token_stdin": {"type": "boolean"},

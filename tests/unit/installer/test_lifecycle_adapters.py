@@ -75,6 +75,13 @@ def test_command_adapter_preserves_user_hooks(
     installed = config_path.read_text(encoding="utf-8")
     assert "user-hook" in installed
     assert installed.count("integration-hook") == len(spec.events)
+    if spec.target_id == "codex":
+        payload = json.loads(installed)
+        prompt_handler = payload["hooks"]["UserPromptSubmit"][-1]["hooks"][0]
+        stop_handler = payload["hooks"]["Stop"][-1]["hooks"][0]
+        assert prompt_handler["timeout"] == 30
+        assert stop_handler["timeout"] == 600
+        assert stop_handler["async"] is True
 
     adapter.uninstall(context)
     restored = config_path.read_text(encoding="utf-8")

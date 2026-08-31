@@ -83,7 +83,11 @@ def test_bwrap_plan_is_full_only_after_probe(
     )
 
     assert plan.level is SandboxLevel.FULL
-    assert plan.command[:2] == ("/usr/bin/bwrap", "--unshare-net")
+    assert plan.command[:3] == (
+        "/usr/bin/bwrap",
+        "--unshare-user",
+        "--unshare-net",
+    )
     assert plan.command[-4:] == (
         "--",
         "/opt/ledgermind-core/bin/ledgermind-core",

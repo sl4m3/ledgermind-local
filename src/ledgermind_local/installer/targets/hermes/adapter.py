@@ -49,7 +49,9 @@ class HermesTargetAdapter(BaseTargetAdapter):
     ) -> dict[str, Any]:
         binary = shutil.which("hermes")
         if binary is None:
-            raise AdapterError("Hermes CLI is required to activate the LedgerMind plugin")
+            raise AdapterError(
+                "Hermes CLI is required to activate the LedgerMind plugin"
+            )
         command = [
             binary,
             "plugins",
@@ -103,7 +105,7 @@ class HermesTargetAdapter(BaseTargetAdapter):
             plugin_config=payload,
         )
         result["activation"] = self._set_plugin_enabled(
-            context, enabled=payload["enabled"]
+            context, enabled=bool(payload["enabled"])
         )
         result["hooks"] = self.register_hooks(context)
         return result
