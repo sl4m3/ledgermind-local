@@ -4,10 +4,14 @@ import json
 
 import httpx
 import pytest
+
 from ledgermind_local.inference.gguf_vectorizer import GGUFVectorizer
 from ledgermind_local.inference.openai_vectorizer import OpenAIEmbeddingVectorizer
 from ledgermind_local.inference.vectorizer import VectorizerRoleError
 from ledgermind_local.installer.profiles.embedding_api import (
+    EmbeddingProviderError,
+    EmbeddingProviderTransportError,
+    EmbeddingProviderUnavailableError,
     OpenAICompatibleEmbeddingProvider,
 )
 
@@ -127,6 +131,64 @@ def test_embedding_provider_still_rejects_a_different_model() -> None:
         provider.close()
 
 
+@pytest.mark.parametrize("status_code", [408, 409, 425, 429, 500, 503])
+def test_embedding_provider_classifies_transient_http_statuses(
+    status_code: int,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": {"message": "retry"}})
+
+    provider = OpenAICompatibleEmbeddingProvider(
+        endpoint="https://provider.example/v1",
+        token="secret",
+        model="embed-model",
+        dimensions=2,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with pytest.raises(EmbeddingProviderUnavailableError):
+            provider.embed(("probe",))
+    finally:
+        provider.close()
+
+
+def test_embedding_provider_keeps_permanent_http_failure_non_retryable() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "bad input"}})
+
+    provider = OpenAICompatibleEmbeddingProvider(
+        endpoint="https://provider.example/v1",
+        token="secret",
+        model="embed-model",
+        dimensions=2,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with pytest.raises(EmbeddingProviderError) as raised:
+            provider.embed(("probe",))
+        assert not isinstance(raised.value, EmbeddingProviderUnavailableError)
+    finally:
+        provider.close()
+
+
+def test_embedding_provider_classifies_transport_failure() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline")
+
+    provider = OpenAICompatibleEmbeddingProvider(
+        endpoint="https://provider.example/v1",
+        token="secret",
+        model="embed-model",
+        dimensions=2,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with pytest.raises(EmbeddingProviderTransportError):
+            provider.embed(("probe",))
+    finally:
+        provider.close()
+
+
 def test_openai_vectorizer_keeps_one_role_for_every_batch() -> None:
     seen: list[dict[str, object]] = []
     provider = _provider(seen)
@@ -140,8 +202,8 @@ def test_openai_vectorizer_keeps_one_role_for_every_batch() -> None:
     )
     # Replace the concrete adapter's HTTP client with the deterministic mock
     # provider used above; the assertion is about the adapter wire boundary.
-    vectorizer._provider.close()  # noqa: SLF001 - test-only transport setup
-    vectorizer._provider = provider  # noqa: SLF001
+    vectorizer._provider.close()
+    vectorizer._provider = provider
     try:
         vectorizer.encode(("one", "two", "three"), role="query")
     finally:

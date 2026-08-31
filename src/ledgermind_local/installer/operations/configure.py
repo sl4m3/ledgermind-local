@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from ledgermind_local.runtime.supervisor import RuntimeSupervisor
@@ -48,18 +52,68 @@ def configure(
     # A provider reconfiguration is explicit, but it must not race a live
     # worker that still holds the previous profile cache.
     RuntimeSupervisor(paths).stop(force=True)
-    metadata = write_installer_config(
-        config,
-        paths,
-        generation_stdin=generation_stdin,
-        embedding_stdin=embedding_stdin,
+    mutable_files = (
+        paths.config_file,
+        paths.profiles_file,
+        paths.secrets_file,
+        paths.config_dir / "local-config.json",
+        paths.data_dir / "local" / "config.json",
     )
-    metadata["local_config"] = str(write_local_config(config, paths))
-    metadata["local_profiles"] = write_local_profiles(config, paths)
-    if validate_providers:
-        metadata["generation_capabilities"] = persist_generation_probe(
-            config, paths, probes["generation"]
+    backups = {
+        path: (
+            path.is_file(),
+            path.read_bytes() if path.is_file() else b"",
+            path.stat().st_mode & 0o777 if path.is_file() else 0o600,
         )
+        for path in mutable_files
+    }
+    database = paths.memory_data_dir / "rounds.db"
+    database_files = (
+        database,
+        database.with_name("rounds.db-wal"),
+        database.with_name("rounds.db-shm"),
+    )
+    paths.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(
+        prefix=".configure-rollback-", dir=paths.state_dir
+    ) as temporary_name:
+        rollback_dir = Path(temporary_name)
+        database_backups: dict[Path, tuple[bool, Path | None]] = {}
+        for index, path in enumerate(database_files):
+            if path.is_file():
+                destination = rollback_dir / f"database-{index}"
+                shutil.copy2(path, destination)
+                database_backups[path] = (True, destination)
+            else:
+                database_backups[path] = (False, None)
+        try:
+            metadata = write_installer_config(
+                config,
+                paths,
+                generation_stdin=generation_stdin,
+                embedding_stdin=embedding_stdin,
+            )
+            metadata["local_config"] = str(write_local_config(config, paths))
+            metadata["local_profiles"] = write_local_profiles(config, paths)
+            if validate_providers:
+                metadata["generation_capabilities"] = persist_generation_probe(
+                    config, paths, probes["generation"]
+                )
+        except Exception:
+            for path, (existed, content, mode) in backups.items():
+                if existed:
+                    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    path.write_bytes(content)
+                    os.chmod(path, mode)
+                else:
+                    path.unlink(missing_ok=True)
+            for path, (existed, backup) in database_backups.items():
+                if existed and backup is not None:
+                    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    shutil.copy2(backup, path)
+                else:
+                    path.unlink(missing_ok=True)
+            raise
     generation_status = probes.get("generation", {}).get(
         "status", "configured-not-probed"
     )

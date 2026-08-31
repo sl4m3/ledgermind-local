@@ -27,6 +27,18 @@ class EmbeddingProviderTimeoutError(EmbeddingProviderError):
     code = "timeout"
 
 
+class EmbeddingProviderTransportError(EmbeddingProviderError):
+    """A connection failure that is safe to retry for the same task."""
+
+    code = "provider_transport_error"
+
+
+class EmbeddingProviderUnavailableError(EmbeddingProviderError):
+    """A transient HTTP refusal that is safe to retry with backoff."""
+
+    code = "provider_unavailable"
+
+
 EmbeddingRole: TypeAlias = Literal["query", "passage"]
 
 
@@ -156,7 +168,9 @@ class OpenAICompatibleEmbeddingProvider:
                 batch_item_count=len(texts),
                 operation_item_counts=self._operation_item_counts,
             )
-            raise EmbeddingProviderError("embedding request failed") from exc
+            raise EmbeddingProviderTransportError(
+                "embedding request failed"
+            ) from exc
         request_id = response.headers.get("x-request-id") or response.headers.get(
             "request-id"
         ) or f"local-{uuid.uuid4().hex}"
@@ -189,6 +203,12 @@ class OpenAICompatibleEmbeddingProvider:
         if response.status_code in {401, 403}:
             raise EmbeddingProviderAuthenticationError(
                 "embedding authentication failed"
+            )
+        if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
+            provider_detail = _provider_error_detail(response_payload)
+            suffix = f": {provider_detail}" if provider_detail else ""
+            raise EmbeddingProviderUnavailableError(
+                f"embedding provider returned HTTP {response.status_code}{suffix}"
             )
         if response.status_code >= 400:
             provider_detail = _provider_error_detail(response_payload)
@@ -258,5 +278,7 @@ __all__ = [
     "EmbeddingProviderAuthenticationError",
     "EmbeddingProviderError",
     "EmbeddingProviderTimeoutError",
+    "EmbeddingProviderTransportError",
+    "EmbeddingProviderUnavailableError",
     "OpenAICompatibleEmbeddingProvider",
 ]

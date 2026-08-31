@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ledgermind-local"
-version = "4.0.0b3"
+version = "4.0.0b5"
 description = "LedgerMind local service bootstrap"
 license = "BUSL-1.1"
 license-files = ["LICENSE", "NOTICE", "COPYING"]

@@ -27,7 +27,6 @@ from .secret_refs import (
 )
 from .secrets.base import SecretBackend
 from .secrets.file_store import FileSecretStore
-from .secrets.secret_service import SecretServiceStore
 
 
 def _write_private_json(path: Path, payload: object) -> None:
@@ -75,11 +74,14 @@ def _ensure_local_server_token(paths: InstallerPaths) -> Path:
 
 
 def select_secret_backend(paths: InstallerPaths) -> SecretBackend:
-    if os.environ.get("LEDGERMIND_SECRET_BACKEND", "").lower() == "file":
-        return FileSecretStore(paths.secrets_file)
-    service = SecretServiceStore()
-    if service.available():
-        return service
+    """Return the one canonical provider-secret store used by Local.
+
+    Runtime inference always reads ``paths.secrets_file``.  Selecting Secret
+    Service opportunistically here allowed the two stores to diverge and made
+    an update copy a stale desktop-keyring value over the working runtime
+    credential.  Keep one source of truth regardless of DBus availability.
+    """
+
     return FileSecretStore(paths.secrets_file)
 
 
@@ -191,6 +193,7 @@ def write_installer_config(
     *,
     generation_stdin: str | None = None,
     embedding_stdin: str | None = None,
+    preserve_provider_credentials: bool = False,
 ) -> dict[str, Any]:
     """Write secret-free config and profile bindings; return safe metadata."""
 
@@ -198,17 +201,19 @@ def write_installer_config(
     runtime_token = _ensure_runtime_token(paths)
     server_token = _ensure_local_server_token(paths)
     backend = select_secret_backend(paths)
-    generation_token = _secret_value(
-        config.generation.token,
-        config.generation.token_env,
-        generation_stdin if config.generation.token_stdin else None,
-        secret_ref=config.generation.secret_ref,
-        backend=backend,
-    )
     generation_ref = GENERATION_SECRET_REF
-    backend.put(generation_ref, generation_token)
-    if isinstance(backend, SecretServiceStore):
-        FileSecretStore(paths.secrets_file).put(generation_ref, generation_token)
+    if preserve_provider_credentials:
+        if not backend.get(generation_ref):
+            raise ValueError("the installed generation credential is missing")
+    else:
+        generation_token = _secret_value(
+            config.generation.token,
+            config.generation.token_env,
+            generation_stdin if config.generation.token_stdin else None,
+            secret_ref=config.generation.secret_ref,
+            backend=backend,
+        )
+        backend.put(generation_ref, generation_token)
     profiles: list[dict[str, Any]] = []
     for generation_profile in build_generation_profiles(config.generation):
         profiles.append(
@@ -219,17 +224,19 @@ def write_installer_config(
         )
     if config.embedding.mode == "api":
         assert config.embedding.api is not None
-        embedding_token = _secret_value(
-            config.embedding.api.token,
-            config.embedding.api.token_env,
-            embedding_stdin if config.embedding.api.token_stdin else None,
-            secret_ref=config.embedding.api.secret_ref,
-            backend=backend,
-        )
         embedding_ref = EMBEDDING_SECRET_REF
-        backend.put(embedding_ref, embedding_token)
-        if isinstance(backend, SecretServiceStore):
-            FileSecretStore(paths.secrets_file).put(embedding_ref, embedding_token)
+        if preserve_provider_credentials:
+            if not backend.get(embedding_ref):
+                raise ValueError("the installed embedding credential is missing")
+        else:
+            embedding_token = _secret_value(
+                config.embedding.api.token,
+                config.embedding.api.token_env,
+                embedding_stdin if config.embedding.api.token_stdin else None,
+                secret_ref=config.embedding.api.secret_ref,
+                backend=backend,
+            )
+            backend.put(embedding_ref, embedding_token)
         profiles.append(
             {
                 "profile_id": "embedding-default",
@@ -262,9 +269,7 @@ def write_installer_config(
         "config": str(paths.config_file),
         "profiles": str(paths.profiles_file),
         "service_config": str(paths.data_dir / "local" / "config.json"),
-        "secrets": str(paths.secrets_file)
-        if isinstance(backend, FileSecretStore)
-        else "secret-service",
+        "secrets": str(paths.secrets_file),
         "runtime_token_file": str(runtime_token),
         "server_token_file": str(server_token),
         "profile_ids": [item["profile_id"] for item in profiles],

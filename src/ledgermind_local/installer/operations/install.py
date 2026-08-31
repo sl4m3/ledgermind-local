@@ -105,6 +105,7 @@ def install(
     bundle_root_override: str | Path | None = None,
     generation_stdin: str | None = None,
     embedding_stdin: str | None = None,
+    preserve_provider_credentials: bool = False,
     progress: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     """Install one release and return safe operation metadata."""
@@ -284,6 +285,7 @@ def install(
                 paths,
                 generation_stdin=generation_stdin,
                 embedding_stdin=embedding_stdin,
+                preserve_provider_credentials=preserve_provider_credentials,
             )
             config_metadata["local_config"] = str(
                 write_local_config(platform_config, paths, release_dir=release_dir)

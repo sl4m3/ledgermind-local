@@ -186,9 +186,15 @@ class CoreExecutionTask:
             if value is not None and not isinstance(value, dict):
                 raise TypeError(f"{name} must be an object")
         if self.task_kind not in {"generate_json", "object_resolution", "embed_texts"}:
-            raise ValueError("task_kind must be generate_json, object_resolution, or embed_texts")
+            raise ValueError(
+                "task_kind must be generate_json, object_resolution, or embed_texts"
+            )
         if self.task_kind in {"generate_json", "object_resolution"}:
-            if self.profile_slot not in {"operational", "object_resolution", "background"}:
+            if self.profile_slot not in {
+                "operational",
+                "object_resolution",
+                "background",
+            }:
                 raise ValueError(
                     "generate_json task requires an operational, object_resolution, or background profile slot"
                 )
@@ -264,7 +270,11 @@ class CoreExecutionTask:
                 "prompt_only",
             }:
                 raise ValueError("model_request mode is invalid")
-            if self.operation in {"user_semantic", "execution_semantic", "object_resolution"}:
+            if self.operation in {
+                "user_semantic",
+                "execution_semantic",
+                "object_resolution",
+            }:
                 if mode != STRICT_JSON_SCHEMA_MODE:
                     raise ValueError(
                         "semantic generate_json tasks require mode=strict_json_schema"
@@ -285,7 +295,10 @@ class CoreExecutionTask:
                     if isinstance(output_contract, dict)
                     else None
                 )
-                if not isinstance(contract_digest, str) or contract_digest != output_digest:
+                if (
+                    not isinstance(contract_digest, str)
+                    or contract_digest != output_digest
+                ):
                     raise ValueError(
                         "semantic task contract digest must match the strict output contract"
                     )
@@ -340,7 +353,9 @@ class CoreExecutionTask:
                     not isinstance(subject_ref, str) or not subject_ref.strip()
                     for subject_ref in subject_refs
                 ):
-                    raise ValueError("embedding_request.subject_refs must contain strings")
+                    raise ValueError(
+                        "embedding_request.subject_refs must contain strings"
+                    )
                 if len(set(subject_refs)) != len(subject_refs):
                     raise ValueError("embedding_request.subject_refs must be unique")
             purpose = validate_embedding_purpose(
@@ -363,7 +378,9 @@ class CoreExecutionTask:
                 or not isinstance(dimensions, int)
                 or not 1 <= dimensions <= 100_000
             ):
-                raise TypeError("embedding_request.dimensions must be a positive integer")
+                raise TypeError(
+                    "embedding_request.dimensions must be a positive integer"
+                )
             for key in (
                 "profile_fingerprint",
                 "config_fingerprint",
@@ -373,14 +390,22 @@ class CoreExecutionTask:
                 "renderer_version",
             ):
                 value = self.embedding_request.get(key)
-                if value is not None and (not isinstance(value, str) or not value.strip()):
+                if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                ):
                     raise ValueError(f"embedding_request.{key} must be non-empty text")
             cache_keys = self.embedding_request.get("cache_keys")
             if cache_keys is not None:
                 if not isinstance(cache_keys, list) or len(cache_keys) != len(texts):
-                    raise ValueError("embedding_request.cache_keys must align with texts")
-                if any(not isinstance(key, str) or not key.strip() for key in cache_keys):
-                    raise ValueError("embedding_request.cache_keys must contain strings")
+                    raise ValueError(
+                        "embedding_request.cache_keys must align with texts"
+                    )
+                if any(
+                    not isinstance(key, str) or not key.strip() for key in cache_keys
+                ):
+                    raise ValueError(
+                        "embedding_request.cache_keys must contain strings"
+                    )
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> CoreExecutionTask:
@@ -404,7 +429,9 @@ class CoreExecutionTask:
         )
         task_kind = payload.get("task_kind")
         if task_kind not in {"generate_json", "object_resolution", "embed_texts"}:
-            raise ValueError("task_kind must be generate_json, object_resolution, or embed_texts")
+            raise ValueError(
+                "task_kind must be generate_json, object_resolution, or embed_texts"
+            )
         profile_slot = payload.get("profile_slot")
         if profile_slot not in {
             "operational",
@@ -425,7 +452,9 @@ class CoreExecutionTask:
             if value is not None and not isinstance(value, dict):
                 raise TypeError(f"{name} must be an object")
         return cls(
-            schema_version=_non_negative_int(payload.get("schema_version"), "schema_version"),
+            schema_version=_non_negative_int(
+                payload.get("schema_version"), "schema_version"
+            ),
             task_id=_required(payload.get("task_id"), "task_id"),
             task_kind=task_kind,
             operation=_required(payload.get("operation"), "operation"),
@@ -499,11 +528,15 @@ class CoreExecutionResult:
             raise ValueError("result.task_kind is invalid")
         if self.status != "completed":
             raise ValueError("result.status must be completed")
-        if self.operation_input is not None and not isinstance(self.operation_input, dict):
+        if self.operation_input is not None and not isinstance(
+            self.operation_input, dict
+        ):
             raise TypeError("result.operation_input must be an object")
         if self.output is not None and not isinstance(self.output, dict):
             raise TypeError("result.output must be an object")
-        if self.embedding_result is not None and not isinstance(self.embedding_result, dict):
+        if self.embedding_result is not None and not isinstance(
+            self.embedding_result, dict
+        ):
             raise TypeError("result.embedding_result must be an object")
         if not isinstance(self.egress_audit, dict):
             raise TypeError("result.egress_audit must be an object")
@@ -640,9 +673,7 @@ class CoreExecutionResult:
                 if payload.get("tool_name") is not None
                 else None
             ),
-            metadata=(
-                dict(metadata) if isinstance(metadata, dict) else None
-            ),
+            metadata=(dict(metadata) if isinstance(metadata, dict) else None),
         )
 
 
@@ -848,6 +879,8 @@ class CoreHealth:
 class RunControlMaintenanceCommand:
     request_id: str
     embedding_profiles: dict[str, dict[str, Any]] | None = None
+    retry_failed_user_semantic: bool = False
+    retry_limit: int = 100
 
     def __post_init__(self) -> None:
         _required(self.request_id, "request_id")
@@ -861,11 +894,19 @@ class RunControlMaintenanceCommand:
                 for memory_space_id, profile in self.embedding_profiles.items()
             ):
                 raise TypeError("embedding_profiles must map ids to objects")
+        if not isinstance(self.retry_failed_user_semantic, bool):
+            raise TypeError("retry_failed_user_semantic must be boolean")
+        if not isinstance(self.retry_limit, int) or not 1 <= self.retry_limit <= 1_000:
+            raise ValueError("retry_limit must be between 1 and 1000")
 
     def to_payload(self) -> dict[str, object]:
-        if self.embedding_profiles is None:
-            return {}
-        return {"embedding_profiles": self.embedding_profiles}
+        payload: dict[str, object] = {}
+        if self.embedding_profiles is not None:
+            payload["embedding_profiles"] = self.embedding_profiles
+        if self.retry_failed_user_semantic:
+            payload["retry_failed_user_semantic"] = True
+            payload["retry_limit"] = self.retry_limit
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -883,6 +924,7 @@ class ControlMaintenanceResult:
     terminal_task_rows_deleted: int = 0
     cleanup_candidate_count: int = 0
     objects_consolidated: int = 0
+    retried_failed_user_semantic: int = 0
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> ControlMaintenanceResult:
@@ -902,6 +944,7 @@ class ControlMaintenanceResult:
                 "diagnostic_rows_deleted",
                 "terminal_task_rows_deleted",
                 "cleanup_candidate_count",
+                "retried_failed_user_semantic",
             },
             "control maintenance result",
         )
@@ -912,7 +955,9 @@ class ControlMaintenanceResult:
             memory_echoes_reconciled=_non_negative_int(
                 payload.get("memory_echoes_reconciled"), "memory_echoes_reconciled"
             ),
-            stats_rebuilt=_non_negative_int(payload.get("stats_rebuilt"), "stats_rebuilt"),
+            stats_rebuilt=_non_negative_int(
+                payload.get("stats_rebuilt"), "stats_rebuilt"
+            ),
             stale_jobs_recovered=_non_negative_int(
                 payload.get("stale_jobs_recovered"), "stale_jobs_recovered"
             ),
@@ -925,18 +970,25 @@ class ControlMaintenanceResult:
             objects_consolidated=_non_negative_int(
                 payload.get("objects_consolidated", 0), "objects_consolidated"
             ),
+            retried_failed_user_semantic=_non_negative_int(
+                payload.get("retried_failed_user_semantic", 0),
+                "retried_failed_user_semantic",
+            ),
             missing_card_embeddings=_non_negative_int(
                 payload.get("missing_card_embeddings"), "missing_card_embeddings"
             ),
             missing_facet_embeddings=_non_negative_int(
                 payload.get("missing_facet_embeddings"), "missing_facet_embeddings"
             ),
-            integrity_errors=_non_negative_int(payload.get("integrity_errors"), "integrity_errors"),
+            integrity_errors=_non_negative_int(
+                payload.get("integrity_errors"), "integrity_errors"
+            ),
             diagnostic_rows_deleted=_non_negative_int(
                 payload.get("diagnostic_rows_deleted", 0), "diagnostic_rows_deleted"
             ),
             terminal_task_rows_deleted=_non_negative_int(
-                payload.get("terminal_task_rows_deleted", 0), "terminal_task_rows_deleted"
+                payload.get("terminal_task_rows_deleted", 0),
+                "terminal_task_rows_deleted",
             ),
             cleanup_candidate_count=_non_negative_int(
                 payload.get("cleanup_candidate_count", 0), "cleanup_candidate_count"

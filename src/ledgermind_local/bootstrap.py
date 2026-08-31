@@ -10,6 +10,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -450,11 +451,16 @@ class LocalRuntime:
         for row in rows:
             memory_space_id = str(row[0])
             try:
-                profiles[memory_space_id] = self.embedding_profile_metadata(memory_space_id)
+                profiles[memory_space_id] = self.embedding_profile_metadata(
+                    memory_space_id
+                )
             except Exception as exc:  # noqa: BLE001 - readiness remains content-free
                 logger.warning(
                     "embedding profile identity unavailable",
-                    extra={"memory_space_id": memory_space_id, "error_code": _safe_error_code(exc)},
+                    extra={
+                        "memory_space_id": memory_space_id,
+                        "error_code": _safe_error_code(exc),
+                    },
                 )
         return profiles
 
@@ -774,9 +780,7 @@ class LocalRuntime:
                     "ok": object_facet_ready,
                     "initialization_pending": object_facet_initializing,
                     "degraded_reason": (
-                        "facet_catalogue_preload"
-                        if object_facet_initializing
-                        else None
+                        "facet_catalogue_preload" if object_facet_initializing else None
                     ),
                 },
                 "workers": workers_component,
@@ -824,9 +828,7 @@ class LocalRuntime:
             get_statistics = getattr(gateway, "get_object_facet_statistics", None)
             if not callable(get_statistics):
                 raise TypeError("Core activity statistics are unavailable")
-            statistics = get_statistics(
-                f"local-activity:{os.getpid()}:{uuid.uuid4()}"
-            )
+            statistics = get_statistics(f"local-activity:{os.getpid()}:{uuid.uuid4()}")
             core_backlog: dict[str, int] = {}
             for name in (
                 "operational_backlog",
@@ -1190,16 +1192,20 @@ class LocalRuntime:
         # reconciliation pass closes that stale projection without hiding a
         # still-live finding.
         statistics = self._object_facet_statistics or {}
-        if callable(run_control) and all(
-            statistics.get(name, 0) == 0
-            for name in (
-                "operational_backlog",
-                "background_backlog",
-                "embedding_backlog",
-                "missing_card_embeddings",
-                "missing_facet_embeddings",
+        if (
+            callable(run_control)
+            and all(
+                statistics.get(name, 0) == 0
+                for name in (
+                    "operational_backlog",
+                    "background_backlog",
+                    "embedding_backlog",
+                    "missing_card_embeddings",
+                    "missing_facet_embeddings",
+                )
             )
-        ) and statistics.get("integrity_finding_count", 0) > 0:
+            and statistics.get("integrity_finding_count", 0) > 0
+        ):
             try:
                 embedding_profiles = self._embedding_profiles_by_memory_space()
                 result = run_control(
@@ -1269,6 +1275,63 @@ class LocalRuntime:
                 )
                 if name in statistics
             },
+        }
+
+    def retry_failed_user_semantic(self, *, limit: int = 100) -> dict[str, object]:
+        """Explicitly requeue size rejects and pre-materialization failures."""
+
+        gateway = self.core_gateway
+        if gateway is None:
+            raise RuntimeError("Core gateway is unavailable")
+        connection = self.connection_factory(self.database_path)
+        try:
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            rows = connection.execute(
+                """
+                SELECT command_id FROM core_commands
+                WHERE status = 'rejected'
+                  AND LOWER(COALESCE(last_error_detail, ''))
+                      LIKE '%normalized%budget%'
+                ORDER BY created_at, command_id LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            command_ids = [str(row[0]) for row in rows]
+            for command_id in command_ids:
+                connection.execute(
+                    """
+                    UPDATE core_commands
+                    SET status = 'pending', attempts = 0, available_at = ?,
+                        lease_expires_at = NULL, claimed_by = NULL,
+                        completed_at = NULL, result_json = NULL,
+                        last_error_code = NULL, last_error_detail = NULL
+                    WHERE command_id = ? AND status = 'rejected'
+                    """,
+                    (now, command_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE raw_round_core_deliveries
+                    SET transport_status = 'queued', last_error_code = NULL,
+                        updated_at = ? WHERE command_id = ?
+                    """,
+                    (now, command_id),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+        result = gateway.run_control_maintenance(
+            RunControlMaintenanceCommand(
+                f"local-replay:{os.getpid()}:{uuid.uuid4()}",
+                embedding_profiles=self._embedding_profiles_by_memory_space(),
+                retry_failed_user_semantic=True,
+                retry_limit=limit,
+            )
+        )
+        return {
+            "status": result.status,
+            "requeued_normalization_commands": len(command_ids),
+            "retried_failed_user_semantic": result.retried_failed_user_semantic,
         }
 
     def _start_workers(self) -> None:
@@ -1454,7 +1517,12 @@ class LocalRuntime:
             self.config.core_security,
             verify_core_signature=self.config.verify_core_signature,
         ).missing(capabilities)
-        return {"ready": not missing, "ok": not missing, "missing": missing, "capabilities": payload}
+        return {
+            "ready": not missing,
+            "ok": not missing,
+            "missing": missing,
+            "capabilities": payload,
+        }
 
     def _cleanup_after_failed_start(self) -> None:
         self.request_stop()

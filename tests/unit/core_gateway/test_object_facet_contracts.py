@@ -7,6 +7,7 @@ from ledgermind_local.core_gateway.contracts import (
     CoreExecutionResult,
     CoreExecutionTask,
     RecordRetrievalOutcomeCommand,
+    RunControlMaintenanceCommand,
 )
 from ledgermind_local.inference.strict import strict_requirement_for_contract
 
@@ -101,9 +102,7 @@ def test_execution_task_round_trip_preserves_opaque_operation_metadata() -> None
     assert task.operation == "core_owned_operation"
     assert task.operation_input == {"domain": {"owned_by": "core"}}
     assert task.structured_generation is not None
-    assert task.to_payload()["operation_input"] == {
-        "domain": {"owned_by": "core"}
-    }
+    assert task.to_payload()["operation_input"] == {"domain": {"owned_by": "core"}}
     assert task.to_payload()["structured_generation"]["attempt_number"] == 0
 
 
@@ -150,10 +149,15 @@ def test_claim_operations_and_subject_query_embedding_are_wire_opaque() -> None:
     assert task.to_payload()["embedding_request"] == payload["embedding_request"]
 
     with pytest.raises(ValueError, match="not supported"):
-        CoreExecutionTask.from_payload({**payload, "embedding_request": {
-            **payload["embedding_request"],
-            "purpose": "object_first",
-        }})
+        CoreExecutionTask.from_payload(
+            {
+                **payload,
+                "embedding_request": {
+                    **payload["embedding_request"],
+                    "purpose": "object_first",
+                },
+            }
+        )
 
 
 def test_execution_result_rejects_unknown_fields_and_invalid_shape() -> None:
@@ -208,3 +212,18 @@ def test_control_maintenance_accepts_core_consolidation_counter() -> None:
     result = ControlMaintenanceResult.from_payload(payload)
 
     assert result.objects_consolidated == 0
+
+
+def test_control_maintenance_replay_is_explicit_and_bounded() -> None:
+    default = RunControlMaintenanceCommand("maintenance")
+    replay = RunControlMaintenanceCommand(
+        "replay", retry_failed_user_semantic=True, retry_limit=7
+    )
+
+    assert default.to_payload() == {}
+    assert replay.to_payload() == {
+        "retry_failed_user_semantic": True,
+        "retry_limit": 7,
+    }
+    with pytest.raises(ValueError, match="between 1 and 1000"):
+        RunControlMaintenanceCommand("replay", retry_limit=0)

@@ -382,6 +382,42 @@ def test_failed_update_restores_local_database_and_skips_duplicate_provider_prob
     assert database.read_bytes() == b"original-database"
 
 
+def test_update_never_authorizes_install_to_rewrite_provider_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    update_module = importlib.import_module(
+        "ledgermind_local.installer.operations.update"
+    )
+    paths = InstallerPaths(home_override=tmp_path / "install-home")
+    paths.ensure()
+    previous_release = paths.release_dir("previous")
+    previous_release.mkdir()
+    paths.current_link.symlink_to(previous_release)
+    captured: dict[str, Any] = {}
+
+    def fake_install(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"status": "success", "release_version": "candidate"}
+
+    monkeypatch.setattr(update_module, "install", fake_install)
+    monkeypatch.setattr(
+        update_module,
+        "doctor",
+        lambda **_kwargs: {"status": "passed"},
+    )
+
+    result = update_module.update(
+        config=_config(),
+        paths=paths,
+        manifest_path=tmp_path / "manifest.json",
+        bundle=tmp_path / "bundle.tar.zst",
+        skip_provider_probe=True,
+    )
+
+    assert result["status"] == "success"
+    assert captured["preserve_provider_credentials"] is True
+
+
 def test_repair_is_local_and_does_not_probe_providers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -23,6 +23,7 @@ from ledgermind_local.installer.cli import _emit, _result, _runtime
 from ledgermind_local.installer.config_writer import (
     load_installer_config,
     persist_generation_probe,
+    select_secret_backend,
     write_installer_config,
     write_local_config,
     write_local_profiles,
@@ -179,6 +180,49 @@ def test_config_writer_uses_0600_file_fallback_and_strips_tokens(
     assert server_token.read_text(encoding="utf-8").strip()
     assert stat.S_IMODE(server_token.stat().st_mode) == 0o600
     assert "server.token" not in paths.config_file.read_text(encoding="utf-8")
+
+
+def test_runtime_file_is_the_canonical_secret_store_even_with_dbus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LEDGERMIND_SECRET_BACKEND", raising=False)
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/stale-desktop-keyring")
+    paths = InstallerPaths(home_override=tmp_path)
+
+    backend = select_secret_backend(paths)
+
+    assert backend.__class__.__name__ == "FileSecretStore"
+    assert backend.path == paths.secrets_file
+
+
+def test_update_style_config_write_preserves_provider_credentials_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    write_installer_config(_config(), paths)
+    before = paths.secrets_file.read_bytes()
+    changed_tokens = _config().model_copy(
+        update={
+            "generation": _config().generation.model_copy(
+                update={"token": "must-not-replace-generation"}
+            ),
+            "embedding": _config().embedding.model_copy(
+                update={
+                    "api": _config().embedding.api.model_copy(
+                        update={"token": "must-not-replace-embedding"}
+                    )
+                }
+            ),
+        }
+    )
+
+    write_installer_config(
+        changed_tokens,
+        paths,
+        preserve_provider_credentials=True,
+    )
+
+    assert paths.secrets_file.read_bytes() == before
 
 
 def test_config_writer_preserves_existing_local_server_token(

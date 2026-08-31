@@ -62,6 +62,18 @@ def test_transient_provider_result_is_retryable() -> None:
     assert _execution_result_is_retryable(result) is True
 
 
+def test_embedding_provider_unavailable_result_is_retryable() -> None:
+    result = SimpleNamespace(status="failed", error_code="provider_unavailable")
+
+    assert _execution_result_is_retryable(result) is True
+
+
+def test_embedding_transport_result_is_retryable() -> None:
+    result = SimpleNamespace(status="failed", error_code="provider_transport_error")
+
+    assert _execution_result_is_retryable(result) is True
+
+
 def test_schema_failure_result_is_not_retryable() -> None:
     result = SimpleNamespace(status="failed", error_code="schema_shape_failure")
 

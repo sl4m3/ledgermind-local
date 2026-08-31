@@ -26,6 +26,7 @@ from ledgermind_protocol.core_ipc import (
     CoreRequestEnvelope,
     CoreResponseEnvelope,
 )
+
 from ledgermind_local.core_gateway.compatibility import (
     SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
     SUPPORTED_PROTOCOL_MAX,
@@ -288,6 +289,7 @@ def main() -> int:
                         "missing_card_embeddings": 0,
                         "missing_facet_embeddings": 0,
                         "integrity_errors": 0,
+                        "retried_failed_user_semantic": 0,
                     },
                 )
             )
@@ -326,7 +328,11 @@ def main() -> int:
                     },
                 )
             )
-        elif request.operation in {"validate_backup", "prepare_restore", "begin_restore"}:
+        elif request.operation in {
+            "validate_backup",
+            "prepare_restore",
+            "begin_restore",
+        }:
             raw_relative_path = request.payload.get("relative_path")
             expected_sha = request.payload.get("sha256")
             if (
@@ -342,11 +348,17 @@ def main() -> int:
                 source = _exchange_file(core_data_dir, relative_path)
                 content = source.read_bytes()
             except (OSError, ValueError):
-                _error(request.request_id, "INTEGRITY_VIOLATION", "backup artifact is missing")
+                _error(
+                    request.request_id,
+                    "INTEGRITY_VIOLATION",
+                    "backup artifact is missing",
+                )
                 continue
             actual_sha = _digest(content)
             if actual_sha != expected_sha:
-                _error(request.request_id, "INTEGRITY_VIOLATION", "backup digest mismatch")
+                _error(
+                    request.request_id, "INTEGRITY_VIOLATION", "backup digest mismatch"
+                )
                 continue
             result: dict[str, object] = {
                 "relative_path": relative_path,
@@ -356,7 +368,11 @@ def main() -> int:
             }
             if request.operation == "begin_restore":
                 if request.payload.get("restore_token") != "fake-restore-token-1":
-                    _error(request.request_id, "INVALID_REQUEST", "restore token is invalid")
+                    _error(
+                        request.request_id,
+                        "INVALID_REQUEST",
+                        "restore token is invalid",
+                    )
                     continue
                 result.update(
                     {
@@ -377,7 +393,9 @@ def main() -> int:
                 CoreResponseEnvelope.ok(
                     request.request_id,
                     {
-                        "restore_transaction_id": request.payload.get("restore_transaction_id"),
+                        "restore_transaction_id": request.payload.get(
+                            "restore_transaction_id"
+                        ),
                         "committed": True,
                         "state": "committed",
                     },
@@ -388,7 +406,9 @@ def main() -> int:
                 CoreResponseEnvelope.ok(
                     request.request_id,
                     {
-                        "restore_transaction_id": request.payload.get("restore_transaction_id"),
+                        "restore_transaction_id": request.payload.get(
+                            "restore_transaction_id"
+                        ),
                         "rolled_back": True,
                         "state": "rolled_back",
                     },

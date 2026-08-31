@@ -75,6 +75,7 @@ def update(
                 skip_provider_probe=skip_provider_probe,
                 generation_stdin=generation_stdin,
                 embedding_stdin=embedding_stdin,
+                preserve_provider_credentials=True,
             )
             # Provider preflight already ran inside install unless the caller
             # explicitly skipped it. Do not duplicate billable network calls,

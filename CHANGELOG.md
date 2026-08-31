@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.0.0b5 - 2026-08-31
+
+- Classified embedding timeouts, transport failures, HTTP 429 responses, and
+  transient HTTP 5xx responses as retryable provider failures so one temporary
+  outage no longer terminates the affected memory pipeline.
+- Preserved permanent handling for authentication, invalid request, response
+  shape, model identity, and embedding dimension failures.
+
+## 4.0.0b4 - 2026-08-31
+
+- Made the runtime file secret store the single provider-credential source of
+  truth and prevented signed updates from rewriting installed credentials.
+- Made provider reconfiguration transactional across config, secrets, Local
+  profiles, and their SQLite state.
+- Added read-only memory-pipeline health diagnostics and an authenticated,
+  bounded replay endpoint for normalization rejects and pre-materialization
+  User Semantic failures.
+
 ## 4.0.0b3 - 2026-08-31
 
 - Prevented idle shutdown while Local-to-Core delivery, semantic processing,

@@ -487,6 +487,7 @@ def _emit(result: InstallResult, *, json_output: bool) -> int:
         for step in result.steps:
             print(f"- {step.name}: {step.status}")
         _emit_integration_details(result)
+        _emit_status_details(result)
         _emit_install_details(result)
         _emit_uninstall_details(result)
         for warning in result.warnings:
@@ -494,6 +495,33 @@ def _emit(result: InstallResult, *, json_output: bool) -> int:
         for error in result.errors:
             print(f"error: {error}", file=sys.stderr)
     return int(result.exit_code)
+
+
+def _emit_status_details(result: InstallResult) -> None:
+    if result.operation != "status" or not result.steps:
+        return
+    health = result.steps[-1].data.get("memory_health")
+    if not isinstance(health, dict):
+        return
+    print("\nMemory pipeline:")
+    print(f"  Health:       {health.get('status', 'unknown')}")
+    if health.get("last_successful_pipeline_at"):
+        print(f"  Last success: {health['last_successful_pipeline_at']}")
+    if health.get("last_materialized_at"):
+        print(f"  Last write:   {health['last_materialized_at']}")
+    if health.get("failed_batches_since_last_success") is not None:
+        print(
+            "  Failed since: "
+            f"{health['failed_batches_since_last_success']} semantic batch(es)"
+        )
+    if health.get("normalization_rejections") is not None:
+        print(
+            "  Rejected:     "
+            f"{health['normalization_rejections']} normalization command(s)"
+        )
+    latest = health.get("latest_failure")
+    if isinstance(latest, dict) and latest.get("error_code"):
+        print(f"  Latest error: {latest['error_code']}")
 
 
 def _emit_integration_details(result: InstallResult) -> None:
