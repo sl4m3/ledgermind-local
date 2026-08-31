@@ -6,6 +6,7 @@ import json
 import os
 import tarfile
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -88,6 +89,7 @@ def fetch_bundle(
     manifest: InstallManifest,
     *,
     public_key: bytes | str | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     base_url = os.environ.get("LEDGERMIND_RELEASE_BASE_URL", "").strip()
     if not base_url:
@@ -103,6 +105,7 @@ def fetch_bundle(
         bundle_path,
         expected_size=artifact.size,
         expected_sha256=artifact.sha256,
+        progress=progress,
     )
     verify_file(bundle_path, artifact)
     verify_artifact_signature(bundle_path, artifact, public_key=public_key)

@@ -762,7 +762,7 @@ def _emit_uninstall_details(result: InstallResult) -> None:
 
 
 def _terminal_progress(phase: str, message: str) -> None:
-    """Small stable progress surface for the interactive terminal installer."""
+    """Render installation phases as one stable terminal status line."""
 
     labels = {
         "providers": "CHECK",
@@ -774,10 +774,17 @@ def _terminal_progress(phase: str, message: str) -> None:
         "complete": "DONE",
     }
     stage = "8/8" if phase == "complete" else "7/8"
+    previous = getattr(_terminal_progress, "phase", None)
+    if previous is not None and previous != phase:
+        print(file=sys.stderr)
     print(
+        "\r\033[2K"
         f"  {stage} [{labels.get(phase, phase.upper())}] {message}",
+        end="\n" if phase == "complete" else "",
         file=sys.stderr,
+        flush=True,
     )
+    _terminal_progress.phase = phase  # type: ignore[attr-defined]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -853,6 +860,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not bool(args.non_interactive) and not bool(args.json_output)
                 else None
             )
+            if interactive_progress is not None:
+                _terminal_progress.phase = None  # type: ignore[attr-defined]
             while True:
                 try:
                     payload = install(

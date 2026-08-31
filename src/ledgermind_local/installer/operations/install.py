@@ -95,6 +95,21 @@ def _platform_name() -> str:
     return platform_id()
 
 
+def _download_progress(label: str, transferred: int, total: int | None) -> str:
+    transferred_mib = transferred / (1024 * 1024)
+    if total is None or total <= 0:
+        return f"{label} · {transferred_mib:.1f} MiB"
+    total_mib = total / (1024 * 1024)
+    percent = min(100, transferred * 100 // total)
+    width = 20
+    filled = percent * width // 100
+    bar = "━" * filled + "─" * (width - filled)
+    return (
+        f"{label}  {bar}  {percent:3d}%  "
+        f"{transferred_mib:.1f}/{total_mib:.1f} MiB"
+    )
+
+
 def install(
     *,
     config: InstallerConfig,
@@ -176,6 +191,10 @@ def install(
             paths,
             manifest,
             public_key=public_key or public_key_from_environment(),
+            progress=lambda transferred, total: report(
+                "download",
+                _download_progress("Signed runtime", transferred, total),
+            ),
         )
     plan = install_plan(config, paths=paths, manifest=manifest)
     plan.update(provider_probes)
@@ -229,7 +248,14 @@ def install(
                 "license": entry.get("license"),
             }
         else:
-            model_dir = download_model(entry, paths)
+            model_dir = download_model(
+                entry,
+                paths,
+                progress=lambda transferred, total: report(
+                    "embeddings",
+                    _download_progress("Nemotron model", transferred, total),
+                ),
+            )
             local_plan["model"] = verify_model_files(model_dir, entry)
             model_path = model_dir
         runtime_path = install_runtime(

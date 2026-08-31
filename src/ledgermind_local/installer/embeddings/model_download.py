@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -43,13 +44,21 @@ def _file_records(entry: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def download_model(entry: dict[str, Any], paths: InstallerPaths) -> Path:
+def download_model(
+    entry: dict[str, Any],
+    paths: InstallerPaths,
+    *,
+    progress: Callable[[int, int], None] | None = None,
+) -> Path:
     model_id = str(entry.get("id", "")).strip()
     if not model_id:
         raise ConfigurationError("embedding catalog entry has no id")
     target_dir = paths.models_dir / model_id
     target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for record in _file_records(entry):
+    records = _file_records(entry)
+    total_size = sum(int(record.get("size") or 0) for record in records)
+    completed_size = 0
+    for record in records:
         relative = _relative_model_path(record.get("name"))
         url = str(record.get("url", "")).strip()
         if not url:
@@ -65,7 +74,15 @@ def download_model(entry: dict[str, Any], paths: InstallerPaths) -> Path:
             destination,
             expected_size=int(record["size"]),
             expected_sha256=str(record["sha256"]),
+            progress=(
+                lambda transferred, _total, base=completed_size: progress(
+                    base + transferred, total_size
+                )
+                if progress is not None
+                else None
+            ),
         )
+        completed_size += int(record["size"])
     return target_dir
 
 

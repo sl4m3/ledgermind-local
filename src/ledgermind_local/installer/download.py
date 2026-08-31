@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 from .errors import DownloadError
@@ -28,6 +28,7 @@ def download_artifact(
     *,
     expected_size: int | None = None,
     expected_sha256: str | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
 ) -> DownloadedArtifact:
     target = Path(destination).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -38,12 +39,23 @@ def download_artifact(
         ) as handle:
             temporary = Path(handle.name)
             source = _source_path(url)
+            if progress is not None:
+                progress(0, expected_size)
             if source is not None:
-                with source.open("rb") as source_handle:
-                    shutil.copyfileobj(source_handle, handle)
+                source_handle = source.open("rb")
+                response_size = source.stat().st_size
             else:
-                with urllib.request.urlopen(url, timeout=60) as response:
-                    shutil.copyfileobj(response, handle)
+                source_handle = urllib.request.urlopen(url, timeout=60)
+                raw_length = source_handle.headers.get("content-length")
+                response_size = int(raw_length) if raw_length else None
+            total = expected_size if expected_size is not None else response_size
+            transferred = 0
+            with source_handle:
+                while chunk := source_handle.read(1024 * 1024):
+                    handle.write(chunk)
+                    transferred += len(chunk)
+                    if progress is not None:
+                        progress(transferred, total)
             handle.flush()
             os.fsync(handle.fileno())
         if expected_size is not None and temporary.stat().st_size != expected_size:
