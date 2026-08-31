@@ -7,7 +7,8 @@ import os
 import shlex
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -21,6 +22,29 @@ from .shutdown import should_shutdown
 from .state import load_state, write_state
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeActivity:
+    """Content-free work counts that gate idle shutdown."""
+
+    known: bool
+    leased_tasks: int = 0
+    pending_writes: int = 0
+    error_code: str | None = None
+
+    @property
+    def quiescent(self) -> bool:
+        return self.known and self.leased_tasks == 0 and self.pending_writes == 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "known": self.known,
+            "quiescent": self.quiescent,
+            "leased_tasks": self.leased_tasks,
+            "pending_writes": self.pending_writes,
+            "error_code": self.error_code,
+        }
+
+
 class RuntimeSupervisor:
     def __init__(
         self,
@@ -31,6 +55,7 @@ class RuntimeSupervisor:
         lease_ttl_seconds: float = 30.0,
         commands: dict[str, Sequence[str]] | None = None,
         embedding_command: Sequence[str] | None = None,
+        activity_probe: Callable[[], Mapping[str, object]] | None = None,
     ) -> None:
         self.paths = paths
         self.endpoint = validate_endpoint(endpoint)
@@ -41,6 +66,7 @@ class RuntimeSupervisor:
             if embedding_command
             else None
         )
+        self.activity_probe = activity_probe
         self.commands = (
             dict(commands) if commands is not None else self._default_commands()
         )
@@ -129,6 +155,97 @@ class RuntimeSupervisor:
             state["idle_since"] = value
         state["last_transition"] = time.time()
         write_state(self.paths.runtime_state, state)
+
+    @staticmethod
+    def _parse_activity(payload: Mapping[str, object]) -> RuntimeActivity:
+        known = payload.get("known") is True
+
+        def count(name: str) -> int:
+            value = payload.get(name, 0)
+            if isinstance(value, bool):
+                raise TypeError(f"runtime activity {name} must be an integer")
+            if isinstance(value, int):
+                parsed = value
+            elif isinstance(value, str):
+                parsed = int(value)
+            else:
+                raise TypeError(f"runtime activity {name} must be an integer")
+            if parsed < 0:
+                raise ValueError(f"runtime activity {name} must not be negative")
+            return parsed
+
+        return RuntimeActivity(
+            known=known,
+            leased_tasks=count("leased_tasks"),
+            pending_writes=count("pending_writes"),
+            error_code=(
+                str(payload["error_code"])
+                if payload.get("error_code") is not None
+                else None
+            ),
+        )
+
+    def _activity_snapshot(self) -> RuntimeActivity:
+        """Read fresh activity; an unavailable probe blocks automatic shutdown."""
+
+        try:
+            if self.activity_probe is not None:
+                return self._parse_activity(self.activity_probe())
+            local_command = self.commands.get("local")
+            if (
+                not local_command
+                or os.path.basename(str(local_command[0])) != "ledgermind-local"
+            ):
+                return RuntimeActivity(known=True)
+            token_file = self.paths.data_dir / "local" / "server.token"
+            token = token_file.read_text(encoding="utf-8").strip()
+            if not token:
+                raise RuntimeError("Local API token is empty")
+            request = Request(
+                self.endpoint + "/runtime/activity",
+                headers={
+                    "authorization": f"Bearer {token}",
+                    "accept": "application/json",
+                },
+                method="GET",
+            )
+            with urlopen(request, timeout=2.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise TypeError("runtime activity response must be an object")
+            return self._parse_activity(payload)
+        except Exception:  # noqa: BLE001 - unknown activity must fail closed
+            return RuntimeActivity(known=False, error_code="activity_unavailable")
+
+    def _record_activity(self, activity: RuntimeActivity) -> None:
+        state = load_state(self.paths.runtime_state)
+        state["activity"] = activity.as_dict()
+        state["last_transition"] = time.time()
+        write_state(self.paths.runtime_state, state)
+
+    def _update_idle_boundary(
+        self,
+        *,
+        active_leases: int,
+        now: float,
+    ) -> tuple[RuntimeActivity, float | None]:
+        state = load_state(self.paths.runtime_state)
+        if active_leases:
+            if state.get("idle_since") is not None:
+                self._set_idle_since(None)
+            return RuntimeActivity(known=True), None
+        activity = self._activity_snapshot()
+        self._record_activity(activity)
+        state = load_state(self.paths.runtime_state)
+        if not activity.quiescent:
+            if state.get("idle_since") is not None:
+                self._set_idle_since(None)
+            return activity, None
+        idle_since = state.get("idle_since")
+        if not isinstance(idle_since, int | float):
+            idle_since = now
+            self._set_idle_since(idle_since)
+        return activity, float(idle_since)
 
     def _default_commands(self) -> dict[str, Sequence[str]]:
         raw = os.environ.get("LEDGERMIND_LOCAL_COMMAND", "").strip()
@@ -314,32 +431,44 @@ class RuntimeSupervisor:
             released = self.leases.release(lease_id)
             active = self.leases.active()
             stopped = False
+            activity: RuntimeActivity | None = None
             if not active:
                 current = load_state(self.paths.runtime_state)
                 released_at = time.time()
-                if should_shutdown(
-                    active_leases=0,
-                    leased_tasks=0,
-                    pending_writes=0,
+                self._write(
+                    running=bool(current.get("running", True)),
                     last_release_at=released_at,
+                )
+                activity, idle_since = self._update_idle_boundary(
+                    active_leases=0,
+                    now=released_at,
+                )
+                if idle_since is not None and should_shutdown(
+                    active_leases=0,
+                    leased_tasks=activity.leased_tasks,
+                    pending_writes=activity.pending_writes,
+                    last_release_at=idle_since,
                     idle_grace_seconds=self.idle_shutdown_seconds,
                     now=released_at,
                 ):
-                    self._stop(force=True)
-                    stopped = True
-                else:
-                    self._write(
-                        running=bool(current.get("running", True)),
-                        last_release_at=released_at,
+                    active = self.leases.active()
+                    activity, idle_since = self._update_idle_boundary(
+                        active_leases=len(active),
+                        now=time.time(),
                     )
-                    self._set_idle_since(released_at)
+                    if idle_since is not None and activity.quiescent and not active:
+                        self._stop(force=True)
+                        stopped = True
+                else:
                     self._ensure_idle_reaper()
             else:
                 self._write(running=True)
+                self._set_idle_since(None)
             return {
                 "released": released,
                 "active_leases": len(active),
                 "stopped": stopped,
+                "activity": activity.as_dict() if activity is not None else None,
             }
 
     def status(self) -> dict[str, object]:
@@ -352,23 +481,41 @@ class RuntimeSupervisor:
                 self._write(running=False)
                 state = load_state(self.paths.runtime_state)
                 running = False
-            if (
-                running
-                and not active
-                and should_shutdown(
-                    active_leases=0,
-                    last_release_at=float(state.get("last_release_at") or time.time()),
-                    idle_grace_seconds=self.idle_shutdown_seconds,
+            activity: RuntimeActivity | None = None
+            if running:
+                now = time.time()
+                activity, idle_since = self._update_idle_boundary(
+                    active_leases=len(active),
+                    now=now,
                 )
-            ):
-                self._stop(force=True)
-                state = load_state(self.paths.runtime_state)
+                if idle_since is not None and should_shutdown(
+                    active_leases=len(active),
+                    leased_tasks=activity.leased_tasks,
+                    pending_writes=activity.pending_writes,
+                    last_release_at=idle_since,
+                    idle_grace_seconds=self.idle_shutdown_seconds,
+                    now=now,
+                ):
+                    # Re-read both lease and work state immediately before stop.
+                    active = self.leases.active()
+                    activity, idle_since = self._update_idle_boundary(
+                        active_leases=len(active),
+                        now=time.time(),
+                    )
+                    if idle_since is not None and activity.quiescent and not active:
+                        self._stop(force=True)
+                        state = load_state(self.paths.runtime_state)
             return {
                 "running": bool(state.get("running")),
                 "endpoint": state.get("endpoint"),
                 "active_leases": [lease.as_dict() for lease in active],
                 "expired_leases": list(expired),
                 "processes": state.get("processes", {}),
+                "activity": (
+                    activity.as_dict()
+                    if activity is not None
+                    else state.get("activity")
+                ),
             }
 
     def watch_idle(self, *, poll_interval_seconds: float = 0.5) -> dict[str, object]:
@@ -386,22 +533,26 @@ class RuntimeSupervisor:
                     self._write(running=False)
                     return {"stopped": False, "reason": "runtime_process_missing"}
                 now = time.time()
-                if active:
-                    if state.get("idle_since") is not None:
-                        self._set_idle_since(None)
-                else:
-                    idle_since = state.get("idle_since")
-                    if not isinstance(idle_since, int | float):
-                        idle_since = now
-                        self._set_idle_since(idle_since)
-                    if should_shutdown(
-                        active_leases=0,
-                        leased_tasks=0,
-                        pending_writes=0,
-                        last_release_at=float(idle_since),
-                        idle_grace_seconds=self.idle_shutdown_seconds,
-                        now=now,
-                    ):
+                activity, idle_since = self._update_idle_boundary(
+                    active_leases=len(active),
+                    now=now,
+                )
+                if idle_since is not None and should_shutdown(
+                    active_leases=len(active),
+                    leased_tasks=activity.leased_tasks,
+                    pending_writes=activity.pending_writes,
+                    last_release_at=float(idle_since),
+                    idle_grace_seconds=self.idle_shutdown_seconds,
+                    now=now,
+                ):
+                    # The lock excludes a concurrent acquire; the fresh
+                    # activity read closes the final task-completion race.
+                    active = self.leases.active()
+                    activity, idle_since = self._update_idle_boundary(
+                        active_leases=len(active),
+                        now=time.time(),
+                    )
+                    if idle_since is not None and activity.quiescent and not active:
                         stopped = self._stop(force=True)
                         return {**stopped, "reason": "idle_timeout"}
             time.sleep(poll_interval)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,7 @@ from types import SimpleNamespace
 from ledgermind_local import bootstrap, cli
 from ledgermind_local.bootstrap import LocalRuntime
 from ledgermind_local.config import CoreSecurityConfig, LocalConfig
-from ledgermind_local.core_gateway.contracts import CoreHealth
+from ledgermind_local.core_gateway.contracts import CoreHealth, ObjectFacetStatistics
 from ledgermind_local.core_gateway.security_policy import (
     build_core_isolation_requirements,
 )
@@ -30,6 +31,33 @@ class _Gateway:
 
     def close(self) -> None:
         self.events.append("core-close")
+
+
+class _ActivityGateway(_Gateway):
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        operational: int = 0,
+        background: int = 0,
+        embedding: int = 0,
+    ) -> None:
+        super().__init__(events)
+        self.operational = operational
+        self.background = background
+        self.embedding = embedding
+
+    def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics:
+        del request_id
+        return ObjectFacetStatistics(
+            object_count=0,
+            active_value_count=0,
+            superseded_value_count=0,
+            operational_backlog=self.operational,
+            background_backlog=self.background,
+            embedding_backlog=self.embedding,
+            integrity_finding_count=0,
+        )
 
 
 class _BlockingWorker:
@@ -203,6 +231,84 @@ def test_runtime_health_exposes_worker_degradation_without_result_payload(tmp_pa
         assert worker_report["observability"] == {}
         assert "provider_unavailable" not in json.dumps(worker_report)
         assert "model_input" not in json.dumps(report)
+    finally:
+        runtime.stop()
+
+
+def test_runtime_activity_combines_local_handoff_and_core_backlog(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    gateway = _ActivityGateway(
+        events,
+        operational=2,
+        background=1,
+        embedding=3,
+    )
+    runtime = _runtime(tmp_path, config=_minimal_config(), gateway=gateway)
+    runtime.start()
+    try:
+        with sqlite3.connect(runtime.database_path) as connection:
+            base = (
+                "ingest_raw_round",
+                "space-1",
+                "{}",
+                "sha256:" + "0" * 64,
+                "2026-08-31T00:00:00Z",
+            )
+            connection.execute(
+                """
+                INSERT INTO core_commands (
+                    command_id, command_type, memory_space_id, idempotency_key,
+                    payload_json, payload_digest, status, available_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    "pending-1",
+                    base[0],
+                    base[1],
+                    "pending-key",
+                    base[2],
+                    base[3],
+                    base[4],
+                    base[4],
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO core_commands (
+                    command_id, command_type, memory_space_id, idempotency_key,
+                    payload_json, payload_digest, status, available_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'delivering', ?, ?)
+                """,
+                (
+                    "leased-1",
+                    base[0],
+                    base[1],
+                    "leased-key",
+                    base[2],
+                    base[3],
+                    base[4],
+                    base[4],
+                ),
+            )
+
+        report = runtime.activity_report()
+
+        assert report["known"] is True
+        assert report["quiescent"] is False
+        assert report["leased_tasks"] == 1
+        assert report["pending_writes"] == 7
+        assert report["local"] == {
+            "delivering_commands": 1,
+            "pending_commands": 1,
+        }
+        assert report["core"] == {
+            "operational_backlog": 2,
+            "background_backlog": 1,
+            "embedding_backlog": 3,
+        }
+        assert "payload" not in json.dumps(report)
     finally:
         runtime.stop()
 

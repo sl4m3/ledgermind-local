@@ -50,8 +50,8 @@ from ledgermind_local.maintenance.core_backup import CoreBackupService
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
-from ledgermind_local.persistence.migrations import MigrationError
 from ledgermind_local.persistence.contract_migration import migrate_contract_payloads
+from ledgermind_local.persistence.migrations import MigrationError
 from ledgermind_local.raw_rounds import RawRoundIngestHandler
 from ledgermind_local.scheduler import (
     CoreCommandWorker,
@@ -794,6 +794,72 @@ class LocalRuntime:
             "missing_facet_embeddings": statistics.get("missing_facet_embeddings"),
             "legacy_digest_upgrade_required": legacy_digest_upgrade_required,
             "terminal_worker_failure": terminal_worker_failure,
+        }
+
+    def activity_report(self) -> dict[str, object]:
+        """Return a fresh, content-free shutdown activity snapshot.
+
+        Local commands cover the durable Local-to-Core handoff. Core backlog
+        covers semantic, resolution, and embedding work scheduled after that
+        handoff completes. Both must be empty before the runtime is idle.
+        """
+
+        try:
+            connection = self.connection_factory(self.database_path)
+            try:
+                row = connection.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN status = 'delivering' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status IN ('pending', 'retry_wait') THEN 1 ELSE 0 END), 0)
+                    FROM core_commands
+                    """
+                ).fetchone()
+            finally:
+                connection.close()
+            local_leased = max(int(row[0]), 0) if row is not None else 0
+            local_pending = max(int(row[1]), 0) if row is not None else 0
+
+            gateway = self.core_gateway
+            get_statistics = getattr(gateway, "get_object_facet_statistics", None)
+            if not callable(get_statistics):
+                raise TypeError("Core activity statistics are unavailable")
+            statistics = get_statistics(
+                f"local-activity:{os.getpid()}:{uuid.uuid4()}"
+            )
+            core_backlog: dict[str, int] = {}
+            for name in (
+                "operational_backlog",
+                "background_backlog",
+                "embedding_backlog",
+            ):
+                value = getattr(statistics, name)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise TypeError(f"Core activity {name} must be an integer")
+                core_backlog[name] = max(value, 0)
+        except Exception as exc:  # noqa: BLE001 - shutdown must fail closed
+            return {
+                "schema_version": 1,
+                "known": False,
+                "quiescent": False,
+                "leased_tasks": 0,
+                "pending_writes": 0,
+                "error_code": _safe_error_code(exc),
+            }
+
+        leased_tasks = local_leased
+        pending_writes = local_pending + sum(core_backlog.values())
+        return {
+            "schema_version": 1,
+            "known": True,
+            "quiescent": leased_tasks == 0 and pending_writes == 0,
+            "leased_tasks": leased_tasks,
+            "pending_writes": pending_writes,
+            "local": {
+                "delivering_commands": local_leased,
+                "pending_commands": local_pending,
+            },
+            "core": core_backlog,
         }
 
     def _readiness_reason(

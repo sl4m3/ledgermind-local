@@ -80,3 +80,28 @@ def test_runtime_stop_releases_pid_and_lock(tmp_path: Path) -> None:
     runtime.stop()
     assert not pid_path.exists()
     assert not lock_path.exists()
+
+
+def test_runtime_activity_is_authenticated_and_fails_closed(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    try:
+        client = TestClient(
+            create_app(
+                application=runtime,
+                settings=Settings(
+                    rounds_database_path=runtime.database_path,
+                    api_token="test-token",
+                    service_lock_path=runtime.paths.service_lock_file,
+                ),
+            )
+        )
+
+        assert client.get("/runtime/activity").status_code == 401
+        response = client.get("/runtime/activity", headers=_auth())
+
+        assert response.status_code == 200
+        assert response.json()["schema_version"] == 1
+        assert response.json()["known"] is False
+        assert response.json()["quiescent"] is False
+    finally:
+        runtime.stop()

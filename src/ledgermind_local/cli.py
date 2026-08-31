@@ -8,7 +8,7 @@ import os
 import signal
 import sqlite3
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
 from typing import Any, TypeVar, cast
@@ -853,7 +853,10 @@ def _command_serve(args: argparse.Namespace) -> int:
         max_raw_round_bytes=config.max_raw_round_bytes,
         raw_round_retention_days=config.raw_round_retention_days,
         runtime_supervisor=_build_runtime_supervisor(
-            config=config, host=host, port=port
+            config=config,
+            host=host,
+            port=port,
+            activity_probe=runtime.activity_report,
         ),
     )
     app = create_app(
@@ -912,7 +915,13 @@ def _worker_recovery_pending(report: dict[str, Any]) -> bool:
     return backlog > 0 and not bool(report.get("terminal_worker_failure"))
 
 
-def _build_runtime_supervisor(*, config: LocalConfig, host: str, port: int) -> object:
+def _build_runtime_supervisor(
+    *,
+    config: LocalConfig,
+    host: str,
+    port: int,
+    activity_probe: Callable[[], Mapping[str, object]] | None = None,
+) -> object:
     from ledgermind_local.installer.paths import InstallerPaths
     from ledgermind_local.runtime.supervisor import RuntimeSupervisor
 
@@ -937,6 +946,7 @@ def _build_runtime_supervisor(*, config: LocalConfig, host: str, port: int) -> o
         lease_ttl_seconds=30.0,
         commands={},
         embedding_command=embedding_command,
+        activity_probe=activity_probe,
     )
 
 

@@ -471,6 +471,88 @@ def test_runtime_idle_watcher_cancels_and_rearms_for_new_lease(
     assert outcome["reason"] == "idle_timeout"
 
 
+def test_runtime_idle_watcher_waits_for_durable_work_then_full_grace(
+    tmp_path: Path,
+) -> None:
+    work_pending = threading.Event()
+    work_pending.set()
+
+    def activity() -> dict[str, object]:
+        return {
+            "known": True,
+            "leased_tasks": 0,
+            "pending_writes": 1 if work_pending.is_set() else 0,
+        }
+
+    supervisor = RuntimeSupervisor(
+        InstallerPaths(home_override=tmp_path),
+        commands={"local": ("/bin/sleep", "60")},
+        idle_shutdown_seconds=0.12,
+        activity_probe=activity,
+    )
+    lease = supervisor.acquire(client="agent", session_id="long-response")
+    supervisor.release(str(lease["lease_id"]))
+    outcome: dict[str, object] = {}
+
+    def watch() -> None:
+        outcome.update(supervisor.watch_idle(poll_interval_seconds=0.01))
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    time.sleep(0.18)
+    assert supervisor.status()["running"] is True
+
+    work_pending.clear()
+    time.sleep(0.06)
+    assert supervisor.status()["running"] is True
+    watcher.join(timeout=1)
+
+    assert not watcher.is_alive()
+    assert outcome["stopped"] is True
+    assert outcome["reason"] == "idle_timeout"
+
+
+def test_runtime_idle_watcher_fails_closed_when_activity_is_unknown(
+    tmp_path: Path,
+) -> None:
+    activity_known = threading.Event()
+
+    def activity() -> dict[str, object]:
+        return {
+            "known": activity_known.is_set(),
+            "leased_tasks": 0,
+            "pending_writes": 0,
+            "error_code": None if activity_known.is_set() else "core_unavailable",
+        }
+
+    supervisor = RuntimeSupervisor(
+        InstallerPaths(home_override=tmp_path),
+        commands={"local": ("/bin/sleep", "60")},
+        idle_shutdown_seconds=0.08,
+        activity_probe=activity,
+    )
+    lease = supervisor.acquire(client="agent", session_id="provider-retry")
+    supervisor.release(str(lease["lease_id"]))
+    outcome: dict[str, object] = {}
+
+    def watch() -> None:
+        outcome.update(supervisor.watch_idle(poll_interval_seconds=0.01))
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    time.sleep(0.12)
+    status = supervisor.status()
+    assert status["running"] is True
+    assert status["activity"]["known"] is False
+
+    activity_known.set()
+    watcher.join(timeout=1)
+
+    assert not watcher.is_alive()
+    assert outcome["stopped"] is True
+    assert outcome["reason"] == "idle_timeout"
+
+
 def test_runtime_status_rejects_stale_running_state(tmp_path: Path) -> None:
     paths = InstallerPaths(home_override=tmp_path)
     paths.ensure()

@@ -7,7 +7,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 
-def create_runtime_router(require_token: Any, supervisor: object | None) -> APIRouter:
+def create_runtime_router(
+    require_token: Any,
+    supervisor: object | None,
+    runtime: object | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/runtime", tags=["runtime"])
 
     def _supervisor() -> Any:
@@ -56,6 +60,15 @@ def create_runtime_router(require_token: Any, supervisor: object | None) -> APIR
     @router.get("/status")
     def status(_token: str = Depends(require_token)) -> dict[str, Any]:
         return dict(_supervisor().status())
+
+    @router.get("/activity")
+    def activity(_token: str = Depends(require_token)) -> dict[str, Any]:
+        report = getattr(runtime, "activity_report", None)
+        if not callable(report):
+            raise HTTPException(
+                status_code=503, detail="runtime activity is unavailable"
+            )
+        return dict(report())
 
     return router
 

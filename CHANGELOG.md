@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.0.0b3 - 2026-08-31
+
+- Prevented idle shutdown while Local-to-Core delivery, semantic processing,
+  object/knowledge resolution, or embedding work remains queued or leased.
+- Started the idle grace period only after the durable Local and Core queues
+  become fully quiescent, regardless of how long the agent or provider takes.
+- Made unknown activity fail closed so a temporary Core/status failure cannot
+  discard accepted work, and rechecked work and leases immediately before stop.
+- Added an authenticated, content-free runtime activity endpoint and exposed
+  its state through runtime status for lifecycle diagnostics.
+
 ## 4.0.0b2 - 2026-08-31
 
 - Added a detached idle watcher so Core and Local stop after the configured

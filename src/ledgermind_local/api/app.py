@@ -118,7 +118,7 @@ def create_app(
     )
     app.include_router(create_maintenance_router(require_token, runtime))
     app.include_router(
-        create_runtime_router(require_token, settings.runtime_supervisor)
+        create_runtime_router(require_token, settings.runtime_supervisor, runtime)
     )
 
     return app
