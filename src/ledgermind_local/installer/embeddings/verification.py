@@ -90,6 +90,7 @@ def verify_local_runtime_inference(
     if not runtime_python.is_file():
         raise ValueError("signed local embedding runtime has no Python executable")
     source_root = Path(__file__).resolve().parents[3]
+    packaged_site_packages = source_root.parent / "site-packages"
     script = textwrap.dedent(
         """
         import json
@@ -111,9 +112,12 @@ def verify_local_runtime_inference(
     )
     environment = dict(os.environ)
     existing_pythonpath = environment.get("PYTHONPATH", "")
-    environment["PYTHONPATH"] = str(source_root) + (
-        os.pathsep + existing_pythonpath if existing_pythonpath else ""
-    )
+    python_paths = [str(source_root)]
+    if packaged_site_packages.is_dir():
+        python_paths.append(str(packaged_site_packages))
+    if existing_pythonpath:
+        python_paths.append(existing_pythonpath)
+    environment["PYTHONPATH"] = os.pathsep.join(python_paths)
     try:
         completed = subprocess.run(
             (
@@ -131,15 +135,14 @@ def verify_local_runtime_inference(
             env=environment,
         )
         payload = json.loads(completed.stdout.strip().splitlines()[-1])
-    except (
-        OSError,
-        subprocess.SubprocessError,
-        json.JSONDecodeError,
-        IndexError,
-    ) as exc:
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip().splitlines()
+        suffix = f": {detail[-1]}" if detail else ""
         raise ValueError(
-            "signed local embedding runtime inference smoke failed"
+            f"signed local embedding runtime inference smoke failed{suffix}"
         ) from exc
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, IndexError) as exc:
+        raise ValueError("signed local embedding runtime inference smoke failed") from exc
     if payload != {"status": "passed", "dimensions": dimensions}:
         raise ValueError(
             "signed local embedding runtime returned invalid smoke metadata"

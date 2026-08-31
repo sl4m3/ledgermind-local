@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote
 
@@ -39,9 +40,24 @@ class OpenRouterEndpoint:
             parts.append(f"{self.context_length:,} context")
         if self.prompt_price is not None and self.completion_price is not None:
             parts.append(
-                f"input {self.prompt_price}; output {self.completion_price} per token"
+                "input "
+                f"{_per_million(self.prompt_price)} / 1M; output "
+                f"{_per_million(self.completion_price)} / 1M"
             )
         return ", ".join(parts)
+
+
+def _per_million(value: str) -> str:
+    try:
+        amount = Decimal(value) * Decimal(1_000_000)
+    except InvalidOperation:
+        return "unknown"
+    rendered = f"{amount:.6f}".rstrip("0").rstrip(".")
+    if "." not in rendered:
+        rendered += ".00"
+    elif len(rendered.rsplit(".", 1)[1]) == 1:
+        rendered += "0"
+    return f"${rendered}"
 
 
 def _route_slug(value: str) -> str:

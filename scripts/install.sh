@@ -15,6 +15,7 @@ esac
 base_url=${LEDGERMIND_RELEASE_BASE_URL:-https://github.com/sl4m3/ledgermind/releases/latest/download}
 destination=${TMPDIR:-/tmp}/"$asset.$$"
 download_pid=
+total_bytes=0
 cleanup() {
   if [ -n "$download_pid" ]; then
     kill "$download_pid" 2>/dev/null || true
@@ -26,28 +27,37 @@ trap cleanup EXIT INT TERM
 download_with_status() {
   "$@" &
   download_pid=$!
-  frame_index=0
   while kill -0 "$download_pid" 2>/dev/null; do
-    case "$frame_index" in
-      0) frame='─' ;;
-      1) frame='\\' ;;
-      2) frame='│' ;;
-      *) frame='/' ;;
-    esac
     if [ -f "$destination" ]; then
       bytes=$(wc -c < "$destination")
     else
       bytes=0
     fi
     mib=$((bytes / 1048576))
-    printf '\r\033[2K  [%s] Downloading LedgerMind installer · %s MiB' \
-      "$frame" "$mib" >&2
-    frame_index=$(((frame_index + 1) % 4))
+    if [ "$total_bytes" -gt 0 ]; then
+      percent=$((bytes * 100 / total_bytes))
+      if [ "$percent" -gt 100 ]; then percent=100; fi
+      filled=$((percent * 28 / 100))
+      empty=$((28 - filled))
+      filled_bar=$(printf '%*s' "$filled" '' | tr ' ' '=')
+      empty_bar=$(printf '%*s' "$empty" '' | tr ' ' '-')
+      total_mib=$(((total_bytes + 1048575) / 1048576))
+      printf '\r\033[2K  Downloading  [%s%s]  %3s%%  %s/%s MiB' \
+        "$filled_bar" "$empty_bar" "$percent" "$mib" "$total_mib" >&2
+    else
+      printf '\r\033[2K  Downloading LedgerMind installer  %s MiB' "$mib" >&2
+    fi
     sleep 0.15
   done
   if wait "$download_pid"; then
     download_pid=
-    printf '\r\033[2K  [done] Installer downloaded\n' >&2
+    if [ "$total_bytes" -gt 0 ]; then
+      total_mib=$(((total_bytes + 1048575) / 1048576))
+      printf '\r\033[2K  Downloading  [============================]  100%%  %s/%s MiB\n' \
+        "$total_mib" "$total_mib" >&2
+    else
+      printf '\r\033[2K  Installer downloaded\n' >&2
+    fi
     return 0
   else
     status=$?
@@ -60,6 +70,11 @@ download_with_status() {
 printf '%s\n' 'LedgerMind Setup' >&2
 if command -v curl >/dev/null 2>&1; then
   if [ -t 2 ]; then
+    printf '%s' '  Preparing secure download…' >&2
+    total_bytes=$(curl -fsSIL "$base_url/$asset" 2>/dev/null \
+      | tr -d '\r' \
+      | awk 'tolower($1) == "content-length:" && $2 + 0 > 0 { size=$2 } END { print size + 0 }')
+    printf '\r\033[2K' >&2
     download_with_status curl -fsSL "$base_url/$asset" -o "$destination"
   else
     curl -fsSL "$base_url/$asset" -o "$destination"

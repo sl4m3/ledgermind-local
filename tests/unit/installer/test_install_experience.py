@@ -239,8 +239,9 @@ def test_navigation_menu_keeps_rows_aligned_and_q_cancels(
         )
 
     rendered = output.getvalue()
-    assert "\r\033[2K  Choose a semantic language\r\n" in rendered
-    assert "\r\033[2K  › English\r\n" in rendered
+    assert "\r\033[2K  ╭ Choose a semantic language " in rendered
+    assert "\r\033[2K  │  › English" in rendered
+    assert "\r\033[2K  ╰" in rendered
     assert "Esc/Q cancel" in rendered
 
 
@@ -285,8 +286,10 @@ def test_bootstrap_reports_large_installer_download_progress() -> None:
     bootstrap = Path("scripts/install.sh").read_text(encoding="utf-8")
 
     assert "download_with_status" in bootstrap
-    assert "Downloading LedgerMind installer" in bootstrap
-    assert "Installer downloaded" in bootstrap
+    assert "Preparing secure download" in bootstrap
+    assert "content-length:" in bootstrap
+    assert "[============================]" in bootstrap
+    assert "100%%" in bootstrap
     assert "--progress-bar" not in bootstrap
 
 

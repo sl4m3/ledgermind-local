@@ -5,8 +5,10 @@ from __future__ import annotations
 import getpass
 import os
 import select
+import shutil
 import sys
 import termios
+import textwrap
 import tty
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -57,6 +59,8 @@ class _TerminalWizard:
         self.color = bool(getattr(output, "isatty", lambda: False)())
         self.navigation = self.color and input_fn is input and sys.stdin.isatty()
         self._brand_visible = False
+        columns = shutil.get_terminal_size((80, 24)).columns
+        self.panel_width = max(44, min(96, columns - 4))
 
     def _style(self, text: str, code: str) -> str:
         if not self.color:
@@ -71,9 +75,62 @@ class _TerminalWizard:
             self.output.write("\033[2J\033[H")
 
     def _brand(self) -> None:
-        self.line(self._style("  LEDGERMIND SETUP", "1;36"))
-        self.line("  Private memory for your local agents")
-        self.line("  " + "─" * 56)
+        inside = self.panel_width - 2
+        brand = "  LEDGERMIND SETUP"
+        self.line("  ╭" + "─" * inside + "╮")
+        self.line(
+            "  │"
+            + self._style(brand, "1;36")
+            + " " * (inside - len(brand))
+            + "│"
+        )
+        self.line("  │" + "  Private memory for your local agents".ljust(inside) + "│")
+        self.line("  ╰" + "─" * inside + "╯")
+
+    def _panel(self, title: str, lines: Sequence[str]) -> None:
+        inside = self.panel_width - 2
+        label = f" {title} "
+        label = label[:inside]
+        self.line("  ╭" + label + "─" * (inside - len(label)) + "╮")
+        for raw in lines:
+            wrapped = textwrap.wrap(
+                raw,
+                width=max(1, inside - 4),
+                replace_whitespace=False,
+                drop_whitespace=True,
+            ) or [""]
+            for part in wrapped:
+                self.line("  │  " + part.ljust(inside - 4) + "  │")
+        self.line("  ╰" + "─" * inside + "╯")
+
+    def _choice_panel_lines(
+        self,
+        prompt: str,
+        choices: Sequence[_Choice],
+        *,
+        selected: int,
+        footer: str,
+    ) -> list[str]:
+        inside = self.panel_width - 2
+        label = f" {prompt} "[:inside]
+        rows = ["  ╭" + label + "─" * (inside - len(label)) + "╮"]
+        for index, choice in enumerate(choices):
+            pointer = "›" if index == selected else " "
+            primary = f"  {pointer} {choice.label}"
+            primary = primary[: inside - 2].ljust(inside)
+            if index == selected:
+                primary = primary.replace("›", self._style("›", "1;36"), 1)
+            rows.append("  │" + primary + "│")
+            if choice.detail:
+                detail = textwrap.shorten(
+                    choice.detail,
+                    width=max(8, inside - 7),
+                    placeholder="…",
+                )
+                rows.append("  │     " + detail.ljust(inside - 5) + "│")
+        rows.append("  ╰" + "─" * inside + "╯")
+        rows.append(self._style(f"  {footer}", "2"))
+        return rows
 
     def banner(self) -> None:
         self._clear_screen()
@@ -90,15 +147,17 @@ class _TerminalWizard:
             width = 32
             filled = min(width, max(0, round(width * number / max(total, 1))))
             progress = "━" * filled + "─" * (width - filled)
-            self.line(self._style(f"  {progress}  {number}/{total}", "36"))
+            self.line()
+            self.line(self._style(f"  {progress}  STEP {number} OF {total}", "36"))
             self._brand_visible = True
         elif not self._brand_visible:
             self.banner()
         self.line()
-        self.line(self._style(f"  {number}/{total}  {title}", "1;34"))
-        self.line(f"  {detail}")
         if self.navigation:
-            self.line(self._style("  Esc/Q cancel · Enter confirm", "2"))
+            self._panel(title, (detail,))
+        else:
+            self.line(self._style(f"  {number}/{total}  {title}", "1;34"))
+            self.line(f"  {detail}")
 
     def token_preview(self, token: str) -> str:
         if len(token) <= 8:
@@ -115,14 +174,14 @@ class _TerminalWizard:
             tty.setraw(descriptor)
             while True:
                 self.output.write("\033[?25l")
-                self._menu_line(f"  {prompt}")
-                for index, choice in enumerate(choices):
-                    marker = self._style("›", "1;36") if index == selected else " "
-                    detail = f" — {choice.detail}" if choice.detail else ""
-                    self._menu_line(f"  {marker} {choice.label}{detail}")
-                self._menu_line(
-                    self._style("  ↑/↓ move   Enter select   Esc/Q cancel", "2")
+                rows = self._choice_panel_lines(
+                    prompt,
+                    choices,
+                    selected=selected,
+                    footer="↑/↓ move   Enter select   Esc/Q cancel",
                 )
+                for row in rows:
+                    self._menu_line(row)
                 self.output.flush()
                 key = os.read(descriptor, 1)
                 if key == b"\x1b":
@@ -140,7 +199,7 @@ class _TerminalWizard:
                 elif key == b"\x03":
                     raise KeyboardInterrupt
                 # Redraw only this compact selector.
-                self.output.write(f"\r\033[{len(choices) + 2}A\033[J")
+                self.output.write(f"\r\033[{len(rows)}A\033[J")
         finally:
             termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
             self.output.write("\033[?25h")
@@ -255,17 +314,23 @@ class _TerminalWizard:
                 tty.setraw(descriptor)
                 while True:
                     self.output.write("\033[?25l")
-                    self._menu_line("  Select agents")
-                    for index, (_, label) in enumerate(discovered):
-                        pointer = self._style("›", "1;36") if index == cursor else " "
-                        checked = "[x]" if index in selected else "[ ]"
-                        self._menu_line(f"  {pointer} {checked} {label}")
-                    self._menu_line(
-                        self._style(
-                            "  ↑/↓ move   Space toggle   Enter continue   Esc/Q cancel",
-                            "2",
+                    choices = tuple(
+                        _Choice(
+                            identifier,
+                            f"{'[x]' if index in selected else '[ ]'} {label}",
                         )
+                        for index, (identifier, label) in enumerate(discovered)
                     )
+                    rows = self._choice_panel_lines(
+                        "Select agents",
+                        choices,
+                        selected=cursor,
+                        footer=(
+                            "↑/↓ move   Space toggle   Enter continue   Esc/Q cancel"
+                        ),
+                    )
+                    for row in rows:
+                        self._menu_line(row)
                     self.output.flush()
                     key = os.read(descriptor, 1)
                     if key == b"\x1b":
@@ -293,7 +358,7 @@ class _TerminalWizard:
                         raise UserCancelledError("installation cancelled by user")
                     elif key == b"\x03":
                         raise KeyboardInterrupt
-                    self.output.write(f"\r\033[{len(discovered) + 2}A\033[J")
+                    self.output.write(f"\r\033[{len(rows)}A\033[J")
             finally:
                 termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
                 self.output.write("\033[?25h")

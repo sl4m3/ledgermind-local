@@ -47,6 +47,8 @@ def test_openrouter_discovery_keeps_only_strict_schema_endpoints() -> None:
 
     assert [endpoint.route for endpoint in endpoints] == ["baidu/fp8"]
     assert endpoints[0].context_length == 163840
+    assert "input $0.20 / 1M; output $0.40 / 1M" in endpoints[0].detail
+    assert "per token" not in endpoints[0].detail
 
 
 def test_openrouter_discovery_reports_no_strict_endpoints() -> None:
