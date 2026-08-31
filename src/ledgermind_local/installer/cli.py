@@ -462,6 +462,7 @@ def _result(
             result.status = "dry_run"
         elif step_status == "failed":
             result.status = "failed"
+            result.exit_code = ExitCode.TRANSACTION_FAILED
         elif step_status == "partial":
             result.status = "partial"
             result.exit_code = ExitCode.ADAPTER_FAILED
@@ -750,10 +751,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _emit(result, json_output=bool(args.json_output))
         if operation == "repair":
             payload = repair(paths=paths, dry_run=bool(args.dry_run))
-            return _emit(
-                _result("repair", payload=payload, paths=paths),
-                json_output=bool(args.json_output),
-            )
+            result = _result("repair", payload=payload, paths=paths)
+            if payload.get("status") == "failed":
+                result.fail(ExitCode.DOCTOR_FAILED, "repair verification failed")
+            return _emit(result, json_output=bool(args.json_output))
         if operation == "update":
             if args.config is not None:
                 raise ConfigurationError(

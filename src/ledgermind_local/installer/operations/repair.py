@@ -39,26 +39,29 @@ def repair(*, paths: InstallerPaths, dry_run: bool = False) -> dict[str, Any]:
             metadata={"enabled": selected.enabled},
         )
         integrations[selected.id] = adapter.repair(context)
-    doctor_report = doctor(paths=paths)
+    # Repair is a local filesystem/runtime operation. Provider availability is
+    # orthogonal and probing it here would add billable calls and make repair
+    # fail during an unrelated upstream outage.
+    doctor_report = doctor(paths=paths, probe_providers=False)
     verified = sum(
         1
         for item in integrations.values()
         if isinstance(item, dict) and item.get("status") == "passed"
     )
     return {
-        "status": "passed",
+        "status": (
+            "passed"
+            if doctor_report.get("status") == "passed" and verified == len(integrations)
+            else "failed"
+        ),
         "doctor": doctor_report,
         "integrations": integrations,
         "current": str(paths.current_link),
         "readiness": {
             "platform": doctor_report.get("platform", "linux"),
             "core": doctor_report.get("status", "unknown"),
-            "generation": doctor_report.get("providers", {})
-            .get("generation", {})
-            .get("status", "unknown"),
-            "embeddings": doctor_report.get("providers", {})
-            .get("embedding", {})
-            .get("status", "unknown"),
+            "generation": "preserved-not-probed",
+            "embeddings": "preserved-not-probed",
             "smoke_test": doctor_report.get("smoke_test", {}).get("status", "unknown"),
             "agents": f"{verified}/{len(integrations)} verified",
             "memory_mode": config.memory_mode,

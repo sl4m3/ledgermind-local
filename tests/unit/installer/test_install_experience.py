@@ -382,6 +382,38 @@ def test_failed_update_restores_local_database_and_skips_duplicate_provider_prob
     assert database.read_bytes() == b"original-database"
 
 
+def test_repair_is_local_and_does_not_probe_providers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repair_module = importlib.import_module(
+        "ledgermind_local.installer.operations.repair"
+    )
+    monkeypatch.setenv("LEDGERMIND_SECRET_BACKEND", "file")
+    paths = InstallerPaths(home_override=tmp_path / "install-home")
+    paths.ensure()
+    release = paths.release_dir("candidate")
+    (release / "bin").mkdir(parents=True)
+    paths.current_link.symlink_to(release)
+    write_installer_config(_config(), paths)
+    monkeypatch.setattr(repair_module, "install_bin_link", lambda _paths: None)
+
+    def fake_doctor(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["probe_providers"] is False
+        return {
+            "status": "passed",
+            "platform": "linux-x86_64",
+            "providers": {"status": "skipped_by_request"},
+            "smoke_test": {"status": "passed"},
+        }
+
+    monkeypatch.setattr(repair_module, "doctor", fake_doctor)
+
+    result = repair_module.repair(paths=paths)
+
+    assert result["status"] == "passed"
+    assert result["readiness"]["generation"] == "preserved-not-probed"
+
+
 def test_provider_reconfiguration_preserves_memory_and_agents() -> None:
     existing = _config().model_copy(
         update={
