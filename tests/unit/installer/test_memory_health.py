@@ -27,7 +27,8 @@ def _databases(paths: InstallerPaths) -> tuple[Path, Path]:
             """
             CREATE TABLE semantic_round_batches (
                 raw_round_id TEXT PRIMARY KEY, stage TEXT, updated_at TEXT,
-                last_error_code TEXT
+                last_error_code TEXT, execution_error_code TEXT,
+                object_resolution_error_code TEXT, embedding_error_code TEXT
             );
             CREATE TABLE operational_round_states (
                 raw_round_id TEXT PRIMARY KEY, last_error_code TEXT
@@ -61,7 +62,8 @@ def test_memory_health_reports_failures_after_last_success(tmp_path: Path) -> No
     core, local = _databases(paths)
     with sqlite3.connect(core) as connection:
         connection.execute(
-            "INSERT INTO semantic_round_batches VALUES (?, ?, ?, ?)",
+            "INSERT INTO semantic_round_batches(raw_round_id, stage, updated_at, last_error_code) "
+            "VALUES (?, ?, ?, ?)",
             (
                 "ok",
                 "knowledge_resolution_completed",
@@ -70,7 +72,8 @@ def test_memory_health_reports_failures_after_last_success(tmp_path: Path) -> No
             ),
         )
         connection.execute(
-            "INSERT INTO semantic_round_batches VALUES (?, ?, ?, ?)",
+            "INSERT INTO semantic_round_batches(raw_round_id, stage, updated_at, last_error_code) "
+            "VALUES (?, ?, ?, ?)",
             ("bad", "failed", "2026-01-01T00:01:00Z", "provider_invalid_request"),
         )
         connection.execute(
@@ -107,11 +110,47 @@ def test_memory_health_is_read_only_and_healthy(tmp_path: Path) -> None:
     core, _ = _databases(paths)
     with sqlite3.connect(core) as connection:
         connection.execute(
-            "INSERT INTO semantic_round_batches VALUES (?, ?, ?, ?)",
+            "INSERT INTO semantic_round_batches(raw_round_id, stage, updated_at, last_error_code) "
+            "VALUES (?, ?, ?, ?)",
             ("ok", "no_semantic_candidates", "2026-01-01T00:00:00Z", None),
         )
 
     assert memory_health(paths=paths)["status"] == "healthy"
+
+
+def test_memory_health_reports_knowledge_resolution_failure(tmp_path: Path) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    core, _ = _databases(paths)
+    with sqlite3.connect(core) as connection:
+        connection.execute(
+            "INSERT INTO semantic_round_batches(raw_round_id, stage, updated_at) "
+            "VALUES (?, ?, ?)",
+            ("ok", "knowledge_resolution_completed", "2026-01-01T00:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO semantic_round_batches("
+            "raw_round_id, stage, updated_at, object_resolution_error_code"
+            ") VALUES (?, ?, ?, ?)",
+            (
+                "bad-kr",
+                "knowledge_resolution_failed",
+                "2026-01-01T00:01:00Z",
+                "knowledge_resolution_contract_invalid",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO operational_round_states VALUES (?, ?)",
+            ("bad-kr", None),
+        )
+
+    result = memory_health(paths=paths)
+
+    assert result["status"] == "degraded"
+    assert result["failed_batches_since_last_success"] == 1
+    assert result["latest_failure"] == {
+        "error_code": "knowledge_resolution_contract_invalid",
+        "at": "2026-01-01T00:01:00Z",
+    }
 
 
 def test_configure_rolls_back_credentials_and_profiles_on_write_failure(

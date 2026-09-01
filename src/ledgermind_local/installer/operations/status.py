@@ -14,6 +14,11 @@ from ..paths import InstallerPaths
 from .integrations import integration_status
 
 _SUCCESS_STAGES = ("knowledge_resolution_completed", "no_semantic_candidates")
+_FAILURE_STAGES = (
+    "failed",
+    "execution_semantic_failed",
+    "knowledge_resolution_failed",
+)
 
 
 def _read_local_paths(paths: InstallerPaths) -> tuple[Path, Path] | None:
@@ -54,19 +59,25 @@ def memory_health(*, paths: InstallerPaths) -> dict[str, Any]:
             ).fetchone()[0]
             if latest_success is None:
                 failed_since_success = core.execute(
-                    "SELECT COUNT(*) FROM semantic_round_batches WHERE stage = 'failed'"
+                    "SELECT COUNT(*) FROM semantic_round_batches "
+                    "WHERE stage IN (?, ?, ?)",
+                    _FAILURE_STAGES,
                 ).fetchone()[0]
             else:
                 failed_since_success = core.execute(
                     "SELECT COUNT(*) FROM semantic_round_batches "
-                    "WHERE stage = 'failed' AND updated_at > ?",
-                    (latest_success,),
+                    "WHERE stage IN (?, ?, ?) AND updated_at > ?",
+                    (*_FAILURE_STAGES, latest_success),
                 ).fetchone()[0]
             latest_failure = core.execute(
-                "SELECT COALESCE(s.last_error_code, b.last_error_code), b.updated_at "
+                "SELECT COALESCE(s.last_error_code, b.last_error_code, "
+                "b.execution_error_code, b.object_resolution_error_code, "
+                "b.embedding_error_code), b.updated_at "
                 "FROM semantic_round_batches b "
                 "LEFT JOIN operational_round_states s USING (raw_round_id) "
-                "WHERE b.stage = 'failed' ORDER BY b.updated_at DESC LIMIT 1"
+                "WHERE b.stage IN (?, ?, ?) "
+                "ORDER BY b.updated_at DESC LIMIT 1",
+                _FAILURE_STAGES,
             ).fetchone()
         with closing(_readonly(rounds_path)) as local:
             normalization_rejections = local.execute(
