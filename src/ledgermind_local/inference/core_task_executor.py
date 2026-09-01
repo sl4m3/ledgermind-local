@@ -195,9 +195,15 @@ class CoreTaskExecutor:
         self,
         task: GenericExecutionTask,
         cancellation_token: CancellationToken | None = None,
+        *,
+        force_provider_fallback: bool = False,
     ) -> GenericExecutionResult:
         if task.task_kind in {"generate_json", "object_resolution"}:
-            return self._execute_generate_json(task, cancellation_token)
+            return self._execute_generate_json(
+                task,
+                cancellation_token,
+                force_provider_fallback=force_provider_fallback,
+            )
         if task.task_kind == "embed_texts":
             return self._execute_embed_texts(task, cancellation_token)
         return self._unknown_kind_result(task)
@@ -222,7 +228,11 @@ class CoreTaskExecutor:
         return tuple(self.execute(task, cancellation_token) for task in normalized)
 
     def _execute_generate_json(
-        self, task: GenericExecutionTask, token: CancellationToken | None
+        self,
+        task: GenericExecutionTask,
+        token: CancellationToken | None,
+        *,
+        force_provider_fallback: bool = False,
     ) -> GenericExecutionResult:
         spec = task.model_request
         if spec is None:
@@ -283,6 +293,7 @@ class CoreTaskExecutor:
                     },
                     telemetry_operation=telemetry_operation,
                     seed=spec.seed,
+                    force_provider_fallback=force_provider_fallback,
                     response_format=spec.response_format,
                     profile_slot=task.profile_slot,
                     cancellation_token=token,

@@ -311,13 +311,12 @@ class CoreExecutionTaskWorker:
         result: object,
         memory_space_id: str,
     ) -> None:
-        """Give one structured generation a chance after a remote Core reject.
+        """Give one structured generation a bounded contract retry.
 
         Local still dispatches only by technical task kind. A remote Core
-        rejection can mean that a weak provider returned a schema-valid but
-        Core-invalid structured answer; one bounded fresh generation is safe
-        recovery. Local never inspects the opaque operation or edits the
-        answer. Local-side wire validation errors are not retried.
+        rejection can mean that a weak provider returned a Core-invalid
+        structured answer; one bounded fresh generation is safe recovery.
+        Local never inspects the opaque operation or edits the answer.
         """
 
         # A provider can return a transiently malformed JSON/schema response
@@ -340,7 +339,10 @@ class CoreExecutionTaskWorker:
                 "retrying structured generation after provider shape failure",
                 extra={"worker": self._worker_id, "task_id": task.task_id},
             )
-            retry_result = self._executor.execute(task)
+            retry_result = self._executor.execute(
+                task,
+                force_provider_fallback=True,
+            )
             if getattr(retry_result, "status", None) == "completed":
                 self._deliver_result(task, retry_result, memory_space_id)
                 return

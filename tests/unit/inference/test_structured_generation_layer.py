@@ -52,8 +52,8 @@ from ledgermind_local.inference.strict import (
 from ledgermind_local.inference.structured_json_provider import (
     StructuredJsonCapabilityError,
     StructuredJsonProvider,
-    StructuredJsonRequestError,
     StructuredJsonResponseError,
+    StructuredJsonSchemaError,
 )
 from ledgermind_local.inference.token_budget import InputBudgetExceededError
 from ledgermind_local.persistence import rounds_migrations as migrations
@@ -545,6 +545,109 @@ def test_strict_semantic_request_requires_a_verified_capability(tmp_path) -> Non
             )
         assert failure.value.code == "provider_capability_unverified"
         assert created is False
+    finally:
+        connection.close()
+
+
+def test_strict_schema_mismatch_fails_before_core_delivery(tmp_path) -> None:
+    connection, store = _store()
+    try:
+        store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id="profile",
+                structured_output_mode=STRICT_JSON_SCHEMA_MODE,
+                structured_json_schema=True,
+                native_schema_strictness=True,
+                probe_contract_digest=STRICT_CONTRACT["schema_digest"],
+                probe_status="passed",
+                probe_result="passed",
+            )
+        )
+        fake = _FakeProvider(content='{"ok":"wrong"}')
+
+        with pytest.raises(StructuredJsonSchemaError) as failure:
+            StructuredJsonProvider(
+                profile_resolver=StoreBackedProfileResolver(store),
+                secret_store=_secret_store(tmp_path),
+                capability_store=store,
+                provider_factory=lambda _profile, _secret: fake,
+            ).generate_json(
+                memory_space_id="space",
+                messages=(ChatMessage(role="user", content="return"),),
+                max_output_tokens=20,
+                profile_slot=ProfileSlot.OPERATIONAL,
+                output_contract=STRICT_CONTRACT,
+                structured_output_requirement=strict_requirement_for_contract(
+                    STRICT_CONTRACT
+                ),
+                mode=STRICT_JSON_SCHEMA_MODE,
+            )
+
+        assert failure.value.code == "schema_shape_failure"
+        assert len(fake.requests) == 1
+    finally:
+        connection.close()
+
+
+def test_forced_strict_retry_pins_next_configured_provider_route(tmp_path) -> None:
+    routed_profile = _profile(preference=STRICT_JSON_SCHEMA_MODE).model_copy(
+        update={
+            "extra_body": {
+                "provider": {
+                    "order": ["baidu/fp8", "deepinfra/fp8"],
+                    "only": ["baidu/fp8", "deepinfra/fp8"],
+                    "allow_fallbacks": True,
+                    "require_parameters": True,
+                }
+            }
+        }
+    )
+    connection, store = _store(routed_profile)
+    try:
+        store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id="profile",
+                structured_output_mode=STRICT_JSON_SCHEMA_MODE,
+                structured_json_schema=True,
+                native_schema_strictness=True,
+                probe_contract_digest=STRICT_CONTRACT["schema_digest"],
+                probe_status="passed",
+                probe_result="passed",
+            )
+        )
+        constructed_profiles: list[InferenceProfile] = []
+
+        def factory(profile: InferenceProfile, _secret: str) -> _FakeProvider:
+            constructed_profiles.append(profile)
+            return _FakeProvider()
+
+        result = StructuredJsonProvider(
+            profile_resolver=StoreBackedProfileResolver(store),
+            secret_store=_secret_store(tmp_path),
+            capability_store=store,
+            provider_factory=factory,
+        ).generate_json(
+            memory_space_id="space",
+            messages=(ChatMessage(role="user", content="return"),),
+            max_output_tokens=20,
+            profile_slot=ProfileSlot.OPERATIONAL,
+            output_contract=STRICT_CONTRACT,
+            structured_output_requirement=strict_requirement_for_contract(
+                STRICT_CONTRACT
+            ),
+            mode=STRICT_JSON_SCHEMA_MODE,
+            force_provider_fallback=True,
+        )
+
+        provider_options = constructed_profiles[0].extra_body["provider"]
+        assert provider_options == {
+            "order": ["deepinfra/fp8"],
+            "only": ["deepinfra/fp8"],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+        }
+        assert result.metadata["forced_provider_fallback"] is True
+        assert result.metadata["forced_provider_route"] == "deepinfra/fp8"
     finally:
         connection.close()
 

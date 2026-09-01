@@ -53,6 +53,45 @@ _MODE_ORDER: tuple[StructuredOutputMode, ...] = (
 )
 
 
+def _forced_fallback_profile(
+    profile: InferenceProfile,
+) -> tuple[InferenceProfile, str | None]:
+    """Pin one retry to the next configured provider route, when available.
+
+    Aggregators normally advance their route chain only for transport errors.
+    A schema-invalid HTTP 200 is therefore retried with the primary provider
+    unless Local narrows the already configured chain for the bounded retry.
+    This helper changes transport routing only; model, schema, prompts, and all
+    semantic inputs remain identical.
+    """
+
+    extra_body = dict(profile.extra_body)
+    provider_options = extra_body.get("provider")
+    if not isinstance(provider_options, Mapping):
+        return profile, None
+    order_value = provider_options.get("order")
+    if not isinstance(order_value, (list, tuple)):
+        return profile, None
+    routes = tuple(
+        route.strip()
+        for route in order_value
+        if isinstance(route, str) and route.strip()
+    )
+    if len(routes) < 2:
+        return profile, None
+
+    fallback_routes = list(routes[1:])
+    narrowed_options = dict(provider_options)
+    narrowed_options["order"] = fallback_routes
+    narrowed_options["only"] = fallback_routes
+    narrowed_options["allow_fallbacks"] = len(fallback_routes) > 1
+    extra_body["provider"] = narrowed_options
+    return (
+        profile.model_copy(update={"extra_body": extra_body}),
+        fallback_routes[0],
+    )
+
+
 class CapabilityStore(Protocol):
     def get_capabilities(self, profile_id: str) -> ProviderCapabilities | None: ...
 
@@ -187,6 +226,12 @@ class StructuredJsonResponseError(StructuredJsonError):
     code = "invalid_json_response"
 
 
+class StructuredJsonSchemaError(StructuredJsonError):
+    """A parseable strict response that violates the requested JSON Schema."""
+
+    code = "schema_shape_failure"
+
+
 class StructuredJsonProvider:
     """Select a technical provider mode and return a Core-facing JSON object.
 
@@ -234,6 +279,7 @@ class StructuredJsonProvider:
         telemetry_operation: str | None = None,
         telemetry_context: Mapping[str, object] | None = None,
         seed: int | None = None,
+        force_provider_fallback: bool = False,
         cancellation_token: CancellationToken | None = None,
     ) -> StructuredJsonResult:
         profile = self._profile_resolver.resolve_profile(memory_space_id, profile_slot)
@@ -316,7 +362,12 @@ class StructuredJsonProvider:
             raise StructuredJsonCapabilityError(
                 "strict provider/model capability has not been verified by a successful probe"
             )
-        provider = self._provider_factory(profile, secret)
+        transport_profile, forced_route = (
+            _forced_fallback_profile(profile)
+            if force_provider_fallback
+            else (profile, None)
+        )
+        provider = self._provider_factory(transport_profile, secret)
         fallback_metadata: dict[str, object] = {}
 
         internal_metadata = dict(telemetry_context or {})
@@ -462,6 +513,20 @@ class StructuredJsonProvider:
                         **fallback_metadata,
                     }
                 }
+            )
+        if forced_route is not None:
+            result = result.model_copy(
+                update={
+                    "metadata": {
+                        **result.metadata,
+                        "forced_provider_fallback": True,
+                        "forced_provider_route": forced_route,
+                    }
+                }
+            )
+        if strict_request and not result.native_schema_valid:
+            raise StructuredJsonSchemaError(
+                "provider response violates the requested strict JSON Schema"
             )
         return result
 
@@ -864,12 +929,13 @@ __all__ = [
     "CapabilityStore",
     "InputBudgetExceededError",
     "ProviderFactory",
+    "StructuredJsonCapabilityError",
     "StructuredJsonError",
     "StructuredJsonProvider",
     "StructuredJsonRequestError",
-    "StructuredJsonCapabilityError",
     "StructuredJsonResponseError",
     "StructuredJsonResult",
+    "StructuredJsonSchemaError",
     "StructuredJsonSecretError",
     "default_provider_factory",
 ]

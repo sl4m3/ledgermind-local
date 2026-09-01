@@ -155,6 +155,13 @@ most one fallback. The same restricted route chain and
 request; automatic provider routing is disabled. A capability verified on one
 model/route cannot be reused after either changes.
 
+Provider recovery is deliberately bounded. If a successful HTTP response
+contains JSON that does not satisfy the requested strict schema, Local rejects
+it before Core and makes at most one retry. With two configured OpenRouter
+routes, that retry selects the fallback route while preserving the exact model,
+prompt, and schema. A second invalid response fails the task; Local never edits
+or guesses semantic output.
+
 API embedding dimensions are detected from an actual vector response rather
 than entered by hand. Releases that include the signed local catalog also
 offer `nvidia/Nemotron-3-Embed-1B-BF16` (2048 dimensions) on CPU, NVIDIA CUDA,

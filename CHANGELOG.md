@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.0.2 - 2026-09-01
+
+- Rejected provider responses that are valid JSON but do not satisfy the
+  requested strict JSON Schema before they can reach Core.
+- Added one bounded retry for that failure class. When an ordered OpenRouter
+  provider chain is configured, the retry keeps the same model, prompt, and
+  schema while selecting the next configured route.
+- Kept recovery fail-closed: Local does not repair JSON, infer missing fields,
+  alter semantic content, or retry more than once.
+- Added regression coverage for local schema validation, route fallback, and
+  terminal failure when both configured routes return invalid structures.
+
 ## 4.0.1 - 2026-08-31
 
 - Preserved large agent sessions as one semantic trajectory while compacting

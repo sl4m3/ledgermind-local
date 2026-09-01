@@ -78,3 +78,41 @@ def test_schema_failure_result_is_not_retryable() -> None:
     result = SimpleNamespace(status="failed", error_code="schema_shape_failure")
 
     assert _execution_result_is_retryable(result) is False
+
+
+def test_schema_failure_gets_one_retry_on_configured_provider_fallback(
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    retry_result = SimpleNamespace(status="completed")
+
+    class Gateway:
+        def require_capabilities(self, _capability: str) -> None:
+            return None
+
+    class Executor:
+        def execute(self, _task: object, **kwargs: object) -> object:
+            calls.append(kwargs)
+            return retry_result
+
+    worker = CoreExecutionTaskWorker(
+        database_path="unused.db",
+        gateway=Gateway(),
+        executor=Executor(),  # type: ignore[arg-type]
+        worker_id="test-worker",
+    )
+    delivered: list[object] = []
+    monkeypatch.setattr(
+        worker,
+        "_deliver_result",
+        lambda _task, result, _memory_space_id: delivered.append(result),
+    )
+
+    worker._deliver_result_with_structured_retry(
+        SimpleNamespace(task_kind="generate_json", task_id="task-1"),
+        SimpleNamespace(status="failed", error_code="schema_shape_failure"),
+        "space",
+    )
+
+    assert calls == [{"force_provider_fallback": True}]
+    assert delivered == [retry_result]
