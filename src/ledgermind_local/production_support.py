@@ -45,8 +45,7 @@ from .inference.profiles import InferenceProfile
 from .inference.provider_probe import ProviderProbe
 from .inference.secrets import SecretStore
 from .paths import ServicePaths
-from .persistence import open_sqlite_connection
-from .persistence import rounds_migrations
+from .persistence import open_sqlite_connection, rounds_migrations
 
 
 class ProductionSupportError(RuntimeError):
@@ -116,7 +115,6 @@ def _generation_for_task(lab_config: Any, task_kind: str) -> Any:
 def config_for(*, home: Path, lab_config: Any, port: int) -> LocalConfig:
     """Build the same secure Local configuration used by pre-production gates."""
 
-    generation = _generation_for_task(lab_config, "user_semantic")
     embedding = lab_config.embedding
     return LocalConfig(
         config_version=2,
@@ -131,7 +129,7 @@ def config_for(*, home: Path, lab_config: Any, port: int) -> LocalConfig:
         core_public_key_path="bin/ledgermind-core.pub",
         verify_core_signature=True,
         core_startup_timeout_seconds=30.0,
-        core_request_timeout_seconds=60.0,
+        core_request_timeout_seconds=120.0,
         core_security=CoreSecurityConfig(
             profile="secure",
             require_network_isolation=True,
@@ -401,8 +399,8 @@ def terminate(process: subprocess.Popen[bytes] | None) -> None:
 
 __all__ = [
     "ProductionSupportError",
-    "copy_signed_core",
     "config_for",
+    "copy_signed_core",
     "free_port",
     "http_json",
     "probe_generation_profiles",

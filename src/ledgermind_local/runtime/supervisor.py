@@ -327,7 +327,7 @@ class RuntimeSupervisor:
             raise
         self._write(running=True)
 
-    def _wait_for_owned_local(self, *, timeout_seconds: float = 5.0) -> None:
+    def _wait_for_owned_local(self, *, timeout_seconds: float = 30.0) -> None:
         """Verify that the authenticated endpoint belongs to this installation."""
 
         if "local" not in self.commands:

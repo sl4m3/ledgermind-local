@@ -139,7 +139,7 @@ def _config_for(
         core_public_key_path="bin/ledgermind-core.pub",
         verify_core_signature=True,
         core_startup_timeout_seconds=30.0,
-        core_request_timeout_seconds=60.0,
+        core_request_timeout_seconds=120.0,
         core_security=CoreSecurityConfig(
             profile="secure",
             require_network_isolation=True,

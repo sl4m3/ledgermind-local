@@ -6,14 +6,14 @@ import pytest
 
 from ledgermind_local.bootstrap import LocalRuntime
 from ledgermind_local.config import LocalConfig
+from ledgermind_local.core_gateway.compatibility import (
+    SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
+    SUPPORTED_PROTOCOL_MAX,
+)
 from ledgermind_local.core_gateway.contracts import (
     ControlMaintenanceResult,
     CoreHealth,
     ObjectFacetStatistics,
-)
-from ledgermind_local.core_gateway.compatibility import (
-    SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
-    SUPPORTED_PROTOCOL_MAX,
 )
 from ledgermind_local.inference.profile_store import InferenceProfileStore
 from ledgermind_local.inference.profiles import InferenceProfile
@@ -29,10 +29,12 @@ class _Gateway:
         schema_version: int = SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
         object_count: int = 0,
         integrity_finding_count: int = 0,
+        blocking_integrity_finding_count: int = 0,
     ) -> None:
         self.schema_version = schema_version
         self.object_count = object_count
         self.integrity_finding_count = integrity_finding_count
+        self.blocking_integrity_finding_count = blocking_integrity_finding_count
 
     def require_capabilities(self, *capabilities: str) -> None:
         del capabilities
@@ -69,6 +71,9 @@ class _Gateway:
             background_backlog=0,
             embedding_backlog=0,
             integrity_finding_count=self.integrity_finding_count,
+            blocking_integrity_finding_count=(
+                self.blocking_integrity_finding_count
+            ),
         )
 
     def close(self) -> None:
@@ -184,7 +189,12 @@ def test_full_readiness_requires_schema_twelve(tmp_path: Path) -> None:
 
 def test_full_readiness_is_consistent_with_object_facet_component(tmp_path: Path) -> None:
     runtime = _runtime(
-        tmp_path, gateway=_Gateway(object_count=1, integrity_finding_count=1)
+        tmp_path,
+        gateway=_Gateway(
+            object_count=1,
+            integrity_finding_count=1,
+            blocking_integrity_finding_count=1,
+        ),
     )
     _seed_profiles(runtime.database_path)
 
@@ -196,5 +206,31 @@ def test_full_readiness_is_consistent_with_object_facet_component(tmp_path: Path
         assert report["components"]["object_facet"]["ok"] is False
         assert report["components"]["object_facet"]["initialization_pending"] is False
         assert report["components"]["workers"]["ok"] is True
+    finally:
+        runtime.stop()
+
+
+def test_warning_integrity_finding_degrades_without_blocking_readiness(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(
+        tmp_path,
+        gateway=_Gateway(
+            object_count=1,
+            integrity_finding_count=1,
+            blocking_integrity_finding_count=0,
+        ),
+    )
+    _seed_profiles(runtime.database_path)
+
+    runtime.start()
+    try:
+        report = runtime.health_report()
+        assert report["full_ready"] is True
+        assert report["degraded"] is True
+        assert report["degraded_reason"] == "integrity_findings"
+        assert report["components"]["object_facet"]["ok"] is True
+        assert report["control_findings"] == 1
+        assert report["blocking_control_findings"] == 0
     finally:
         runtime.stop()

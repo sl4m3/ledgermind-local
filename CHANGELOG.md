@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.0.1 - 2026-08-31
+
+- Preserved large agent sessions as one semantic trajectory while compacting
+  oversized tool payloads before delivery to Core.
+- Prevented runtime shutdown while accepted Local or Core work remains active,
+  and aligned hook and transport timeouts with long-running agent turns.
+- Made warning and informational integrity findings visible without blocking
+  secure startup; error-severity findings continue to fail closed.
+- Improved object consolidation, knowledge conflict routing, structured-output
+  recovery, and embedding persistence without weakening provenance checks.
+
 ## 4.0.0 - 2026-08-31
 
 - Promoted the verified Linux memory pipeline to the first stable 4.0 release.

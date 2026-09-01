@@ -57,6 +57,7 @@ class _ActivityGateway(_Gateway):
             background_backlog=self.background,
             embedding_backlog=self.embedding,
             integrity_finding_count=0,
+            blocking_integrity_finding_count=0,
         )
 
 

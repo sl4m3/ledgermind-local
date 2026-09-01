@@ -662,6 +662,14 @@ class LocalRuntime:
                 "embedding_backlog",
             )
         )
+        integrity_finding_count = statistics.get("integrity_finding_count", 0)
+        blocking_integrity_finding_count = statistics.get(
+            "blocking_integrity_finding_count", integrity_finding_count
+        )
+        non_blocking_integrity_findings = bool(
+            _is_positive_int(integrity_finding_count)
+            and not _is_positive_int(blocking_integrity_finding_count)
+        )
         object_facet_initializing = bool(
             statistics_ready
             and not legacy_digest_upgrade_required
@@ -680,7 +688,7 @@ class LocalRuntime:
                 all(
                     not _is_positive_int(statistics.get(name))
                     for name in (
-                        "integrity_finding_count",
+                        "blocking_integrity_finding_count",
                         "missing_card_embeddings",
                         "missing_facet_embeddings",
                         "operational_backlog",
@@ -731,6 +739,7 @@ class LocalRuntime:
             or self._shutdown_incomplete
             or not restore_ready
             or object_facet_initializing
+            or non_blocking_integrity_findings
         )
         workers_component = dict(worker_reports)
         workers_component.update({"ready": workers_ready, "ok": workers_ready})
@@ -752,7 +761,13 @@ class LocalRuntime:
             "full_ready": full_ready,
             "readiness_reason": readiness_reason,
             "degraded_reason": (
-                "facet_catalogue_preload" if object_facet_initializing else None
+                "facet_catalogue_preload"
+                if object_facet_initializing
+                else (
+                    "integrity_findings"
+                    if non_blocking_integrity_findings
+                    else None
+                )
             ),
             "degraded": degraded,
             "shutdown": shutdown,
@@ -780,7 +795,13 @@ class LocalRuntime:
                     "ok": object_facet_ready,
                     "initialization_pending": object_facet_initializing,
                     "degraded_reason": (
-                        "facet_catalogue_preload" if object_facet_initializing else None
+                        "facet_catalogue_preload"
+                        if object_facet_initializing
+                        else (
+                            "integrity_findings"
+                            if non_blocking_integrity_findings
+                            else None
+                        )
                     ),
                 },
                 "workers": workers_component,
@@ -794,6 +815,9 @@ class LocalRuntime:
             "background_backlog": statistics.get("background_backlog"),
             "embedding_backlog": statistics.get("embedding_backlog"),
             "control_findings": statistics.get("integrity_finding_count"),
+            "blocking_control_findings": statistics.get(
+                "blocking_integrity_finding_count"
+            ),
             "missing_card_embeddings": statistics.get("missing_card_embeddings"),
             "missing_facet_embeddings": statistics.get("missing_facet_embeddings"),
             "legacy_digest_upgrade_required": legacy_digest_upgrade_required,
@@ -1152,6 +1176,7 @@ class LocalRuntime:
                         "background_backlog",
                         "embedding_backlog",
                         "integrity_finding_count",
+                        "blocking_integrity_finding_count",
                         "missing_card_embeddings",
                         "missing_facet_embeddings",
                         "legacy_digest_upgrade_required",
@@ -1269,6 +1294,7 @@ class LocalRuntime:
                     "background_backlog",
                     "embedding_backlog",
                     "integrity_finding_count",
+                    "blocking_integrity_finding_count",
                     "missing_card_embeddings",
                     "missing_facet_embeddings",
                     "legacy_digest_upgrade_required",

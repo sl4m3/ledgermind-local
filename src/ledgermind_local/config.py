@@ -171,7 +171,7 @@ class LocalConfig(BaseModel):
     core_signature_path: str = "../core/bin/ledgermind-core.sig"
     core_public_key_path: str = "../core/bin/ledgermind-core.pub"
     verify_core_signature: bool = True
-    core_request_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    core_request_timeout_seconds: float = Field(default=120.0, gt=0.0)
     core_startup_timeout_seconds: float = Field(default=10.0, gt=0.0)
     core_security: CoreSecurityConfig = Field(default_factory=_default_core_security)
     workers: WorkerSetConfig = Field(default_factory=WorkerSetConfig)

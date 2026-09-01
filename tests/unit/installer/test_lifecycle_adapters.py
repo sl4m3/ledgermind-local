@@ -78,7 +78,7 @@ def test_command_adapter_preserves_user_hooks(
         payload = json.loads(installed)
         prompt_handler = payload["hooks"]["UserPromptSubmit"][-1]["hooks"][0]
         stop_handler = payload["hooks"]["Stop"][-1]["hooks"][0]
-        assert prompt_handler["timeout"] == 30
+        assert prompt_handler["timeout"] == 60
         assert stop_handler["timeout"] == 600
         assert stop_handler["async"] is True
 

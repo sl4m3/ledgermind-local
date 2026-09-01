@@ -118,6 +118,7 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
                 background_backlog=0,
                 embedding_backlog=0,
                 integrity_finding_count=0,
+                blocking_integrity_finding_count=0,
                 missing_card_embeddings=0,
                 missing_facet_embeddings=0,
             )

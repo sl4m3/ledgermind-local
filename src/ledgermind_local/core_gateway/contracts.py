@@ -1021,6 +1021,7 @@ class ObjectFacetStatistics:
     background_backlog: int
     embedding_backlog: int
     integrity_finding_count: int
+    blocking_integrity_finding_count: int
     missing_card_embeddings: int | None = None
     missing_facet_embeddings: int | None = None
     legacy_digest_upgrade_required: bool = False
@@ -1044,6 +1045,7 @@ class ObjectFacetStatistics:
                 "background_backlog",
                 "embedding_backlog",
                 "integrity_finding_count",
+                "blocking_integrity_finding_count",
                 "missing_card_embeddings",
                 "missing_facet_embeddings",
                 "legacy_digest_upgrade_required",
@@ -1065,6 +1067,20 @@ class ObjectFacetStatistics:
         legacy = payload.get("legacy_digest_upgrade_required", False)
         if not isinstance(legacy, bool):
             raise TypeError("legacy_digest_upgrade_required must be a boolean")
+        integrity_finding_count = _non_negative_int(
+            payload.get("integrity_finding_count"), "integrity_finding_count"
+        )
+        blocking_integrity_finding_count = _non_negative_int(
+            payload.get(
+                "blocking_integrity_finding_count", integrity_finding_count
+            ),
+            "blocking_integrity_finding_count",
+        )
+        if blocking_integrity_finding_count > integrity_finding_count:
+            raise ValueError(
+                "blocking_integrity_finding_count must not exceed "
+                "integrity_finding_count"
+            )
         return cls(
             object_count=_non_negative_int(payload.get("object_count"), "object_count"),
             active_value_count=_non_negative_int(
@@ -1082,9 +1098,8 @@ class ObjectFacetStatistics:
             embedding_backlog=_non_negative_int(
                 payload.get("embedding_backlog"), "embedding_backlog"
             ),
-            integrity_finding_count=_non_negative_int(
-                payload.get("integrity_finding_count"), "integrity_finding_count"
-            ),
+            integrity_finding_count=integrity_finding_count,
+            blocking_integrity_finding_count=blocking_integrity_finding_count,
             missing_card_embeddings=optional_count("missing_card_embeddings"),
             missing_facet_embeddings=optional_count("missing_facet_embeddings"),
             legacy_digest_upgrade_required=legacy,
