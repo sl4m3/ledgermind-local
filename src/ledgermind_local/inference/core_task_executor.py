@@ -697,7 +697,12 @@ def _error_category(error_code: str) -> str:
         "unknown_candidate_id",
     }:
         return "grounding_failure"
-    if error_code in {"authentication_error", "configuration_error", "secret_missing"}:
+    if error_code in {
+        "authentication_error",
+        "configuration_error",
+        "provider_capability_unverified",
+        "secret_missing",
+    }:
         return "transport_failure"
     return "transport_failure" if error_code.startswith("provider_") else "schema_shape_failure"
 

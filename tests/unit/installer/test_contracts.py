@@ -316,6 +316,7 @@ def test_installer_persists_verified_generation_capabilities(tmp_path: Path) -> 
             assert capabilities.profile_fingerprint == generation_profile_fingerprint(
                 profile
             )
+            assert capabilities.expires_at is None
     finally:
         connection.close()
 

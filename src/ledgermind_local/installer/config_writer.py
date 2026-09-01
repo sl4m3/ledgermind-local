@@ -6,7 +6,7 @@ import json
 import os
 import secrets
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -571,7 +571,11 @@ def persist_generation_probe(
                     probe_status="passed",
                     last_probed_at=timestamp,
                     probed_at=timestamp,
-                    expires_at=(now + timedelta(days=1)).isoformat(timespec="seconds"),
+                    # Strict-schema support is bound to the complete,
+                    # secret-free profile fingerprint.  It remains valid
+                    # until that identity changes; expiring it by wall clock
+                    # would disable an otherwise healthy unattended runtime.
+                    expires_at=None,
                     probe_result="passed",
                 )
             )

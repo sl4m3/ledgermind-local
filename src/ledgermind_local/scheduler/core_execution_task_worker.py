@@ -61,6 +61,7 @@ _SAFE_ERROR_CODES = frozenset(
         "language_fidelity_failure",
         "grounding_failure",
         "invalid_request",
+        "provider_capability_unverified",
         "secret_missing",
         "input_budget_exceeded",
         "output_budget_exceeded",
@@ -131,6 +132,7 @@ def classify_execution_error(exc: BaseException) -> ExecutionFailureClassificati
     if code in {
         "invalid_json_response",
         "invalid_request",
+        "provider_capability_unverified",
         "secret_missing",
         "schema_shape_failure",
         "semantic_validation_failure",

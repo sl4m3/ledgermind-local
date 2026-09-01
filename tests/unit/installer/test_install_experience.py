@@ -596,6 +596,11 @@ def test_update_never_authorizes_install_to_rewrite_provider_credentials(
         "doctor",
         lambda **_kwargs: {"status": "passed"},
     )
+    monkeypatch.setattr(
+        update_module,
+        "_assert_generation_capabilities_ready",
+        lambda _database: None,
+    )
 
     result = update_module.update(
         config=_config(),
@@ -607,6 +612,45 @@ def test_update_never_authorizes_install_to_rewrite_provider_credentials(
 
     assert result["status"] == "success"
     assert captured["preserve_provider_credentials"] is True
+
+
+def test_update_rolls_back_when_skipped_probe_left_generation_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    update_module = importlib.import_module(
+        "ledgermind_local.installer.operations.update"
+    )
+    paths = InstallerPaths(home_override=tmp_path / "install-home")
+    paths.ensure()
+    previous_release = paths.release_dir("previous")
+    previous_release.mkdir()
+    paths.current_link.symlink_to(previous_release)
+    database = paths.memory_data_dir / "rounds.db"
+    database.write_bytes(b"verified-before-update")
+
+    def fake_install(**_kwargs: Any) -> dict[str, Any]:
+        database.write_bytes(b"unverified-after-update")
+        return {"status": "success", "release_version": "candidate"}
+
+    def reject_unverified(_database: Path) -> None:
+        raise RuntimeError("provider probe is required")
+
+    monkeypatch.setattr(update_module, "install", fake_install)
+    monkeypatch.setattr(
+        update_module, "_assert_generation_capabilities_ready", reject_unverified
+    )
+
+    with pytest.raises(RuntimeError, match="previous release was retained"):
+        update_module.update(
+            config=_config(),
+            paths=paths,
+            manifest_path=tmp_path / "manifest.json",
+            bundle=tmp_path / "bundle.tar.zst",
+            skip_provider_probe=True,
+        )
+
+    assert paths.current_link.resolve() == previous_release
+    assert database.read_bytes() == b"verified-before-update"
 
 
 def test_repair_is_local_and_does_not_probe_providers(

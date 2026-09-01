@@ -173,6 +173,12 @@ class StructuredJsonRequestError(StructuredJsonError):
     code = "invalid_request"
 
 
+class StructuredJsonCapabilityError(StructuredJsonError):
+    """The configured strict transport has not passed its current probe."""
+
+    code = "provider_capability_unverified"
+
+
 class StructuredJsonSecretError(StructuredJsonError):
     code = "secret_missing"
 
@@ -307,7 +313,7 @@ class StructuredJsonProvider:
             )
             or not capabilities.supports(STRICT_JSON_SCHEMA_MODE)
         ):
-            raise StructuredJsonRequestError(
+            raise StructuredJsonCapabilityError(
                 "strict provider/model capability has not been verified by a successful probe"
             )
         provider = self._provider_factory(profile, secret)
@@ -861,6 +867,7 @@ __all__ = [
     "StructuredJsonError",
     "StructuredJsonProvider",
     "StructuredJsonRequestError",
+    "StructuredJsonCapabilityError",
     "StructuredJsonResponseError",
     "StructuredJsonResult",
     "StructuredJsonSecretError",

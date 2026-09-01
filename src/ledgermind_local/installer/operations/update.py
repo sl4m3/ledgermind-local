@@ -8,11 +8,68 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ...inference.profile_slots import ProfileSlot
+from ...inference.profile_store import InferenceProfileStore
+from ...inference.profiles import generation_profile_fingerprint
+from ...persistence import open_sqlite_connection
 from ...runtime.supervisor import RuntimeSupervisor
 from ..models import InstallerConfig
 from ..paths import InstallerPaths
 from .doctor import doctor
 from .install import install
+
+
+def _assert_generation_capabilities_ready(database: Path) -> None:
+    """Reject an update that leaves strict generation locally disabled.
+
+    ``--skip-provider-probe`` is safe only when the installed release preserves
+    fresh capability observations for the exact materialized profiles.  A
+    release may change a fingerprinted transport field (for example an output
+    budget); silently accepting the update would make every semantic task fail
+    locally before an HTTP request is attempted.
+    """
+
+    if not database.is_file():
+        raise RuntimeError("generation profile database is missing after update")
+    connection = open_sqlite_connection(database)
+    try:
+        store = InferenceProfileStore(connection)
+        missing: list[str] = []
+        for slot in (
+            ProfileSlot.OPERATIONAL,
+            ProfileSlot.OBJECT_RESOLUTION,
+            ProfileSlot.BACKGROUND,
+        ):
+            rows = connection.execute(
+                "SELECT DISTINCT profile_id FROM memory_space_model_profiles "
+                "WHERE profile_slot = ? ORDER BY profile_id",
+                (slot.value,),
+            ).fetchall()
+            if not rows:
+                missing.append(f"{slot.value}:unbound")
+                continue
+            for row in rows:
+                profile_id = str(row[0])
+                profile = store.get(profile_id)
+                if profile is None:
+                    missing.append(f"{slot.value}:{profile_id}:missing_profile")
+                    continue
+                capabilities = store.get_capabilities(
+                    profile_id,
+                    profile_fingerprint=generation_profile_fingerprint(profile),
+                    fresh_only=True,
+                )
+                if capabilities is None or not capabilities.supports(
+                    "strict_json_schema"
+                ):
+                    missing.append(f"{slot.value}:{profile_id}:unverified")
+        if missing:
+            raise RuntimeError(
+                "provider probe is required because the update changed or "
+                "invalidated generation capabilities: " + ", ".join(missing)
+            )
+    finally:
+        connection.close()
 
 
 def update(
@@ -78,6 +135,8 @@ def update(
                 embedding_stdin=embedding_stdin,
                 preserve_provider_credentials=True,
             )
+            if skip_provider_probe:
+                _assert_generation_capabilities_ready(database)
             # Provider preflight already ran inside install unless the caller
             # explicitly skipped it. Do not duplicate billable network calls,
             # and honor the skip flag during the post-update local diagnostic.

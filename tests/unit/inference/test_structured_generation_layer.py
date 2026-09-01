@@ -50,6 +50,7 @@ from ledgermind_local.inference.strict import (
     validate_strict_schema_profile,
 )
 from ledgermind_local.inference.structured_json_provider import (
+    StructuredJsonCapabilityError,
     StructuredJsonProvider,
     StructuredJsonRequestError,
     StructuredJsonResponseError,
@@ -523,9 +524,9 @@ def test_strict_semantic_request_requires_a_verified_capability(tmp_path) -> Non
             return _FakeProvider()
 
         with pytest.raises(
-            StructuredJsonRequestError,
+            StructuredJsonCapabilityError,
             match="capability has not been verified",
-        ):
+        ) as failure:
             StructuredJsonProvider(
                 profile_resolver=StoreBackedProfileResolver(store),
                 secret_store=_secret_store(tmp_path),
@@ -542,6 +543,7 @@ def test_strict_semantic_request_requires_a_verified_capability(tmp_path) -> Non
                 ),
                 mode=STRICT_JSON_SCHEMA_MODE,
             )
+        assert failure.value.code == "provider_capability_unverified"
         assert created is False
     finally:
         connection.close()
