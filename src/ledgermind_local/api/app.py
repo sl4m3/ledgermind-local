@@ -20,6 +20,7 @@ from .dependencies import Application, Settings
 from .errors import AuthenticationError, authentication_error_handler
 from .health import create_health_router
 from .http import error_payload
+from .knowledge import create_knowledge_router
 from .maintenance import create_maintenance_router
 from .rounds import create_rounds_router
 from .runtime import create_runtime_router
@@ -117,6 +118,13 @@ def create_app(
         )
     )
     app.include_router(create_maintenance_router(require_token, runtime))
+    app.include_router(
+        create_knowledge_router(
+            require_token,
+            core_gateway,
+            database_path=app.state.database_path,
+        )
+    )
     app.include_router(
         create_runtime_router(require_token, settings.runtime_supervisor, runtime)
     )

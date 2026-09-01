@@ -80,6 +80,7 @@ _CAPABILITY_REQUIREMENTS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
                 "record_retrieval_outcome",
                 "run_control_maintenance",
                 "get_object_facet_statistics",
+                "delete_memory_space",
             }
         ),
         frozenset(
@@ -494,6 +495,34 @@ class ProcessCoreGateway(CoreGateway):
             return ObjectFacetStatistics.from_payload(result)
         except (TypeError, ValueError) as exc:
             raise TransientCoreError("Core object-facet statistics are malformed") from exc
+
+    def get_object_facet_snapshot(
+        self, memory_space_id: str, request_id: str
+    ) -> dict[str, Any]:
+        if not memory_space_id.strip():
+            raise ValueError("memory_space_id must not be empty")
+        result = self._request(
+            "get_object_facet_statistics",
+            {"include_projection": True, "memory_space_id": memory_space_id},
+            request_id=request_id,
+        )
+        if result.get("schema_version") != 1 or not isinstance(
+            result.get("knowledge_values"), list
+        ):
+            raise TransientCoreError("Core knowledge projection is malformed")
+        return result
+
+    def delete_memory_space(self, memory_space_id: str, request_id: str) -> bool:
+        if not memory_space_id.strip():
+            raise ValueError("memory_space_id must not be empty")
+        result = self._request(
+            "delete_memory_space",
+            {"memory_space_id": memory_space_id},
+            request_id=request_id,
+        )
+        if not isinstance(result.get("deleted"), bool):
+            raise TransientCoreError("Core memory-space deletion result is malformed")
+        return bool(result["deleted"])
 
     def poll_execution_tasks(
         self, command: PollExecutionTasksCommand

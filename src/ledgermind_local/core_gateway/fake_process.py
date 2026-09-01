@@ -44,6 +44,7 @@ _CURRENT_OPERATIONS = {
     "record_retrieval_outcome",
     "run_control_maintenance",
     "get_object_facet_statistics",
+    "delete_memory_space",
     "create_backup",
     "validate_backup",
     "prepare_restore",
@@ -294,6 +295,24 @@ def main() -> int:
                 )
             )
         elif request.operation == "get_object_facet_statistics":
+            if request.payload.get("include_projection") is True:
+                memory_space_id = str(request.payload.get("memory_space_id", ""))
+                _write(
+                    CoreResponseEnvelope.ok(
+                        request.request_id,
+                        {
+                            "schema_version": 1,
+                            "memory_space_id": memory_space_id,
+                            "projection_source": "Core.database",
+                            "memory_objects": [],
+                            "knowledge_values": [],
+                            "value_observations": [],
+                            "value_lineage": [],
+                            "value_stats": [],
+                        },
+                    )
+                )
+                continue
             _write(
                 CoreResponseEnvelope.ok(
                     request.request_id,
@@ -311,6 +330,8 @@ def main() -> int:
                     },
                 )
             )
+        elif request.operation == "delete_memory_space":
+            _write(CoreResponseEnvelope.ok(request.request_id, {"deleted": True}))
         elif request.operation == "create_backup":
             relative_path = "exchange/outgoing/fake-core-backup.bin"
             snapshot = b"fake-core-snapshot"

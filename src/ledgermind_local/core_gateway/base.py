@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from .contracts import (
     ControlMaintenanceResult,
@@ -56,6 +56,12 @@ class CoreGateway(Protocol):
     ) -> ControlMaintenanceResult: ...
 
     def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics: ...
+
+    def get_object_facet_snapshot(
+        self, memory_space_id: str, request_id: str
+    ) -> dict[str, Any]: ...
+
+    def delete_memory_space(self, memory_space_id: str, request_id: str) -> bool: ...
 
     def poll_execution_tasks(
         self, command: PollExecutionTasksCommand

@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from ledgermind_local.core_gateway.contracts import (
-    CoreCapabilityError,
-    TransientCoreError,
-)
 from ledgermind_local.core_gateway.compatibility import (
     SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
     SUPPORTED_PROTOCOL_MAX,
 )
-from ledgermind_local.core_gateway.contracts import IngestRawRoundCommand
+from ledgermind_local.core_gateway.contracts import (
+    CoreCapabilityError,
+    IngestRawRoundCommand,
+    TransientCoreError,
+)
 from ledgermind_local.core_gateway.process import (
     ProcessCoreGateway,
     _normalize_core_retrieval_payload,
@@ -27,6 +27,7 @@ _OPERATIONS = [
     "record_retrieval_outcome",
     "run_control_maintenance",
     "get_object_facet_statistics",
+    "delete_memory_space",
     "create_backup",
     "validate_backup",
     "prepare_restore",
