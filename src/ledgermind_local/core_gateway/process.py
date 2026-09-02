@@ -129,7 +129,9 @@ def _validate_retrieval_outcome_payload(payload: Mapping[str, Any]) -> None:
     }
     unknown = set(payload) - allowed
     if unknown:
-        raise ValueError(f"retrieval outcome contains unknown fields: {sorted(unknown)}")
+        raise ValueError(
+            f"retrieval outcome contains unknown fields: {sorted(unknown)}"
+        )
     if payload.get("schema_version") != 2:
         raise ValueError("schema_version must be 2")
     for name in ("retrieval_request_id", "created_at"):
@@ -139,7 +141,9 @@ def _validate_retrieval_outcome_payload(payload: Mapping[str, Any]) -> None:
     from datetime import datetime
 
     try:
-        parsed = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(
+            str(payload["created_at"]).replace("Z", "+00:00")
+        )
     except ValueError as exc:
         raise ValueError("created_at must be RFC3339") from exc
     if parsed.tzinfo is None:
@@ -287,14 +291,14 @@ class ProcessCoreGateway(CoreGateway):
                     ),
                     expected_schema_version=SUPPORTED_KNOWLEDGE_SCHEMA_MAX,
                     advertised_schema_version=(
-                        advertised_schema if isinstance(advertised_schema, int) else None
+                        advertised_schema
+                        if isinstance(advertised_schema, int)
+                        else None
                     ),
                 )
             )
         advertised_operations = {
-            operation
-            for operation in raw_operations
-            if isinstance(operation, str)
+            operation for operation in raw_operations if isinstance(operation, str)
         }
         advertised_flags = {
             capability
@@ -383,9 +387,7 @@ class ProcessCoreGateway(CoreGateway):
             ),
         )
 
-    def ingest_raw_round(
-        self, command: IngestRawRoundCommand
-    ) -> IngestRawRoundResult:
+    def ingest_raw_round(self, command: IngestRawRoundCommand) -> IngestRawRoundResult:
         try:
             from ledgermind_protocol.object_facet import IngestRawRoundRequest
 
@@ -455,9 +457,7 @@ class ProcessCoreGateway(CoreGateway):
             raise TransientCoreError("Core retrieval result is malformed") from exc
         return RetrieveContextResult(validated_result.model_dump(mode="json"))
 
-    def record_retrieval_outcome(
-        self, command: RecordRetrievalOutcomeCommand
-    ) -> None:
+    def record_retrieval_outcome(self, command: RecordRetrievalOutcomeCommand) -> None:
         payload = command.to_payload()
         try:
             from datetime import datetime, timezone
@@ -483,7 +483,9 @@ class ProcessCoreGateway(CoreGateway):
         try:
             return ControlMaintenanceResult.from_payload(result)
         except (TypeError, ValueError) as exc:
-            raise TransientCoreError("Core control maintenance result is malformed") from exc
+            raise TransientCoreError(
+                "Core control maintenance result is malformed"
+            ) from exc
 
     def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics:
         result = self._request(
@@ -494,20 +496,53 @@ class ProcessCoreGateway(CoreGateway):
         try:
             return ObjectFacetStatistics.from_payload(result)
         except (TypeError, ValueError) as exc:
-            raise TransientCoreError("Core object-facet statistics are malformed") from exc
+            raise TransientCoreError(
+                "Core object-facet statistics are malformed"
+            ) from exc
 
     def get_object_facet_snapshot(
-        self, memory_space_id: str, request_id: str
+        self,
+        memory_space_id: str,
+        request_id: str,
+        *,
+        cursor: str | None = None,
+        page_size: int = 10_000,
     ) -> dict[str, Any]:
         if not memory_space_id.strip():
             raise ValueError("memory_space_id must not be empty")
+        if not 1 <= page_size <= 10_000:
+            raise ValueError("page_size must be between 1 and 10000")
+        payload: dict[str, Any] = {
+            "include_projection": True,
+            "memory_space_id": memory_space_id,
+            "page_size": page_size,
+        }
+        if cursor is not None:
+            payload["cursor"] = cursor
         result = self._request(
             "get_object_facet_statistics",
-            {"include_projection": True, "memory_space_id": memory_space_id},
+            payload,
             request_id=request_id,
         )
-        if result.get("schema_version") != 1 or not isinstance(
-            result.get("knowledge_values"), list
+        if (
+            result.get("schema_version") != 2
+            or not isinstance(result.get("snapshot"), dict)
+            or not isinstance(result.get("page"), dict)
+        ):
+            raise TransientCoreError("Core knowledge projection is malformed")
+        snapshot = result["snapshot"]
+        page = result["page"]
+        if (
+            snapshot.get("schema_version") != 1
+            or snapshot.get("memory_space_id") != memory_space_id
+            or not isinstance(page.get("item_count"), int)
+            or not isinstance(page.get("total_items"), int)
+            or not isinstance(page.get("complete"), bool)
+            or not isinstance(page.get("cursor"), str)
+            or (
+                page.get("next_cursor") is not None
+                and not isinstance(page.get("next_cursor"), str)
+            )
         ):
             raise TransientCoreError("Core knowledge projection is malformed")
         return result
@@ -539,17 +574,14 @@ class ProcessCoreGateway(CoreGateway):
             raise TransientCoreError("Core execution task result is malformed")
         try:
             tasks = tuple(
-                CoreExecutionTask.from_payload(task).to_payload()
-                for task in raw_tasks
+                CoreExecutionTask.from_payload(task).to_payload() for task in raw_tasks
             )
         except (TypeError, ValueError) as exc:
             raise TransientCoreError("Core execution task is malformed") from exc
         has_more = result.get("has_more", False)
         if not isinstance(has_more, bool):
             raise TransientCoreError("Core execution task pagination is malformed")
-        return PollExecutionTasksResult(
-            tasks=tasks, has_more=has_more
-        )
+        return PollExecutionTasksResult(tasks=tasks, has_more=has_more)
 
     def submit_execution_result(
         self, command: SubmitExecutionResultCommand
@@ -574,9 +606,17 @@ class ProcessCoreGateway(CoreGateway):
         accepted = result.get("accepted")
         duplicate = result.get("duplicate", False)
         status = result.get("status", "accepted")
-        if not isinstance(accepted, bool) or not isinstance(duplicate, bool) or not isinstance(status, str):
-            raise TransientCoreError("Core execution result acknowledgement is malformed")
-        return SubmitExecutionResult(accepted=accepted, duplicate=duplicate, status=status)
+        if (
+            not isinstance(accepted, bool)
+            or not isinstance(duplicate, bool)
+            or not isinstance(status, str)
+        ):
+            raise TransientCoreError(
+                "Core execution result acknowledgement is malformed"
+            )
+        return SubmitExecutionResult(
+            accepted=accepted, duplicate=duplicate, status=status
+        )
 
     def fail_execution_task(
         self, command: FailExecutionTaskCommand
@@ -613,11 +653,11 @@ class ProcessCoreGateway(CoreGateway):
         try:
             return BackupManifest.from_payload(result)
         except (KeyError, TypeError, ValueError) as exc:
-            raise TransientCoreError("Core backup validation result is malformed") from exc
+            raise TransientCoreError(
+                "Core backup validation result is malformed"
+            ) from exc
 
-    def prepare_restore(
-        self, command: PrepareRestoreCommand
-    ) -> PrepareRestoreResult:
+    def prepare_restore(self, command: PrepareRestoreCommand) -> PrepareRestoreResult:
         result = self._request(
             "prepare_restore",
             command.to_payload(),
@@ -626,7 +666,9 @@ class ProcessCoreGateway(CoreGateway):
         try:
             return PrepareRestoreResult.from_payload(result)
         except (KeyError, TypeError, ValueError) as exc:
-            raise TransientCoreError("Core restore preparation result is malformed") from exc
+            raise TransientCoreError(
+                "Core restore preparation result is malformed"
+            ) from exc
 
     def begin_restore(self, command: BeginRestoreCommand) -> BeginRestoreResult:
         result = self._request(
@@ -650,7 +692,9 @@ class ProcessCoreGateway(CoreGateway):
         except (KeyError, TypeError, ValueError) as exc:
             raise TransientCoreError("Core restore commit result is malformed") from exc
 
-    def rollback_restore(self, command: RollbackRestoreCommand) -> RollbackRestoreResult:
+    def rollback_restore(
+        self, command: RollbackRestoreCommand
+    ) -> RollbackRestoreResult:
         result = self._request(
             "rollback_restore",
             command.to_payload(),
@@ -659,7 +703,9 @@ class ProcessCoreGateway(CoreGateway):
         try:
             return RollbackRestoreResult.from_payload(result)
         except (KeyError, TypeError, ValueError) as exc:
-            raise TransientCoreError("Core restore rollback result is malformed") from exc
+            raise TransientCoreError(
+                "Core restore rollback result is malformed"
+            ) from exc
 
     def close(self) -> None:
         self._supervisor.close()

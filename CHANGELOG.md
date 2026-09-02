@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.0.4 - 2026-09-02
+
+- Simplified Object Resolution to the current name, stable description, and
+  Core-owned Target, preventing claims and historical facets from influencing
+  object identity while preserving durable-card reconciliation.
+- Made Knowledge Resolution copy a selected incoming claim verbatim for
+  `replace`; only `merge` may generate combined content, and Core continues to
+  own exact same-object, same-Target, same-facet conflict groups.
+- Rebuilt stale object signatures and identity embeddings before candidate
+  retrieval so recently changed cards remain discoverable without creating
+  semantic duplicates.
+- Added bounded, cursor-based knowledge export pages and explicit diagnostics
+  for malformed cursors, changed snapshots, oversized items, and IPC frames.
+- Made the authenticated HTTP plane available after the secure Core handshake
+  while slow maintenance finishes, avoiding cold-start recall timeouts without
+  weakening readiness or isolation checks.
+- Cleared stale integration network diagnostics after a successful recall.
+
 ## 4.0.3 - 2026-09-01
 
 - Made Knowledge Resolution operate only on Core-owned conflict groups and

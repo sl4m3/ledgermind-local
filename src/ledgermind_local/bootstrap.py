@@ -235,6 +235,7 @@ class LocalRuntime:
         self._lock_acquired = False
         self._pid_owned = False
         self._started = False
+        self._initialization_complete = False
         self._starting = False
         self._stop_requested = False
         self._migrations_applied = False
@@ -271,6 +272,39 @@ class LocalRuntime:
             and self._lock_acquired
             and self._raw_round_handler is not None
             and callable(getattr(self._raw_round_handler, "handle", None))
+        )
+
+    @property
+    def initialization_complete(self) -> bool:
+        """Whether maintenance and all configured workers finished starting."""
+
+        return self._initialization_complete
+
+    @property
+    def core_error_code(self) -> str | None:
+        """Return the content-free Core startup diagnostic, if any."""
+
+        return self._core_error_code
+
+    @property
+    def secure_serving_ready(self) -> bool:
+        """Whether HTTP may bind without weakening the secure Core boundary.
+
+        Control maintenance and worker startup are deliberately excluded: they
+        can take tens of seconds on a large database, while authenticated
+        capture and recall are already safe after the signed Core handshake.
+        """
+
+        isolation = self._isolation_report()
+        capabilities = self._capabilities_report()
+        restore = self._restore_status or {"ready": True}
+        return bool(
+            self.capture_ready
+            and self._core_ready
+            and knowledge_schema_supported(self._core_schema_version)
+            and isolation.get("ready", False)
+            and capabilities.get("ready", False)
+            and restore.get("ready", False)
         )
 
     @property
@@ -327,6 +361,19 @@ class LocalRuntime:
     def start(self) -> LocalRuntime:
         """Acquire ownership, migrate, then start Core and guarded workers."""
 
+        if self._initialization_complete:
+            return self
+        self.start_capture()
+        try:
+            self.finish_start()
+        except BaseException:
+            self._cleanup_after_failed_start()
+            raise
+        return self
+
+    def start_capture(self) -> LocalRuntime:
+        """Start the durable authenticated serving plane without maintenance."""
+
         if self._started:
             return self
         if self._shutdown_incomplete:
@@ -337,6 +384,7 @@ class LocalRuntime:
             raise RuntimeError("Local runtime startup is already in progress")
         self._starting = True
         self._stop_requested = False
+        self._initialization_complete = False
         self._component_errors.clear()
         self._workers.clear()
         self._worker_observations.clear()
@@ -378,13 +426,33 @@ class LocalRuntime:
             # no worker can observe a partially migrated database.
             self._start_core_if_available()
             self._recover_restore_journal()
-            self._refresh_object_facet_health()
             self._build_context_gateway()
-            self._start_workers()
             self._started = True
             return self
         except BaseException:
             self._cleanup_after_failed_start()
+            raise
+        finally:
+            self._starting = False
+
+    def finish_start(self) -> LocalRuntime:
+        """Complete slow maintenance and worker startup after HTTP can bind."""
+
+        if self._initialization_complete:
+            return self
+        if not self._started:
+            raise RuntimeError("Local capture plane is not started")
+        if self._starting:
+            raise RuntimeError("Local runtime startup is already in progress")
+        self._starting = True
+        try:
+            self._refresh_object_facet_health()
+            if not self._stop_requested:
+                self._start_workers()
+            self._initialization_complete = not self._stop_requested
+            return self
+        except Exception as exc:
+            self._component_errors["startup_maintenance"] = _safe_error_code(exc)
             raise
         finally:
             self._starting = False
@@ -519,6 +587,7 @@ class LocalRuntime:
             self._release_service_lock()
             self._service_lock = None
         self._started = False
+        self._initialization_complete = False
         self._stop_requested = False
 
     def _capabilities_report(self) -> dict[str, object]:
@@ -763,11 +832,7 @@ class LocalRuntime:
             "degraded_reason": (
                 "facet_catalogue_preload"
                 if object_facet_initializing
-                else (
-                    "integrity_findings"
-                    if non_blocking_integrity_findings
-                    else None
-                )
+                else ("integrity_findings" if non_blocking_integrity_findings else None)
             ),
             "degraded": degraded,
             "shutdown": shutdown,
@@ -1186,6 +1251,38 @@ class LocalRuntime:
             except Exception as exc:  # noqa: BLE001 - diagnostics must not crash startup
                 self._component_errors["statistics"] = _safe_error_code(exc)
 
+        # Core already exposes durable backlog and integrity counters. Read
+        # those first and avoid an unconditional full maintenance scan on a
+        # clean cold start. The scan serializes Core IPC and used to make the
+        # first recall time out even though authenticated /ping was available.
+        refresh_statistics()
+        statistics = self._object_facet_statistics
+        maintenance_indicators = (
+            "operational_backlog",
+            "background_backlog",
+            "embedding_backlog",
+            "integrity_finding_count",
+            "blocking_integrity_finding_count",
+            "missing_card_embeddings",
+            "missing_facet_embeddings",
+        )
+        if (
+            statistics is not None
+            and not bool(statistics.get("legacy_digest_upgrade_required", False))
+            and all(
+                not _is_positive_int(statistics.get(name))
+                for name in maintenance_indicators
+            )
+        ):
+            self._control_maintenance = {
+                "status": "not_required",
+                "ready": True,
+            }
+            self._component_errors.pop("control", None)
+            self._component_errors.pop("statistics", None)
+            self._object_facet_bootstrap_pending = False
+            return
+
         if not callable(run_control):
             self._component_errors["control"] = "unsupported"
         else:
@@ -1590,6 +1687,7 @@ class LocalRuntime:
             self._release_service_lock()
             self._service_lock = None
         self._started = False
+        self._initialization_complete = False
 
 
 def _safe_error_code(error: BaseException) -> str:

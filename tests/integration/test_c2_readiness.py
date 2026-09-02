@@ -35,6 +35,7 @@ class _Gateway:
         self.object_count = object_count
         self.integrity_finding_count = integrity_finding_count
         self.blocking_integrity_finding_count = blocking_integrity_finding_count
+        self.control_calls = 0
 
     def require_capabilities(self, *capabilities: str) -> None:
         del capabilities
@@ -49,6 +50,7 @@ class _Gateway:
 
     def run_control_maintenance(self, command: object) -> ControlMaintenanceResult:
         del command
+        self.control_calls += 1
         return ControlMaintenanceResult(
             status="completed",
             memory_echoes_reconciled=0,
@@ -71,9 +73,7 @@ class _Gateway:
             background_backlog=0,
             embedding_backlog=0,
             integrity_finding_count=self.integrity_finding_count,
-            blocking_integrity_finding_count=(
-                self.blocking_integrity_finding_count
-            ),
+            blocking_integrity_finding_count=(self.blocking_integrity_finding_count),
         )
 
     def close(self) -> None:
@@ -142,7 +142,8 @@ def _runtime(tmp_path: Path, *, gateway: _Gateway) -> LocalRuntime:
 
 
 def test_full_readiness_requires_all_four_profile_slots(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path, gateway=_Gateway())
+    gateway = _Gateway()
+    runtime = _runtime(tmp_path, gateway=gateway)
     _seed_profiles(runtime.database_path)
 
     runtime.start()
@@ -150,6 +151,8 @@ def test_full_readiness_requires_all_four_profile_slots(tmp_path: Path) -> None:
         report = runtime.health_report()
         assert report["full_ready"] is True
         assert report["missing_profile_slots_by_memory_space"] == {}
+        assert report["components"]["control"]["status"] == "not_required"
+        assert gateway.control_calls == 0
     finally:
         runtime.stop()
 
@@ -187,15 +190,15 @@ def test_full_readiness_requires_schema_twelve(tmp_path: Path) -> None:
         runtime.stop()
 
 
-def test_full_readiness_is_consistent_with_object_facet_component(tmp_path: Path) -> None:
-    runtime = _runtime(
-        tmp_path,
-        gateway=_Gateway(
-            object_count=1,
-            integrity_finding_count=1,
-            blocking_integrity_finding_count=1,
-        ),
+def test_full_readiness_is_consistent_with_object_facet_component(
+    tmp_path: Path,
+) -> None:
+    gateway = _Gateway(
+        object_count=1,
+        integrity_finding_count=1,
+        blocking_integrity_finding_count=1,
     )
+    runtime = _runtime(tmp_path, gateway=gateway)
     _seed_profiles(runtime.database_path)
 
     runtime.start()
@@ -206,6 +209,7 @@ def test_full_readiness_is_consistent_with_object_facet_component(tmp_path: Path
         assert report["components"]["object_facet"]["ok"] is False
         assert report["components"]["object_facet"]["initialization_pending"] is False
         assert report["components"]["workers"]["ok"] is True
+        assert gateway.control_calls == 1
     finally:
         runtime.stop()
 

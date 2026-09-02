@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
 import sqlite3
 import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
@@ -47,6 +49,7 @@ from ledgermind_local.service_lock import ServiceLock, ServiceLockError
 
 WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 def _build_core_gateway(*, paths: ServicePaths, config: LocalConfig) -> CoreGateway:
@@ -800,7 +803,7 @@ def _command_serve(args: argparse.Namespace) -> int:
         pid_remover=_remove_pid_file,
     )
     try:
-        runtime.start()
+        runtime.start_capture()
     except ServiceLockError as exc:
         print(f"failed to acquire service lock: {exc}", file=sys.stderr)
         runtime.stop()
@@ -810,35 +813,15 @@ def _command_serve(args: argparse.Namespace) -> int:
         runtime.stop()
         return 1
 
-    if config.core_security.profile == "secure" and not runtime.full_ready:
-        report = runtime.health_report()
-        components = report.get("components")
-        core_report = components.get("core", {}) if isinstance(components, dict) else {}
-        error_code = (
-            core_report.get("error_code") if isinstance(core_report, dict) else None
+    if config.core_security.profile == "secure" and not runtime.secure_serving_ready:
+        safe_code = runtime.core_error_code or "unavailable"
+        print(
+            "refusing to serve secure runtime: authenticated Core serving plane "
+            f"is not ready (error_code={safe_code})",
+            file=sys.stderr,
         )
-        safe_code = (
-            error_code if isinstance(error_code, str) and error_code else "unavailable"
-        )
-        # The first control pass schedules the static 14-facet catalogue for
-        # embedding.  Keep the secure process alive while that bounded,
-        # content-free bootstrap projection drains; every other not-ready
-        # condition remains a hard startup failure.
-        bootstrap_initializing = report.get("readiness_reason") == "object_facet_initializing"
-        worker_recovery = _worker_recovery_pending(report)
-        if bootstrap_initializing or worker_recovery:
-            print(
-                "secure runtime is serving while healthy workers drain Core backlog",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                "refusing to serve secure runtime: Core is not full-ready "
-                f"(error_code={safe_code})",
-                file=sys.stderr,
-            )
-            runtime.stop()
-            return 1
+        runtime.stop()
+        return 1
     if config.core_security.profile == "permissive":
         print(
             "warning: serving with permissive Core security profile; "
@@ -870,12 +853,27 @@ def _command_serve(args: argparse.Namespace) -> int:
         reload=bool(args.reload),
     )
     installed_handlers = _install_signal_handlers(server)
+
+    def finish_runtime_start() -> None:
+        try:
+            runtime.finish_start()
+        except Exception:
+            logger.exception("background runtime initialization failed")
+
+    startup_thread = threading.Thread(
+        target=finish_runtime_start,
+        name="ledgermind-startup-maintenance",
+        daemon=True,
+    )
+    startup_thread.start()
     try:
         server.run()
     except KeyboardInterrupt:
         return 0
     finally:
         _restore_signal_handlers(installed_handlers)
+        runtime.request_stop()
+        startup_thread.join(timeout=WORKER_SHUTDOWN_TIMEOUT_SECONDS)
         runtime.stop()
     return 0
 
@@ -899,8 +897,7 @@ def _worker_recovery_pending(report: dict[str, Any]) -> bool:
         return False
     required_ready = ("core", "inference", "workers")
     if any(
-        not isinstance(components.get(name), dict)
-        or not components[name].get("ready")
+        not isinstance(components.get(name), dict) or not components[name].get("ready")
         for name in required_ready
     ):
         return False

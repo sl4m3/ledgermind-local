@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 from argparse import Namespace
 from pathlib import Path
 from typing import Self
@@ -141,7 +142,9 @@ def _patch_noop_core_runtime(monkeypatch) -> None:
     monkeypatch.setattr(bootstrap_module, "CoreCommandWorker", DummyWorker)
     monkeypatch.setattr(bootstrap_module, "CoreExecutionTaskWorker", DummyWorker)
     monkeypatch.setattr(bootstrap_module, "RawRoundRetentionWorker", DummyWorker)
-    monkeypatch.setattr(bootstrap_module, "migrate_contract_payloads", lambda **kwargs: None)
+    monkeypatch.setattr(
+        bootstrap_module, "migrate_contract_payloads", lambda **kwargs: None
+    )
 
 
 def test_coalesce_optional_returns_fallback() -> None:
@@ -201,7 +204,9 @@ def test_worker_recovery_does_not_hide_other_startup_failures(
         object_facet["embedding_backlog"] = 0
     report = {
         "readiness_reason": "object_facet_not_ready",
-        "terminal_worker_failure": value if field == "terminal_worker_failure" else False,
+        "terminal_worker_failure": value
+        if field == "terminal_worker_failure"
+        else False,
         "components": {
             "core": {"ready": value if field == "core_ready" else True},
             "inference": {"ready": True},
@@ -336,6 +341,73 @@ def test_command_serve_rejects_remote_host_without_allow_remote_bind(
     args = Namespace(home=str(home), host="0.0.0.0", port=None, reload=False)
     code = _command_serve(args)
     assert code == 2
+
+
+def test_command_serve_binds_before_slow_runtime_maintenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A cold database maintenance pass must not block authenticated ping."""
+
+    home = tmp_path / "service"
+    paths, config, token = initialize_local_layout(
+        home=home,
+        config=LocalConfig(config_version=1, semantic_language="ru"),
+    )
+    maintenance_entered = threading.Event()
+    release_maintenance = threading.Event()
+    events: list[str] = []
+
+    class DummyRuntime:
+        database_path = paths.rounds_database_file
+        secure_serving_ready = True
+        core_error_code = None
+
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def start_capture(self) -> None:
+            events.append("capture_started")
+
+        def finish_start(self) -> None:
+            maintenance_entered.set()
+            release_maintenance.wait(timeout=2)
+            events.append("maintenance_finished")
+
+        def activity_report(self) -> dict[str, object]:
+            return {}
+
+        def request_stop(self) -> None:
+            release_maintenance.set()
+
+        def stop(self) -> None:
+            events.append("runtime_stopped")
+
+    class DummyServer:
+        should_exit = False
+
+        def run(self) -> None:
+            assert maintenance_entered.wait(timeout=1)
+            assert not release_maintenance.is_set()
+            events.append("server_run")
+            release_maintenance.set()
+
+    monkeypatch.setattr(
+        cli_module,
+        "initialize_local_layout",
+        lambda **kwargs: (paths, config, token),
+    )
+    monkeypatch.setattr(cli_module, "LocalRuntime", DummyRuntime)
+    monkeypatch.setattr(cli_module, "create_app", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli_module, "_build_uvicorn_server", lambda **kwargs: DummyServer()
+    )
+
+    code = _command_serve(Namespace(home=str(home), host=None, port=None, reload=False))
+
+    assert code == 0
+    assert events.index("capture_started") < events.index("server_run")
+    assert "maintenance_finished" in events
+    assert events[-1] == "runtime_stopped"
 
 
 def test_command_serve_reports_lock_error(tmp_path: Path, monkeypatch) -> None:
@@ -545,7 +617,9 @@ def test_command_serve_applies_migrations_before_starting_server(
     monkeypatch.setattr(cli_module, "_build_uvicorn_server", fake_server_builder)
     monkeypatch.setattr(cli_module, "open_sqlite_connection", fake_open_db_connection)
 
-    monkeypatch.setattr(cli_module.migrations, "apply_migrations", fake_apply_migrations)
+    monkeypatch.setattr(
+        cli_module.migrations, "apply_migrations", fake_apply_migrations
+    )
 
     monkeypatch.setattr(os, "getpid", lambda: 12345)
 

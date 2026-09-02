@@ -58,7 +58,12 @@ class CoreGateway(Protocol):
     def get_object_facet_statistics(self, request_id: str) -> ObjectFacetStatistics: ...
 
     def get_object_facet_snapshot(
-        self, memory_space_id: str, request_id: str
+        self,
+        memory_space_id: str,
+        request_id: str,
+        *,
+        cursor: str | None = None,
+        page_size: int = 10_000,
     ) -> dict[str, Any]: ...
 
     def delete_memory_space(self, memory_space_id: str, request_id: str) -> bool: ...
