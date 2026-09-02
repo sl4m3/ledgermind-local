@@ -274,7 +274,7 @@ class CoreExecutionTaskWorker:
 
     def _process_task(self, raw_task: dict[str, object], memory_space_id: str) -> None:
         try:
-            task = _local_execution_task(raw_task, memory_space_id)
+            task = execution_task_from_wire(raw_task, memory_space_id)
             result = self._executor.execute(task)
             self._deliver_result_with_structured_retry(task, result, memory_space_id)
         except Exception as exc:  # noqa: BLE001 - release every leased task
@@ -288,7 +288,7 @@ class CoreExecutionTaskWorker:
         converted: list[GenericExecutionTask] = []
         for raw_task in raw_tasks:
             try:
-                converted.append(_local_execution_task(raw_task, memory_space_id))
+                converted.append(execution_task_from_wire(raw_task, memory_space_id))
             except Exception as exc:  # noqa: BLE001 - isolate malformed leases
                 self._fail_task(raw_task, memory_space_id, exc)
         if not converted:
@@ -376,13 +376,13 @@ class CoreExecutionTaskWorker:
                     task_id=task.task_id,
                     memory_space_id=memory_space_id,
                     worker_id=self._worker_id,
-                    result=_core_result_payload(result),
+                    result=core_result_payload(result),
                 )
             )
             if not submitted.accepted:
                 raise TransientCoreError("Core did not accept execution result")
             return
-        retryable = _execution_result_is_retryable(result)
+        retryable = execution_result_is_retryable(result)
         self._gateway.fail_execution_task(
             FailExecutionTaskCommand(
                 request_id=self._request_id("fail"),
@@ -436,7 +436,7 @@ class CoreExecutionTaskWorker:
         return f"{self._worker_id}:{operation}:{uuid.uuid4()}"
 
 
-def _core_result_payload(result: object) -> dict[str, object]:
+def core_result_payload(result: object) -> dict[str, object]:
     """Project the Local executor result onto the Core-owned wire contract."""
 
     payload = result.model_dump(mode="json")
@@ -454,7 +454,7 @@ def _core_result_payload(result: object) -> dict[str, object]:
     return payload
 
 
-def _execution_result_is_retryable(result: object) -> bool:
+def execution_result_is_retryable(result: object) -> bool:
     if getattr(result, "status", None) in {"timeout", "cancelled"}:
         return True
     return getattr(result, "error_code", None) in {
@@ -467,7 +467,13 @@ def _execution_result_is_retryable(result: object) -> bool:
     }
 
 
-def _local_execution_task(
+# Compatibility aliases for tests and third-party Local extensions written
+# before the transport-neutral helpers became part of the public worker API.
+_core_result_payload = core_result_payload
+_execution_result_is_retryable = execution_result_is_retryable
+
+
+def execution_task_from_wire(
     raw_task: dict[str, object], memory_space_id: str
 ) -> GenericExecutionTask:
     """Convert the language-neutral wire task to the Local executor model."""
@@ -619,4 +625,11 @@ def _local_execution_task(
     )
 
 
-__all__ = ["CoreExecutionTaskWorker", "ExecutionFailureClassification", "classify_execution_error"]
+__all__ = [
+    "CoreExecutionTaskWorker",
+    "ExecutionFailureClassification",
+    "classify_execution_error",
+    "core_result_payload",
+    "execution_result_is_retryable",
+    "execution_task_from_wire",
+]

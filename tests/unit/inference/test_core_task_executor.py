@@ -276,6 +276,39 @@ def test_generic_json_task_completes_with_output_and_payload_free_audit(
     assert "Extract values." not in dumped
 
 
+def test_empty_recheck_attempt_forces_configured_provider_fallback(
+    tmp_path, monkeypatch
+) -> None:
+    fake = _FakeCompleter('{"claims": [], "objects": []}')
+    provider = _json_provider(fake, tmp_path)
+    original_generate = provider.generate_json
+    fallback_flags: list[bool] = []
+
+    def capture_fallback(**kwargs):
+        fallback_flags.append(bool(kwargs.get("force_provider_fallback")))
+        return original_generate(**kwargs)
+
+    monkeypatch.setattr(provider, "generate_json", capture_fallback)
+    executor = _executor(tmp_path, json_provider=provider)
+    task = _json_task(completer=fake).model_copy(
+        update={
+            "operation": "execution_semantic",
+            "structured_generation": {
+                "root_task_id": "task-1",
+                "parent_task_id": "task-1",
+                "attempt_number": 1,
+                "attempt_kind": "empty_recheck",
+                "contract_digest": "sha256:test",
+            },
+        }
+    )
+
+    result = executor.execute(task)
+
+    assert result.status == "completed"
+    assert fallback_flags == [True]
+
+
 def test_object_resolution_task_uses_dedicated_profile_slot_and_model(tmp_path) -> None:
     fake = _FakeCompleter('{"groups": []}')
     executor = _executor(tmp_path, json_provider=_json_provider(fake, tmp_path))

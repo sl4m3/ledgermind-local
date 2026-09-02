@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.0.3 - 2026-09-01
+
+- Made Knowledge Resolution operate only on Core-owned conflict groups and
+  return one final `merge` or `replace` decision for every group.
+- Added deterministic handling for non-conflicting facets and replacement
+  precedence when a group contains both merge and replace evidence.
+- Added one bounded empty-result recheck on the configured fallback provider;
+  invalid structured output still fails closed after the bounded recovery path.
+- Hardened large-round normalization, patch/tool evidence projection, object
+  candidate resolution, retrieval text, and embedding persistence sequencing.
+- Kept the public Local distribution on the SQLite storage adapter. The private
+  LedgerMind Cloud PostgreSQL runtime is not included in this package.
+
 ## 4.0.2 - 2026-09-01
 
 - Rejected provider responses that are valid JSON but do not satisfy the

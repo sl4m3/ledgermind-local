@@ -248,6 +248,8 @@ class CoreTaskExecutor:
             and structured_metadata.get("attempt_kind") is not None
             else "primary"
         )
+        if attempt_kind == "empty_recheck":
+            force_provider_fallback = True
         attempt_index = (
             structured_metadata.get("attempt_number")
             if isinstance(structured_metadata, dict)
