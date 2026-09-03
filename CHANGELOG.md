@@ -2,6 +2,13 @@
 
 ## 4.0.4 - 2026-09-02
 
+- Made one accepted Object Resolution call final and normalized overlapping
+  model components deterministically, eliminating redundant identity review
+  calls without moving semantic identity decisions into Core.
+- Improved semantic card identity by preserving independent subject boundaries
+  and stable distinguishing descriptions across User and Execution Semantic.
+- Preserved the 120-character generation guidance for technical anchors while
+  accepting longer non-empty paths and identifiers returned by a provider.
 - Simplified Object Resolution to the current name, stable description, and
   Core-owned Target, preventing claims and historical facets from influencing
   object identity while preserving durable-card reconciliation.
