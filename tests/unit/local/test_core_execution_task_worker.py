@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 
 from ledgermind_local.scheduler import core_execution_task_worker as worker_module
@@ -116,3 +117,60 @@ def test_schema_failure_gets_one_retry_on_configured_provider_fallback(
 
     assert calls == [{"force_provider_fallback": True}]
     assert delivered == [retry_result]
+
+
+def test_worker_persists_content_free_audit_for_each_executor_result(tmp_path) -> None:
+    database = tmp_path / "rounds.db"
+    connection = sqlite3.connect(database)
+    worker_module.migrations.apply_migrations(connection)
+    connection.execute(
+        "INSERT INTO memory_spaces(memory_space_id, source_client, created_at, updated_at) "
+        "VALUES ('space', 'test', '2026-09-03T00:00:00Z', '2026-09-03T00:00:00Z')"
+    )
+    connection.commit()
+    connection.close()
+
+    class Gateway:
+        def require_capabilities(self, _capability: str) -> None:
+            return None
+
+    worker = CoreExecutionTaskWorker(
+        database_path=database,
+        gateway=Gateway(),
+        executor=SimpleNamespace(),  # type: ignore[arg-type]
+        worker_id="test-worker",
+    )
+    task = SimpleNamespace(
+        task_id="task-1", task_kind="generate_json", operation="execution_semantic"
+    )
+    result = SimpleNamespace(
+        status="failed",
+        error_code="invalid_provider_response",
+        egress_audit=SimpleNamespace(
+            profile_id="operational",
+            provider="openai_compatible",
+            model="test-model",
+            status="failed",
+            input_bytes=123,
+            output_bytes=0,
+        ),
+    )
+
+    worker._record_egress_audit(task, result, "space")
+
+    connection = sqlite3.connect(database)
+    row = connection.execute(
+        "SELECT operation, provider_kind, model, status, request_bytes, "
+        "response_bytes, attempts, error_code FROM egress_audit"
+    ).fetchone()
+    connection.close()
+    assert row == (
+        "execution_semantic",
+        "openai_compatible",
+        "test-model",
+        "failed",
+        123,
+        0,
+        1,
+        "invalid_provider_response",
+    )

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ledgermind_local.inference.provider_telemetry import TELEMETRY_ENV
 from ledgermind_local.installer.lock import InstallerLock
 from ledgermind_local.installer.paths import InstallerPaths
 
@@ -72,7 +73,15 @@ class RuntimeSupervisor:
         )
         if self.embedding_command is not None:
             self.commands.setdefault("embedding", self.embedding_command)
-        self.processes = ProcessManager()
+        # Provider telemetry is part of the installed runtime's local audit
+        # trail.  The child environment is deliberately sanitized, so pass
+        # the content-free journal path explicitly instead of relying on an
+        # inherited shell variable.
+        self.processes = ProcessManager(
+            environment_overrides={
+                TELEMETRY_ENV: str(paths.logs_dir / "provider-telemetry.jsonl")
+            }
+        )
 
     @staticmethod
     def _live_pid(value: object) -> int | None:
@@ -333,7 +342,10 @@ class RuntimeSupervisor:
         if "local" not in self.commands:
             return
         local_command = self.commands["local"]
-        if not local_command or os.path.basename(str(local_command[0])) != "ledgermind-local":
+        if (
+            not local_command
+            or os.path.basename(str(local_command[0])) != "ledgermind-local"
+        ):
             time.sleep(0.05)
             if self.processes.running():
                 return
@@ -351,7 +363,10 @@ class RuntimeSupervisor:
                 break
             request = Request(
                 self.endpoint + "/ping",
-                headers={"authorization": f"Bearer {token}", "accept": "application/json"},
+                headers={
+                    "authorization": f"Bearer {token}",
+                    "accept": "application/json",
+                },
                 method="GET",
             )
             try:
@@ -391,9 +406,8 @@ class RuntimeSupervisor:
             self.leases.reap_expired()
             state = load_state(self.paths.runtime_state)
             recorded_processes = self._live_records(state.get("processes", {}))
-            started = (
-                not bool(state.get("running"))
-                or not self._all_commands_running(recorded_processes)
+            started = not bool(state.get("running")) or not self._all_commands_running(
+                recorded_processes
             )
             lease = self.leases.acquire(client=client, session_id=session_id)
             try:

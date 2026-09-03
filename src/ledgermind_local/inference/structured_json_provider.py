@@ -96,7 +96,9 @@ class CapabilityStore(Protocol):
     def get_capabilities(self, profile_id: str) -> ProviderCapabilities | None: ...
 
 
-def default_provider_factory(profile: InferenceProfile, secret: str) -> InferenceProvider:
+def default_provider_factory(
+    profile: InferenceProfile, secret: str
+) -> InferenceProvider:
     """Construct the default generative provider for a resolved profile."""
 
     if profile.provider_kind == "google_genai":
@@ -113,9 +115,7 @@ def default_provider_factory(profile: InferenceProfile, secret: str) -> Inferenc
             supports_seed=profile.supports_seed,
             extra_body=profile.extra_body,
             strict_transport=(
-                "nvidia_guided_json"
-                if profile.provider_kind == "nvidia_nim"
-                else None
+                "nvidia_guided_json" if profile.provider_kind == "nvidia_nim" else None
             ),
             profile_fingerprint=generation_profile_fingerprint(profile),
         )
@@ -125,9 +125,7 @@ def default_provider_factory(profile: InferenceProfile, secret: str) -> Inferenc
 class StructuredJsonResult(BaseModel):
     """Parsed JSON object plus selected transport mode and safe metadata."""
 
-    model_config = ConfigDict(
-        extra="forbid", frozen=True, populate_by_name=True
-    )
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     data: dict[str, object]
     raw_text: str = ""
@@ -178,7 +176,9 @@ class StructuredJsonResult(BaseModel):
 
     @property
     def provider_request_id(self) -> str | None:
-        value = self.metadata.get("provider_request_id", self.metadata.get("request_id"))
+        value = self.metadata.get(
+            "provider_request_id", self.metadata.get("request_id")
+        )
         return value if isinstance(value, str) and value else None
 
     @property
@@ -296,7 +296,10 @@ class StructuredJsonProvider:
             mode=mode,
             structured_output_mode=structured_output_mode,
         )
-        if structured_output_requirement is not None or requested_mode == STRICT_JSON_SCHEMA_MODE:
+        if (
+            structured_output_requirement is not None
+            or requested_mode == STRICT_JSON_SCHEMA_MODE
+        ):
             if requested_mode not in {None, "auto", STRICT_JSON_SCHEMA_MODE}:
                 raise StructuredJsonRequestError(
                     "strict structured output cannot be combined with a legacy mode"
@@ -371,11 +374,21 @@ class StructuredJsonProvider:
         fallback_metadata: dict[str, object] = {}
 
         internal_metadata = dict(telemetry_context or {})
-        task_id = internal_metadata.get("_ledgermind_task_id")
-        root_task_id = internal_metadata.get("_ledgermind_root_task_id")
-        attempt_index = internal_metadata.get("_ledgermind_attempt_index")
-        request_reason = internal_metadata.get("_ledgermind_request_reason", "primary")
-        attempt_kind = internal_metadata.get("_ledgermind_attempt_kind")
+        task_id = internal_metadata.get("_ledgermind_task_id") or internal_metadata.get(
+            "task_id"
+        )
+        root_task_id = internal_metadata.get(
+            "_ledgermind_root_task_id"
+        ) or internal_metadata.get("root_task_id")
+        attempt_index = internal_metadata.get(
+            "_ledgermind_attempt_index"
+        ) or internal_metadata.get("attempt_index")
+        request_reason = internal_metadata.get(
+            "_ledgermind_request_reason"
+        ) or internal_metadata.get("request_reason", "primary")
+        attempt_kind = internal_metadata.get(
+            "_ledgermind_attempt_kind"
+        ) or internal_metadata.get("attempt_kind")
 
         def execute_and_parse(
             current_request: ModelRequest,
@@ -595,7 +608,11 @@ class StructuredJsonProvider:
         mode: StructuredOutputMode | None,
         structured_output_mode: StructuredOutputMode | None,
     ) -> tuple[dict[str, object] | None, StructuredOutputMode | None]:
-        if mode is not None and structured_output_mode is not None and mode != structured_output_mode:
+        if (
+            mode is not None
+            and structured_output_mode is not None
+            and mode != structured_output_mode
+        ):
             raise StructuredJsonRequestError("conflicting structured output modes")
         selected_request_mode = mode or structured_output_mode
         contract = dict(output_contract) if output_contract is not None else None
@@ -794,9 +811,7 @@ class StructuredJsonProvider:
                 "provider response is not valid JSON"
             ) from exc
         if not isinstance(parsed, dict):
-            raise StructuredJsonResponseError(
-                "provider response must be a JSON object"
-            )
+            raise StructuredJsonResponseError("provider response must be a JSON object")
         metadata_value = dict(response.metadata)
         token_usage = metadata_value.get("usage")
         normalized_usage = normalize_usage(response)

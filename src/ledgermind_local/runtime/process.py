@@ -6,7 +6,7 @@ import os
 import signal
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
@@ -25,8 +25,11 @@ class ManagedProcess:
 
 
 class ProcessManager:
-    def __init__(self) -> None:
+    def __init__(
+        self, *, environment_overrides: Mapping[str, str] | None = None
+    ) -> None:
         self.processes: dict[str, ManagedProcess] = {}
+        self._environment_overrides = dict(environment_overrides or {})
 
     def start(self, commands: dict[str, Sequence[str]]) -> dict[str, ManagedProcess]:
         for name, command in commands.items():
@@ -39,7 +42,7 @@ class ProcessManager:
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
                 start_new_session=True,
-                env=_clean_environment(),
+                env=_clean_environment(self._environment_overrides),
             )
             self.processes[name] = ManagedProcess(
                 name, tuple(str(part) for part in command), process
@@ -116,7 +119,7 @@ class ProcessManager:
         return result
 
 
-def _clean_environment() -> dict[str, str]:
+def _clean_environment(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
     environment: dict[str, str] = {}
     for name in (
         "PATH",
@@ -133,6 +136,14 @@ def _clean_environment() -> dict[str, str]:
         value = os.environ.get(name)
         if value:
             environment[name] = value
+    if overrides:
+        environment.update(
+            {
+                str(name): str(value)
+                for name, value in overrides.items()
+                if str(name) and str(value)
+            }
+        )
     return environment
 
 

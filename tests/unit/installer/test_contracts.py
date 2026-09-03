@@ -380,6 +380,35 @@ def test_runtime_supports_multiple_leases_and_ttl_cleanup(
     assert supervisor.status()["running"] is False
 
 
+def test_runtime_enables_persistent_content_free_provider_telemetry(
+    tmp_path: Path,
+) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    report = tmp_path / "provider-telemetry-path.txt"
+    probe = (
+        "import os, pathlib; "
+        f"pathlib.Path({str(report)!r}).write_text("
+        "os.environ.get('LEDGERMIND_PROVIDER_TELEMETRY_PATH', ''), encoding='utf-8')"
+    )
+    supervisor = RuntimeSupervisor(
+        paths,
+        commands={"probe": (sys.executable, "-c", probe)},
+        idle_shutdown_seconds=0,
+    )
+
+    try:
+        supervisor.acquire(client="test", session_id="telemetry")
+        deadline = time.monotonic() + 2
+        while not report.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert report.read_text(encoding="utf-8") == str(
+            paths.logs_dir / "provider-telemetry.jsonl"
+        )
+    finally:
+        supervisor.stop(force=True)
+
+
 def test_runtime_restarts_missing_process_while_a_lease_is_active(
     tmp_path: Path,
 ) -> None:

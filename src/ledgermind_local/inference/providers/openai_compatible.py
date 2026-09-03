@@ -38,8 +38,7 @@ DEFAULT_TOOL_NAME = "submit_structured_result"
 OPENROUTER_SITE_URL = "https://ledgermind.org"
 OPENROUTER_APP_TITLE = "LedgerMind"
 _PROMPT_ONLY_SUFFIX = (
-    "\n\nReturn only one JSON object. Do not use Markdown. "
-    "Do not add explanations."
+    "\n\nReturn only one JSON object. Do not use Markdown. Do not add explanations."
 )
 
 
@@ -109,7 +108,9 @@ def _messages_payload(
     return messages
 
 
-def _base_payload(request: ModelRequest, *, prompt_only: bool = False) -> dict[str, object]:
+def _base_payload(
+    request: ModelRequest, *, prompt_only: bool = False
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "model": request.model,
         "messages": _messages_payload(request, prompt_only=prompt_only),
@@ -292,7 +293,7 @@ def _safe_metadata(
     )
     if request_id:
         metadata["request_id"] = request_id
-    for key in ("id", "created", "system_fingerprint"):
+    for key in ("id", "created", "system_fingerprint", "provider"):
         value = envelope.get(key)
         if isinstance(value, (str, int)) and not isinstance(value, bool):
             metadata[key] = value
@@ -300,7 +301,11 @@ def _safe_metadata(
     if isinstance(usage, dict):
         safe_usage: dict[str, object] = {}
         for key, value in usage.items():
-            if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool):
+            if (
+                isinstance(key, str)
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+            ):
                 safe_usage[key] = value
             elif (
                 key in {"reported_cost", "cost", "cost_usd"}
@@ -317,6 +322,19 @@ def _safe_metadata(
         if isinstance(finish_reason, str):
             metadata["finish_reason"] = finish_reason
     return metadata
+
+
+def _safe_response_provider(response: httpx.Response) -> str | None:
+    """Read only OpenRouter's non-secret provider label for diagnostics."""
+
+    try:
+        envelope = response.json()
+    except ValueError:
+        return None
+    if not isinstance(envelope, Mapping):
+        return None
+    value = envelope.get("provider")
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 class OpenAICompatibleProvider(InferenceProvider):
@@ -455,7 +473,9 @@ class OpenAICompatibleProvider(InferenceProvider):
             format_type = request.response_format.get("type")
             if format_type == "json_object":
                 updates["mode"] = "json_object"
-            elif format_type == "json_schema" and request.mode != STRICT_JSON_SCHEMA_MODE:
+            elif (
+                format_type == "json_schema" and request.mode != STRICT_JSON_SCHEMA_MODE
+            ):
                 updates["mode"] = "json_schema"
         if request.mode == "auto" and request.response_format is None:
             updates["mode"] = "json_object"
@@ -469,7 +489,10 @@ class OpenAICompatibleProvider(InferenceProvider):
     ) -> ModelResponse:
         _raise_if_cancelled(token)
         prepared = self._prepare_request(request)
-        if prepared.mode == STRICT_JSON_SCHEMA_MODE and self.strict_transport == "nvidia_guided_json":
+        if (
+            prepared.mode == STRICT_JSON_SCHEMA_MODE
+            and self.strict_transport == "nvidia_guided_json"
+        ):
             payload = build_payload_json_schema(prepared)
             payload.pop("response_format", None)
             payload["guided_json"] = _contract_schema(prepared)
@@ -494,6 +517,16 @@ class OpenAICompatibleProvider(InferenceProvider):
         profile_fingerprint = prepared.metadata.get(
             "_ledgermind_profile_fingerprint", self.profile_fingerprint
         )
+        provider_options = self.extra_body.get("provider")
+        configured_routes: tuple[str, ...] = ()
+        if isinstance(provider_options, Mapping):
+            route_order = provider_options.get("order")
+            if isinstance(route_order, (list, tuple)):
+                configured_routes = tuple(
+                    route.strip()
+                    for route in route_order
+                    if isinstance(route, str) and route.strip()
+                )
         attempts = 0
         for attempt in range(1, self.max_retries + 2):
             _raise_if_cancelled(token)
@@ -517,6 +550,7 @@ class OpenAICompatibleProvider(InferenceProvider):
                     status="timeout",
                     retry_index=attempt - 1,
                     metadata=prepared.metadata,
+                    configured_routes=configured_routes,
                 )
                 if attempt <= self.max_retries:
                     self._sleep_before_retry(attempt, token=token)
@@ -533,15 +567,18 @@ class OpenAICompatibleProvider(InferenceProvider):
                     status="transport_error",
                     retry_index=attempt - 1,
                     metadata=prepared.metadata,
+                    configured_routes=configured_routes,
                 )
                 if attempt <= self.max_retries:
                     self._sleep_before_retry(attempt, token=token)
                     continue
                 raise ProviderTransportError("provider transport failed") from exc
 
-            request_id = response.headers.get("x-request-id") or response.headers.get(
-                "request-id"
-            ) or f"local-{uuid.uuid4().hex}"
+            request_id = (
+                response.headers.get("x-request-id")
+                or response.headers.get("request-id")
+                or f"local-{uuid.uuid4().hex}"
+            )
             if response.status_code >= 400:
                 record_http_attempt(
                     kind="generation",
@@ -555,6 +592,7 @@ class OpenAICompatibleProvider(InferenceProvider):
                     http_status=response.status_code,
                     retry_index=attempt - 1,
                     metadata=prepared.metadata,
+                    configured_routes=configured_routes,
                 )
             if response.status_code in {401, 403}:
                 raise ProviderAuthenticationError("provider authentication failed")
@@ -584,6 +622,7 @@ class OpenAICompatibleProvider(InferenceProvider):
                     http_status=response.status_code,
                     retry_index=attempt - 1,
                     metadata=prepared.metadata,
+                    configured_routes=configured_routes,
                 )
                 raise ProviderResponseError("provider response exceeds size limit")
             try:
@@ -607,6 +646,8 @@ class OpenAICompatibleProvider(InferenceProvider):
                     http_status=response.status_code,
                     retry_index=attempt - 1,
                     metadata=prepared.metadata,
+                    configured_routes=configured_routes,
+                    served_by=_safe_response_provider(response),
                 )
                 raise
             normalized_usage = normalize_usage(result)
@@ -643,6 +684,8 @@ class OpenAICompatibleProvider(InferenceProvider):
                 usage_unknown=bool(normalized_usage.get("usage_unknown", True)),
                 retry_index=attempt - 1,
                 metadata=prepared.metadata,
+                configured_routes=configured_routes,
+                served_by=result.metadata.get("provider"),
             )
             return result
 

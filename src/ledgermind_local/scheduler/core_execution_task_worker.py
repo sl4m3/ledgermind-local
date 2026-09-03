@@ -27,6 +27,7 @@ from ledgermind_local.inference.core_task_executor import (
     ModelRequestSpec,
 )
 from ledgermind_local.inference.profile_slots import ProfileSlot
+from ledgermind_local.inference.profile_store import InferenceProfileStore
 from ledgermind_local.inference.profiles import StructuredOutputMode
 from ledgermind_local.inference.providers.base import (
     ChatMessage,
@@ -177,10 +178,14 @@ def classify_execution_error(exc: BaseException) -> ExecutionFailureClassificati
         return ExecutionFailureClassification("provider_error", False, 0)
 
     status_code = getattr(exc, "status_code", None)
-    if isinstance(status_code, int) and (status_code == 429 or 500 <= status_code <= 599):
+    if isinstance(status_code, int) and (
+        status_code == 429 or 500 <= status_code <= 599
+    ):
         return ExecutionFailureClassification("provider_unavailable", True)
     message = str(exc).lower()
-    if any(marker in message for marker in ("429", "temporar", "unavailable", "connection")):
+    if any(
+        marker in message for marker in ("429", "temporar", "unavailable", "connection")
+    ):
         return ExecutionFailureClassification("provider_unavailable", True)
     if "timeout" in message or "timed out" in message:
         return ExecutionFailureClassification("provider_timeout", True)
@@ -301,7 +306,9 @@ class CoreExecutionTaskWorker:
             return
         for task, result in zip(converted, results, strict=True):
             try:
-                self._deliver_result_with_structured_retry(task, result, memory_space_id)
+                self._deliver_result_with_structured_retry(
+                    task, result, memory_space_id
+                )
             except Exception as exc:  # noqa: BLE001 - isolate delivery failures
                 self._fail_task(task.model_dump(mode="json"), memory_space_id, exc)
 
@@ -318,6 +325,8 @@ class CoreExecutionTaskWorker:
         structured answer; one bounded fresh generation is safe recovery.
         Local never inspects the opaque operation or edits the answer.
         """
+
+        self._record_egress_audit(task, result, memory_space_id)
 
         # A provider can return a transiently malformed JSON/schema response
         # even when the transport succeeded.  Treat one such result as a
@@ -343,6 +352,7 @@ class CoreExecutionTaskWorker:
                 task,
                 force_provider_fallback=True,
             )
+            self._record_egress_audit(task, retry_result, memory_space_id)
             if getattr(retry_result, "status", None) == "completed":
                 self._deliver_result(task, retry_result, memory_space_id)
                 return
@@ -351,14 +361,54 @@ class CoreExecutionTaskWorker:
         try:
             self._deliver_result(task, result, memory_space_id)
         except DomainRejectedError as exc:
-            if task.task_kind not in {"generate_json", "object_resolution"} or exc.code == "invalid_execution_result":
+            if (
+                task.task_kind not in {"generate_json", "object_resolution"}
+                or exc.code == "invalid_execution_result"
+            ):
                 raise
             logger.warning(
                 "retrying structured generation after remote Core rejection",
                 extra={"worker": self._worker_id, "task_id": task.task_id},
             )
             retry_result = self._executor.execute(task)
+            self._record_egress_audit(task, retry_result, memory_space_id)
             self._deliver_result(task, retry_result, memory_space_id)
+
+    def _record_egress_audit(
+        self,
+        task: GenericExecutionTask,
+        result: object,
+        memory_space_id: str,
+    ) -> None:
+        """Persist one content-free executor attempt in the Local database."""
+
+        audit = getattr(result, "egress_audit", None)
+        if audit is None:
+            return
+        connection = self._connection_factory(self._database_path)
+        try:
+            migrations.apply_migrations(connection)
+            InferenceProfileStore(connection).record_egress_audit(
+                memory_space_id=memory_space_id,
+                profile_id=getattr(audit, "profile_id", None),
+                operation=task.operation or task.task_kind,
+                provider_kind=getattr(audit, "provider", None) or "unknown",
+                model=getattr(audit, "model", None) or "unknown",
+                status=getattr(audit, "status", None)
+                or getattr(result, "status", "unknown"),
+                request_bytes=int(getattr(audit, "input_bytes", 0)),
+                response_bytes=int(getattr(audit, "output_bytes", 0)),
+                attempts=1,
+                error_code=getattr(result, "error_code", None),
+            )
+            connection.commit()
+        except Exception:  # noqa: BLE001 - diagnostics must not block delivery
+            logger.warning(
+                "could not persist content-free egress audit",
+                extra={"worker": self._worker_id, "task_id": task.task_id},
+            )
+        finally:
+            connection.close()
 
     def _deliver_result(
         self,
@@ -448,7 +498,13 @@ def core_result_payload(result: object) -> dict[str, object]:
             # of Core's strict embedding-result contract.
             payload["embedding_result"] = {
                 key: embedding[key]
-                for key in ("vectors", "model", "model_version", "dimensions", "purpose")
+                for key in (
+                    "vectors",
+                    "model",
+                    "model_version",
+                    "dimensions",
+                    "purpose",
+                )
                 if key in embedding
             }
     return payload
@@ -559,7 +615,10 @@ def execution_task_from_wire(
             texts=tuple(str(text) for text in wire.embedding_request.get("texts", [])),
             purpose=validate_embedding_purpose(wire.embedding_request["purpose"]),
             subject_refs=(
-                tuple(str(subject_ref) for subject_ref in wire.embedding_request["subject_refs"])
+                tuple(
+                    str(subject_ref)
+                    for subject_ref in wire.embedding_request["subject_refs"]
+                )
                 if isinstance(wire.embedding_request.get("subject_refs"), list)
                 else None
             ),
@@ -570,24 +629,28 @@ def execution_task_from_wire(
             ),
             profile_fingerprint=(
                 str(value)
-                if (value := _request_or_operation_input(
-                    "profile_fingerprint", "embedding_profile_fingerprint"
-                )) is not None
+                if (
+                    value := _request_or_operation_input(
+                        "profile_fingerprint", "embedding_profile_fingerprint"
+                    )
+                )
+                is not None
                 else None
             ),
             config_fingerprint=(
                 str(value)
-                if (value := _request_or_operation_input(
-                    "config_fingerprint", "embedding_config_fingerprint"
-                )) is not None
+                if (
+                    value := _request_or_operation_input(
+                        "config_fingerprint", "embedding_config_fingerprint"
+                    )
+                )
+                is not None
                 else None
             ),
             privacy_class=str(
                 _request_or_operation_input("privacy_class") or "default"
             ),
-            cache_namespace=str(
-                _request_or_operation_input("cache_namespace") or ""
-            ),
+            cache_namespace=str(_request_or_operation_input("cache_namespace") or ""),
             cache_keys=(
                 tuple(str(key) for key in wire.embedding_request["cache_keys"])
                 if isinstance(wire.embedding_request.get("cache_keys"), list)

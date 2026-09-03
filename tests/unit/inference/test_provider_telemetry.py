@@ -58,3 +58,23 @@ def test_probe_without_usage_is_explicitly_unknown(tmp_path, monkeypatch) -> Non
     assert event["input_tokens"] is None
     assert event["output_tokens"] is None
     assert event["total_tokens"] is None
+
+
+def test_http_attempt_records_safe_provider_routing(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "provider-telemetry.jsonl"
+    monkeypatch.setenv("LEDGERMIND_PROVIDER_TELEMETRY_PATH", str(target))
+
+    record_http_attempt(
+        kind="generation",
+        operation="execution_semantic",
+        transport="openai_compatible",
+        model="test-model",
+        duration_ms=12.5,
+        status="invalid_response",
+        configured_routes=("baidu/fp8", "deepinfra/fp8"),
+        served_by="Baidu",
+    )
+
+    event = json.loads(target.read_text(encoding="utf-8"))
+    assert event["configured_routes"] == ["baidu/fp8", "deepinfra/fp8"]
+    assert event["served_by"] == "Baidu"

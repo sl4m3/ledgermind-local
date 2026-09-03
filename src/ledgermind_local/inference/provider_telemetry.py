@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,11 +41,7 @@ def operation_context(operation: object, **metadata: object) -> Iterator[None]:
 
     normalized_operation = operation_label(operation) if operation else None
     token = _CURRENT_OPERATION.set(normalized_operation)
-    context = {
-        str(key): value
-        for key, value in metadata.items()
-        if value is not None
-    }
+    context = {str(key): value for key, value in metadata.items() if value is not None}
     context_token = _CURRENT_CONTEXT.set(context)
     try:
         yield
@@ -93,7 +90,10 @@ def _append(
         for key, value in payload.items()
         if value is not None or key in keep_null
     }
-    encoded = json.dumps(safe, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    safe.setdefault("recorded_at", datetime.now(timezone.utc).isoformat())
+    encoded = json.dumps(
+        safe, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     with _LOCK:
         with target.open("a", encoding="utf-8") as handle:
             handle.write(encoded + "\n")
@@ -206,6 +206,8 @@ def record_http_attempt(
     structured_output_mode: object = None,
     fallback_from: object = None,
     fallback_to: object = None,
+    configured_routes: object = None,
+    served_by: object = None,
 ) -> None:
     """Record one actual HTTP attempt using only safe scalar metadata."""
 
@@ -217,7 +219,11 @@ def record_http_attempt(
         return _text(explicit) or _text(context.get(name))
 
     def context_int(name: str, explicit: int | None) -> int | None:
-        return _non_negative_int(explicit) if explicit is not None else _non_negative_int(context.get(name))
+        return (
+            _non_negative_int(explicit)
+            if explicit is not None
+            else _non_negative_int(context.get(name))
+        )
 
     input_count = _non_negative_int(input_tokens)
     output_count = _non_negative_int(output_tokens)
@@ -225,7 +231,9 @@ def record_http_attempt(
     if total_count is None and input_count is not None and output_count is not None:
         total_count = input_count + output_count
     if usage_unknown is None:
-        usage_unknown = input_count is None and output_count is None and total_count is None
+        usage_unknown = (
+            input_count is None and output_count is None and total_count is None
+        )
     safe_item_counts: dict[str, int] | None = None
     if isinstance(operation_item_counts, Mapping):
         safe_item_counts = {
@@ -242,7 +250,11 @@ def record_http_attempt(
     if retry_index > 0:
         reason = "transport_retry"
     elif not reason:
-        reason = "provider_probe" if operation_name in {"capability_probe", "provider_probe"} else "primary"
+        reason = (
+            "provider_probe"
+            if operation_name in {"capability_probe", "provider_probe"}
+            else "primary"
+        )
     payload: dict[str, Any] = {
         "event": "http",
         "kind": _text(kind, "unknown"),
@@ -254,9 +266,16 @@ def record_http_attempt(
         "request_reason": reason,
         "structured_output_mode": context_text(
             "structured_output_mode", structured_output_mode
-        ) or "unknown",
+        )
+        or "unknown",
         "fallback_from": context_text("fallback_from", fallback_from) or None,
         "fallback_to": context_text("fallback_to", fallback_to) or None,
+        "configured_routes": (
+            [str(route) for route in configured_routes if isinstance(route, str)]
+            if isinstance(configured_routes, (list, tuple))
+            else None
+        ),
+        "served_by": _text(served_by) or None,
         "provider_profile_fingerprint": _text(provider_profile_fingerprint) or None,
         "transport": _text(transport, "unknown"),
         "model": _text(model, "unknown"),
@@ -289,6 +308,8 @@ def record_http_attempt(
             "operation_item_counts",
             "fallback_from",
             "fallback_to",
+            "configured_routes",
+            "served_by",
         },
     )
 
