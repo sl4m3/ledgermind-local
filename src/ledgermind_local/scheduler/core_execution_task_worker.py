@@ -57,6 +57,7 @@ _SAFE_ERROR_CODES = frozenset(
         "invalid_model_output",
         "invalid_provider_response",
         "invalid_json_response",
+        "length_truncation",
         "schema_shape_failure",
         "semantic_validation_failure",
         "language_fidelity_failure",
@@ -341,6 +342,7 @@ class CoreExecutionTaskWorker:
                 "invalid_provider_response",
                 "invalid_json_response",
                 "invalid_model_output",
+                "length_truncation",
                 "schema_shape_failure",
             }
         ):
@@ -370,7 +372,10 @@ class CoreExecutionTaskWorker:
                 "retrying structured generation after remote Core rejection",
                 extra={"worker": self._worker_id, "task_id": task.task_id},
             )
-            retry_result = self._executor.execute(task)
+            retry_result = self._executor.execute(
+                task,
+                force_provider_fallback=True,
+            )
             self._record_egress_audit(task, retry_result, memory_space_id)
             self._deliver_result(task, retry_result, memory_space_id)
 

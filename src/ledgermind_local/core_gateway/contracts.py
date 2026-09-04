@@ -271,6 +271,7 @@ class CoreExecutionTask:
             }:
                 raise ValueError("model_request mode is invalid")
             if self.operation in {
+                "round_semantic",
                 "user_semantic",
                 "execution_semantic",
                 "object_resolution",

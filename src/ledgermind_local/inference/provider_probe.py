@@ -36,6 +36,7 @@ _SAFE_PROBE_ERROR_CODES = frozenset(
         "authentication_error",
         "configuration_error",
         "invalid_provider_response",
+        "length_truncation",
         "provider_error",
         "provider_transport_error",
         "secret_missing",

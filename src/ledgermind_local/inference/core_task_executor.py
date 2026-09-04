@@ -693,6 +693,8 @@ def _error_category(error_code: str) -> str:
         return "transport_failure"
     if error_code in {"invalid_json_response", "invalid_provider_response"}:
         return "json_parse_failure"
+    if error_code == "length_truncation":
+        return "json_parse_failure"
     if error_code in {"invalid_model_output", "schema_shape_failure"}:
         return "schema_shape_failure"
     if error_code in {

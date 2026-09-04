@@ -869,21 +869,60 @@ def _advisory_schema_issues(
     *,
     path: str = "$",
     limit: int = 16,
+    root_schema: object | None = None,
 ) -> list[dict[str, object]]:
-    """Return bounded diagnostics without making schema mismatch terminal.
+    """Return bounded structural JSON Schema diagnostics.
 
-    Core owns the authoritative schema/repair/semantic decision.  Local only
-    records a small, provider-neutral advisory report so Lab can distinguish
-    native schema compliance from a parseable response that Core can repair.
+    Core owns semantic validation and remains the final authority. Local must
+    nevertheless verify the portable structural keywords it sent to a strict
+    provider: some OpenAI-compatible routes return a parseable HTTP 200 while
+    violating array bounds or a nested ``$ref``. The report stays advisory for
+    non-strict modes and becomes fail-closed through ``native_schema_valid``
+    for an explicitly strict request.
     """
 
     if not isinstance(schema, Mapping):
         return []
+    if root_schema is None:
+        root_schema = schema
     issues: list[dict[str, object]] = []
 
     def add(issue_path: str, code: str, message: str) -> None:
         if len(issues) < limit:
             issues.append({"path": issue_path, "code": code, "message": message})
+
+    reference = schema.get("$ref")
+    if isinstance(reference, str) and reference.startswith("#/"):
+        resolved: object = root_schema
+        for raw_part in reference[2:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            if not isinstance(resolved, Mapping) or part not in resolved:
+                add(path, "$ref", "local schema reference cannot be resolved")
+                return issues
+            resolved = resolved[part]
+        return _advisory_schema_issues(
+            value,
+            resolved,
+            path=path,
+            limit=limit,
+            root_schema=root_schema,
+        )
+
+    alternatives = schema.get("oneOf")
+    if isinstance(alternatives, list):
+        matches = 0
+        for alternative in alternatives:
+            if not _advisory_schema_issues(
+                value,
+                alternative,
+                path=path,
+                limit=1,
+                root_schema=root_schema,
+            ):
+                matches += 1
+        if matches != 1:
+            add(path, "oneOf", "value must match exactly one schema alternative")
+        return issues
 
     schema_type = schema.get("type")
     if schema_type == "object" and not isinstance(value, Mapping):
@@ -898,6 +937,11 @@ def _advisory_schema_issues(
     if schema_type == "boolean" and not isinstance(value, bool):
         add(path, "type", "expected boolean")
         return issues
+    if schema_type == "integer" and (
+        not isinstance(value, int) or isinstance(value, bool)
+    ):
+        add(path, "type", "expected integer")
+        return issues
     if "const" in schema and value != schema.get("const"):
         add(path, "const", "value does not match const")
     enum = schema.get("enum")
@@ -911,6 +955,14 @@ def _advisory_schema_issues(
                     add(f"{path}.{key}", "required", "required field is missing")
         properties = schema.get("properties")
         if isinstance(properties, Mapping):
+            if schema.get("additionalProperties") is False:
+                for key in value:
+                    if key not in properties:
+                        add(
+                            f"{path}.{key}",
+                            "additionalProperties",
+                            "unknown field is not allowed",
+                        )
             for key, child_schema in properties.items():
                 if isinstance(key, str) and key in value:
                     issues.extend(
@@ -919,11 +971,18 @@ def _advisory_schema_issues(
                             child_schema,
                             path=f"{path}.{key}",
                             limit=max(0, limit - len(issues)),
+                            root_schema=root_schema,
                         )
                     )
                     if len(issues) >= limit:
                         break
     elif isinstance(value, list):
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            add(path, "minItems", "array has fewer items than allowed")
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            add(path, "maxItems", "array has more items than allowed")
         item_schema = schema.get("items")
         if item_schema is not None:
             for index, item in enumerate(value):
@@ -933,10 +992,18 @@ def _advisory_schema_issues(
                         item_schema,
                         path=f"{path}[{index}]",
                         limit=max(0, limit - len(issues)),
+                        root_schema=root_schema,
                     )
                 )
                 if len(issues) >= limit:
                     break
+    elif isinstance(value, str):
+        min_length = schema.get("minLength")
+        if isinstance(min_length, int) and len(value) < min_length:
+            add(path, "minLength", "string is shorter than allowed")
+        max_length = schema.get("maxLength")
+        if isinstance(max_length, int) and len(value) > max_length:
+            add(path, "maxLength", "string is longer than allowed")
     return issues[:limit]
 
 

@@ -431,12 +431,14 @@ def write_local_profiles(
             repository.ensure(memory_space_id, source)
         max_retries = config.advanced.retry_attempts
         max_input = config.advanced.generation_max_input or 12_000
-        # Core's largest built-in semantic contract is the 2,048-token
-        # execution pass. The installer default must be able to execute every
-        # built-in contract without requiring an undocumented override.
-        max_output = config.advanced.generation_max_output or 2_048
         profile_ids: list[str] = []
         for profile in build_generation_profiles(config.generation):
+            # Each built-in slot declares the largest request Core may send to
+            # it.  Keep an explicit user ceiling when it is larger, but never
+            # materialize a profile that rejects a built-in contract locally.
+            required_output = int(profile.get("max_output_tokens", 2_048))
+            configured_output = config.advanced.generation_max_output or 0
+            max_output = max(required_output, configured_output)
             materialized = InferenceProfile(
                 profile_id=str(profile["profile_id"]),
                 provider_kind=cast(ProviderKind, profile["provider_kind"]),

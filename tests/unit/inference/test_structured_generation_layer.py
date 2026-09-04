@@ -54,6 +54,7 @@ from ledgermind_local.inference.structured_json_provider import (
     StructuredJsonProvider,
     StructuredJsonResponseError,
     StructuredJsonSchemaError,
+    _advisory_schema_issues,
 )
 from ledgermind_local.inference.token_budget import InputBudgetExceededError
 from ledgermind_local.persistence import rounds_migrations as migrations
@@ -587,6 +588,90 @@ def test_strict_schema_mismatch_fails_before_core_delivery(tmp_path) -> None:
         assert len(fake.requests) == 1
     finally:
         connection.close()
+
+
+def test_local_schema_validation_checks_nested_bounds_refs_and_one_of() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "$defs": {
+            "payload": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "refs": {
+                        "type": "array",
+                        "minItems": 0,
+                        "maxItems": 0,
+                        "items": {"type": "string", "enum": ["e1"]},
+                    }
+                },
+                "required": ["refs"],
+            }
+        },
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "state": {"$ref": "#/$defs/payload"}
+                            },
+                            "required": ["state"],
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "procedure": {"$ref": "#/$defs/payload"}
+                            },
+                            "required": ["procedure"],
+                        },
+                    ]
+                },
+            }
+        },
+        "required": ["claims"],
+    }
+
+    issues = _advisory_schema_issues(
+        {"claims": [{"state": {"refs": ["e1"]}}]},
+        schema,
+    )
+
+    assert issues
+    assert issues[0]["code"] == "oneOf"
+    assert _advisory_schema_issues(
+        {"claims": [{"state": {"refs": []}}]}, schema
+    ) == []
+
+
+def test_local_schema_validation_rejects_unknown_nested_fields() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "item": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"name": {"type": "string", "maxLength": 4}},
+                "required": ["name"],
+            }
+        },
+        "required": ["item"],
+    }
+
+    issues = _advisory_schema_issues(
+        {"item": {"name": "valid", "extra": True}}, schema
+    )
+
+    assert {issue["code"] for issue in issues} == {
+        "additionalProperties",
+        "maxLength",
+    }
 
 
 def test_forced_strict_retry_pins_next_configured_provider_route(tmp_path) -> None:

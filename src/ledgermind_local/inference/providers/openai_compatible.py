@@ -26,6 +26,7 @@ from .base import (
     ProviderAuthenticationError,
     ProviderCancelledError,
     ProviderConfigurationError,
+    ProviderLengthTruncationError,
     ProviderResponseError,
     ProviderTimeoutError,
     ProviderTransportError,
@@ -198,6 +199,15 @@ def build_payload(request: ModelRequest) -> dict[str, object]:
     # ``auto`` is useful when a request is constructed directly.  Runtime
     # selection normally resolves it before a provider is called.
     return build_payload_json_object(request)
+
+
+def _choice_finish_reason(response: Mapping[str, object]) -> str | None:
+    """Read the first choice's finish reason without touching payload data."""
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        reason = choices[0].get("finish_reason")
+        return reason if isinstance(reason, str) else None
+    return None
 
 
 def _message_from_response(response: Mapping[str, object]) -> Mapping[str, object]:
@@ -729,7 +739,14 @@ class OpenAICompatibleProvider(InferenceProvider):
             )
         else:
             content = parse_content_response(envelope)
-        decoded = decode_json_content(content)
+        try:
+            decoded = decode_json_content(content)
+        except ProviderResponseError as exc:
+            if _choice_finish_reason(envelope) == "length":
+                raise ProviderLengthTruncationError(
+                    "provider output truncated at token limit"
+                ) from exc
+            raise
         if not isinstance(decoded, (dict, list)):
             raise ProviderResponseError(
                 "provider JSON content must be an object or array"

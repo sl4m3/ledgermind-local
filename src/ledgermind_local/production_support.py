@@ -180,7 +180,7 @@ def seed_local(
 ) -> None:
     """Create the migration-owned seed state and bind all inference slots."""
 
-    generation = _generation_for_task(lab_config, "user_semantic")
+    generation = _generation_for_task(lab_config, "round_semantic")
     object_resolution_generation = _generation_for_task(
         lab_config, "object_resolution"
     )

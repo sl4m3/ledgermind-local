@@ -9,6 +9,7 @@ from ledgermind_local.inference.providers.base import (
     ChatMessage,
     ModelRequest,
     ProviderAuthenticationError,
+    ProviderLengthTruncationError,
     ProviderResponseError,
     ProviderTimeoutError,
     TransientProviderError,
@@ -240,3 +241,62 @@ def test_nvidia_strict_adapter_uses_guided_json_without_legacy_response_format()
     assert seen["guided_json"] == schema
     assert "response_format" not in seen
     assert json.loads(response.content) == {"ok": True}
+
+
+def test_openai_compatible_provider_reports_length_truncation() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "test-model",
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": '{"ok": tru'},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 100},
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        base_url="https://provider.example/v1",
+        api_key="secret",
+        max_retries=0,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ProviderLengthTruncationError) as error:
+        provider.complete_json(_request())
+    provider.close()
+
+    assert error.value.code == "length_truncation"
+
+
+def test_openai_compatible_provider_keeps_generic_code_without_length_reason() -> (
+    None
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "test-model",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": '{"ok": tru'},
+                    }
+                ],
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        base_url="https://provider.example/v1",
+        api_key="secret",
+        max_retries=0,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ProviderResponseError) as error:
+        provider.complete_json(_request())
+    provider.close()
+
+    assert error.value.code == "invalid_provider_response"

@@ -254,6 +254,10 @@ class ProviderResponseError(ProviderError):
     code = "invalid_provider_response"
 
 
+class ProviderLengthTruncationError(ProviderResponseError):
+    code = "length_truncation"
+
+
 class InferenceProvider(Protocol):
     """Structural interface implemented by concrete model providers."""
 
@@ -310,6 +314,7 @@ __all__ = [
     "ProviderCancelledError",
     "ProviderConfigurationError",
     "ProviderError",
+    "ProviderLengthTruncationError",
     "ProviderResponseError",
     "ProviderTimeoutError",
     "ProviderTransportError",
