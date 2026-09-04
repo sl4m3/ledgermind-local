@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.0.5 - 2026-09-04
+
+- Raised the operational round-semantic output budget from 3072 to 6144 tokens
+  so rich rounds are no longer cut off mid-answer; token-limit truncation is
+  reported under its own `length_truncation` code instead of a generic provider
+  error, and the failing class is covered by contract and provider tests.
+- Covered silent provider-response loss in the OpenAI-compatible path: missing
+  choices, non-JSON bodies, and truncated bodies are distinguished in
+  telemetry and mapped into the retryable/permanent failure classes.
+- Shipped the Cursor lifecycle wiring alongside the existing agent adapters
+  (hooks, memory space, profile bindings are verified on connect).
+
 ## 4.0.4 - 2026-09-02
 
 - Made one accepted Object Resolution call final and normalized overlapping
