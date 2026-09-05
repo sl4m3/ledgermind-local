@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.0.7 - 2026-09-04
+
+- Updated the bundled Core contract for explicit Round Semantic extraction or
+  abstention outcomes, avoiding unnecessary provider retries for deliberate
+  empty results.
+- Added compatibility with the shared Object Resolution candidate pool while
+  preserving existing configurations, hooks, provider profiles, and memory.
+- Kept the public self-hosted package SQLite-only; cloud PostgreSQL components
+  are not distributed.
+
 ## 4.0.6 - 2026-09-04
 
 - Shipped the single-pass Round Semantic pipeline while preserving distinct
