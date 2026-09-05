@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.0.6 - 2026-09-04
+
+- Shipped the single-pass Round Semantic pipeline while preserving distinct
+  user and execution provenance throughout staging and durable knowledge.
+- Updated SQLite Core to the current schema revision with separately persisted
+  technical anchors and symmetric Object Resolution candidate embeddings.
+  Existing knowledge and integration configuration are preserved during an
+  in-place upgrade.
+- Removed legacy object aliases from operational identity matching and fixed
+  stale candidate-passage handling before Object Resolution.
+- Kept the public self-hosted distribution SQLite-only. LedgerMind Cloud and
+  its PostgreSQL runtime are not included in this package.
+
 ## 4.0.5 - 2026-09-04
 
 - Raised the operational round-semantic output budget from 3072 to 6144 tokens
