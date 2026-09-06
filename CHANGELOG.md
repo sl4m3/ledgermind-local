@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.0.8 - 2026-09-06
+
+- Replaced parallel user and execution claim sections with one coherent
+  completed-round semantic result while preserving user-only, execution-only,
+  and mixed provenance for every claim.
+- Raised the generation input ceiling to 64,000 tokens and retained complete
+  evidence records when bounding large rounds.
+- Added automatic, scoped recovery for safe pre-materialization failures after
+  the exact provider profile has passed strict-JSON capability verification.
+- Preserved verified provider capabilities across time; profile fingerprint
+  changes and explicit failed probes still invalidate them.
+- Replaced generic Core rejection diagnostics with bounded, content-free reason
+  codes for semantic contracts, references, provenance, and result validation.
+- Made runtime activity diagnostics non-blocking while Core is busy, retained a
+  stale last-known backlog for observability, and kept idle shutdown fail-closed.
+- Cleared the reusable bundle extraction directory before every signed update,
+  preventing removed Python files from an older release from shadowing the new
+  runtime.
+- Kept the public self-hosted distribution SQLite-only. LedgerMind Cloud and
+  PostgreSQL components are not included.
+
 ## 4.0.7 - 2026-09-04
 
 - Updated the bundled Core contract for explicit Round Semantic extraction or

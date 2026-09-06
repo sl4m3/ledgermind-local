@@ -500,6 +500,29 @@ class ProcessCoreGateway(CoreGateway):
                 "Core object-facet statistics are malformed"
             ) from exc
 
+    def try_get_object_facet_statistics(
+        self,
+        request_id: str,
+        *,
+        lock_timeout_seconds: float = 0.05,
+        operation_timeout_seconds: float = 1.5,
+    ) -> ObjectFacetStatistics:
+        """Read content-free activity without waiting behind normal Core work."""
+
+        result = self._supervisor.try_request(
+            "get_object_facet_statistics",
+            {},
+            request_id=request_id,
+            lock_timeout_seconds=lock_timeout_seconds,
+            operation_timeout_seconds=operation_timeout_seconds,
+        )
+        try:
+            return ObjectFacetStatistics.from_payload(result)
+        except (TypeError, ValueError) as exc:
+            raise TransientCoreError(
+                "Core object-facet statistics are malformed"
+            ) from exc
+
     def get_object_facet_snapshot(
         self,
         memory_space_id: str,

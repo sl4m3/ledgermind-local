@@ -8,6 +8,7 @@ from ledgermind_local.scheduler import core_execution_task_worker as worker_modu
 from ledgermind_local.scheduler.core_execution_task_worker import (
     CoreExecutionTaskWorker,
     _execution_result_is_retryable,
+    classify_execution_error,
 )
 
 
@@ -80,6 +81,64 @@ def test_schema_failure_result_is_not_retryable() -> None:
     result = SimpleNamespace(status="failed", error_code="schema_shape_failure")
 
     assert _execution_result_is_retryable(result) is False
+
+
+def test_core_rejection_preserves_public_domain_reason() -> None:
+    classification = classify_execution_error(
+        DomainRejectedError("UNKNOWN_OBJECT_CANDIDATE", "candidate m7 was not offered")
+    )
+
+    assert classification.error_code == "core_rejected_unknown_object_candidate"
+    assert classification.retryable is False
+
+
+def test_invalid_request_records_safe_round_semantic_reason() -> None:
+    classification = classify_execution_error(
+        DomainRejectedError(
+            "INVALID_REQUEST",
+            "round_semantic_user_provenance_invalid: claim c4 contains an unknown ref",
+        )
+    )
+
+    assert (
+        classification.error_code
+        == "core_rejected_round_semantic_user_provenance_invalid"
+    )
+    assert "c4" not in classification.error_code
+
+
+def test_invalid_request_distinguishes_round_semantic_validation_failures() -> None:
+    grounding = classify_execution_error(
+        DomainRejectedError(
+            "INVALID_REQUEST",
+            "invalid stored record: object_missing_grounding_refs: object o2 is ungrounded",
+        )
+    )
+    unknown_object = classify_execution_error(
+        DomainRejectedError(
+            "INVALID_REQUEST",
+            "invalid stored record: round claim references unknown object o9",
+        )
+    )
+
+    assert (
+        grounding.error_code
+        == "core_rejected_round_semantic_object_grounding_missing"
+    )
+    assert (
+        unknown_object.error_code
+        == "core_rejected_round_semantic_claim_object_unknown"
+    )
+    assert "o2" not in grounding.error_code
+    assert "o9" not in unknown_object.error_code
+
+
+def test_unknown_invalid_request_does_not_persist_remote_detail() -> None:
+    classification = classify_execution_error(
+        DomainRejectedError("INVALID_REQUEST", "unexpected private payload value")
+    )
+
+    assert classification.error_code == "core_rejected_invalid_request"
 
 
 def test_schema_failure_gets_one_retry_on_configured_provider_fallback(

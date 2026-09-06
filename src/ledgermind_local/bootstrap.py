@@ -19,6 +19,7 @@ from ledgermind_local.core_gateway import (
     CoreGateway,
     ProcessCoreGateway,
     RunControlMaintenanceCommand,
+    TransientCoreError,
 )
 from ledgermind_local.core_gateway.compatibility import (
     compatibility_reason,
@@ -28,7 +29,13 @@ from ledgermind_local.core_gateway.security_policy import (
     build_core_isolation_requirements,
 )
 from ledgermind_local.core_gateway.signing import verify_core_binary
-from ledgermind_local.core_gateway.supervisor import CoreSupervisor, CoreSupervisorError
+from ledgermind_local.core_gateway.supervisor import (
+    CoreSupervisor,
+    CoreSupervisorBusy,
+    CoreSupervisorCrashed,
+    CoreSupervisorError,
+    CoreSupervisorTimeout,
+)
 from ledgermind_local.inference.core_task_executor import CoreTaskExecutor
 from ledgermind_local.inference.embedding_provider import (
     EmbeddingProvider,
@@ -40,8 +47,12 @@ from ledgermind_local.inference.profile_slots import (
     DatabaseBackedProfileResolver,
     ProfileSlot,
 )
-from ledgermind_local.inference.profile_store import DatabaseBackedCapabilityStore
+from ledgermind_local.inference.profile_store import (
+    DatabaseBackedCapabilityStore,
+    InferenceProfileStore,
+)
 from ledgermind_local.inference.secrets import SecretStore
+from ledgermind_local.inference.strict import STRICT_JSON_SCHEMA_MODE
 from ledgermind_local.inference.structured_json_provider import StructuredJsonProvider
 from ledgermind_local.maintenance.coordinated_restore import (
     CoordinatedRestoreError,
@@ -258,6 +269,7 @@ class LocalRuntime:
         self._control_maintenance: dict[str, object] | None = None
         self._object_facet_statistics: dict[str, object] | None = None
         self._object_facet_bootstrap_pending = False
+        self._last_core_activity_snapshot: dict[str, object] | None = None
 
     @property
     def started(self) -> bool:
@@ -447,6 +459,8 @@ class LocalRuntime:
         self._starting = True
         try:
             self._refresh_object_facet_health()
+            if not self._stop_requested:
+                self._recover_verified_provider_capability_failures()
             if not self._stop_requested:
                 self._start_workers()
             self._initialization_complete = not self._stop_requested
@@ -915,6 +929,8 @@ class LocalRuntime:
         handoff completes. Both must be empty before the runtime is idle.
         """
 
+        local_leased = 0
+        local_pending = 0
         try:
             connection = self.connection_factory(self.database_path)
             try:
@@ -932,7 +948,13 @@ class LocalRuntime:
             local_pending = max(int(row[1]), 0) if row is not None else 0
 
             gateway = self.core_gateway
-            get_statistics = getattr(gateway, "get_object_facet_statistics", None)
+            get_statistics = getattr(
+                gateway, "try_get_object_facet_statistics", None
+            )
+            if not callable(get_statistics):
+                # Compatibility for alternate/test gateways. The production
+                # process gateway always exposes the bounded diagnostic path.
+                get_statistics = getattr(gateway, "get_object_facet_statistics", None)
             if not callable(get_statistics):
                 raise TypeError("Core activity statistics are unavailable")
             statistics = get_statistics(f"local-activity:{os.getpid()}:{uuid.uuid4()}")
@@ -947,23 +969,63 @@ class LocalRuntime:
                     raise TypeError(f"Core activity {name} must be an integer")
                 core_backlog[name] = max(value, 0)
         except Exception as exc:  # noqa: BLE001 - shutdown must fail closed
+            if isinstance(exc, CoreSupervisorBusy):
+                error_code = "core_activity_busy"
+            elif isinstance(exc, CoreSupervisorTimeout):
+                error_code = "core_activity_timeout"
+            elif isinstance(
+                exc,
+                (CoreSupervisorCrashed, CoreSupervisorError, ConnectionError),
+            ):
+                error_code = "core_activity_unreachable"
+            elif isinstance(exc, (TransientCoreError, TypeError, ValueError)):
+                error_code = "activity_response_invalid"
+            else:
+                error_code = _safe_error_code(exc)
+
+            cached = self._last_core_activity_snapshot or {}
+            cached_core_value = cached.get("core", {})
+            cached_core = (
+                dict(cached_core_value)
+                if isinstance(cached_core_value, Mapping)
+                else {}
+            )
             return {
                 "schema_version": 1,
                 "known": False,
+                "stale": True,
                 "quiescent": False,
-                "leased_tasks": 0,
-                "pending_writes": 0,
-                "error_code": _safe_error_code(exc),
+                "leased_tasks": local_leased,
+                "pending_writes": local_pending
+                + sum(
+                    value
+                    for value in cached_core.values()
+                    if isinstance(value, int) and not isinstance(value, bool)
+                ),
+                "error_code": error_code,
+                "observed_at": cached.get("observed_at"),
+                "local": {
+                    "delivering_commands": local_leased,
+                    "pending_commands": local_pending,
+                },
+                "core": cached_core,
             }
 
+        observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        self._last_core_activity_snapshot = {
+            "core": dict(core_backlog),
+            "observed_at": observed_at,
+        }
         leased_tasks = local_leased
         pending_writes = local_pending + sum(core_backlog.values())
         return {
             "schema_version": 1,
             "known": True,
+            "stale": False,
             "quiescent": leased_tasks == 0 and pending_writes == 0,
             "leased_tasks": leased_tasks,
             "pending_writes": pending_writes,
+            "observed_at": observed_at,
             "local": {
                 "delivering_commands": local_leased,
                 "pending_commands": local_pending,
@@ -1418,7 +1480,13 @@ class LocalRuntime:
             },
         }
 
-    def retry_failed_user_semantic(self, *, limit: int = 100) -> dict[str, object]:
+    def retry_failed_user_semantic(
+        self,
+        *,
+        limit: int = 100,
+        error_code: str | None = None,
+        memory_space_id: str | None = None,
+    ) -> dict[str, object]:
         """Explicitly requeue size rejects and pre-materialization failures."""
 
         gateway = self.core_gateway
@@ -1433,9 +1501,17 @@ class LocalRuntime:
                 WHERE status = 'rejected'
                   AND LOWER(COALESCE(last_error_detail, ''))
                       LIKE '%normalized%budget%'
+                  AND (? IS NULL OR last_error_code = ?)
+                  AND (? IS NULL OR memory_space_id = ?)
                 ORDER BY created_at, command_id LIMIT ?
                 """,
-                (limit,),
+                (
+                    error_code,
+                    error_code,
+                    memory_space_id,
+                    memory_space_id,
+                    limit,
+                ),
             ).fetchall()
             command_ids = [str(row[0]) for row in rows]
             for command_id in command_ids:
@@ -1467,13 +1543,67 @@ class LocalRuntime:
                 embedding_profiles=self._embedding_profiles_by_memory_space(),
                 retry_failed_user_semantic=True,
                 retry_limit=limit,
+                retry_error_code=error_code,
+                retry_memory_space_id=memory_space_id,
             )
         )
         return {
             "status": result.status,
+            "error_code": error_code,
+            "memory_space_id": memory_space_id,
             "requeued_normalization_commands": len(command_ids),
             "retried_failed_user_semantic": result.retried_failed_user_semantic,
         }
+
+    def _recover_verified_provider_capability_failures(self) -> None:
+        """Requeue safe pre-materialization failures for verified profiles."""
+
+        gateway = self.core_gateway
+        if gateway is None or not self._core_ready:
+            return
+        connection = self.connection_factory(self.database_path)
+        try:
+            store = InferenceProfileStore(connection)
+            memory_space_ids = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT memory_space_id FROM memory_spaces ORDER BY memory_space_id"
+                ).fetchall()
+            ]
+            for memory_space_id in memory_space_ids:
+                try:
+                    profile_id = store.get_slot(memory_space_id, "operational")
+                    profile = store.get(profile_id) if profile_id is not None else None
+                    capabilities = (
+                        store.get_capabilities_for_profile(profile, fresh_only=True)
+                        if profile is not None and profile.enabled
+                        else None
+                    )
+                    if capabilities is None or not capabilities.supports(
+                        STRICT_JSON_SCHEMA_MODE
+                    ):
+                        continue
+                    gateway.run_control_maintenance(
+                        RunControlMaintenanceCommand(
+                            f"startup-recovery:{os.getpid()}:{uuid.uuid4()}",
+                            embedding_profiles=self._embedding_profiles_by_memory_space(),
+                            retry_failed_user_semantic=True,
+                            retry_limit=1_000,
+                            retry_error_code="provider_capability_unverified",
+                            retry_memory_space_id=memory_space_id,
+                            retry_only=True,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - isolate memory spaces
+                    logger.warning(
+                        "automatic provider capability recovery failed",
+                        extra={
+                            "memory_space_id": memory_space_id,
+                            "error_code": _safe_error_code(exc),
+                        },
+                    )
+        finally:
+            connection.close()
 
     def _start_workers(self) -> None:
         for name in self._WORKER_ORDER:

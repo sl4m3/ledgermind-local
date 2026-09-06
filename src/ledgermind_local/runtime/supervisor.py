@@ -31,10 +31,17 @@ class RuntimeActivity:
     leased_tasks: int = 0
     pending_writes: int = 0
     error_code: str | None = None
+    stale: bool = False
+    observed_at: str | None = None
 
     @property
     def quiescent(self) -> bool:
-        return self.known and self.leased_tasks == 0 and self.pending_writes == 0
+        return (
+            self.known
+            and not self.stale
+            and self.leased_tasks == 0
+            and self.pending_writes == 0
+        )
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -43,6 +50,8 @@ class RuntimeActivity:
             "leased_tasks": self.leased_tasks,
             "pending_writes": self.pending_writes,
             "error_code": self.error_code,
+            "stale": self.stale,
+            "observed_at": self.observed_at,
         }
 
 
@@ -168,6 +177,12 @@ class RuntimeSupervisor:
     @staticmethod
     def _parse_activity(payload: Mapping[str, object]) -> RuntimeActivity:
         known = payload.get("known") is True
+        stale_value = payload.get("stale", False)
+        if not isinstance(stale_value, bool):
+            raise TypeError("runtime activity stale must be a boolean")
+        observed_at_value = payload.get("observed_at")
+        if observed_at_value is not None and not isinstance(observed_at_value, str):
+            raise TypeError("runtime activity observed_at must be a string")
 
         def count(name: str) -> int:
             value = payload.get(name, 0)
@@ -192,6 +207,8 @@ class RuntimeSupervisor:
                 if payload.get("error_code") is not None
                 else None
             ),
+            stale=stale_value,
+            observed_at=observed_at_value,
         )
 
     def _activity_snapshot(self) -> RuntimeActivity:
@@ -223,8 +240,31 @@ class RuntimeSupervisor:
             if not isinstance(payload, dict):
                 raise TypeError("runtime activity response must be an object")
             return self._parse_activity(payload)
+        except (TimeoutError, HTTPError) as exc:
+            error_code = (
+                "core_activity_timeout"
+                if isinstance(exc, TimeoutError)
+                else "core_activity_unreachable"
+            )
+            return RuntimeActivity(known=False, stale=True, error_code=error_code)
+        except (URLError, ConnectionError, OSError):
+            return RuntimeActivity(
+                known=False,
+                stale=True,
+                error_code="core_activity_unreachable",
+            )
+        except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+            return RuntimeActivity(
+                known=False,
+                stale=True,
+                error_code="activity_response_invalid",
+            )
         except Exception:  # noqa: BLE001 - unknown activity must fail closed
-            return RuntimeActivity(known=False, error_code="activity_unavailable")
+            return RuntimeActivity(
+                known=False,
+                stale=True,
+                error_code="activity_probe_failed",
+            )
 
     def _record_activity(self, activity: RuntimeActivity) -> None:
         state = load_state(self.paths.runtime_state)

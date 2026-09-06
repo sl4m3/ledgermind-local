@@ -900,6 +900,9 @@ class RunControlMaintenanceCommand:
     embedding_profiles: dict[str, dict[str, Any]] | None = None
     retry_failed_user_semantic: bool = False
     retry_limit: int = 100
+    retry_error_code: str | None = None
+    retry_memory_space_id: str | None = None
+    retry_only: bool = False
 
     def __post_init__(self) -> None:
         _required(self.request_id, "request_id")
@@ -917,6 +920,18 @@ class RunControlMaintenanceCommand:
             raise TypeError("retry_failed_user_semantic must be boolean")
         if not isinstance(self.retry_limit, int) or not 1 <= self.retry_limit <= 1_000:
             raise ValueError("retry_limit must be between 1 and 1000")
+        if self.retry_error_code is not None:
+            _required(self.retry_error_code, "retry_error_code")
+            if len(self.retry_error_code) > 128:
+                raise ValueError("retry_error_code must not exceed 128 characters")
+        if self.retry_memory_space_id is not None:
+            _required(self.retry_memory_space_id, "retry_memory_space_id")
+            if len(self.retry_memory_space_id) > 200:
+                raise ValueError("retry_memory_space_id must not exceed 200 characters")
+        if not isinstance(self.retry_only, bool):
+            raise TypeError("retry_only must be boolean")
+        if self.retry_only and not self.retry_failed_user_semantic:
+            raise ValueError("retry_only requires retry_failed_user_semantic")
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {}
@@ -925,6 +940,12 @@ class RunControlMaintenanceCommand:
         if self.retry_failed_user_semantic:
             payload["retry_failed_user_semantic"] = True
             payload["retry_limit"] = self.retry_limit
+            if self.retry_error_code is not None:
+                payload["retry_error_code"] = self.retry_error_code
+            if self.retry_memory_space_id is not None:
+                payload["retry_memory_space_id"] = self.retry_memory_space_id
+            if self.retry_only:
+                payload["retry_only"] = True
         return payload
 
 

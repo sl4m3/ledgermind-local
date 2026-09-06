@@ -35,6 +35,12 @@ class CoreSupervisorTimeout(CoreSupervisorError):
     """The Core process did not answer before the operation deadline."""
 
 
+class CoreSupervisorBusy(CoreSupervisorError):
+    """The serialized Core IPC channel is serving another operation."""
+
+    reason_code = "core_activity_busy"
+
+
 class CoreSupervisorCrashed(CoreSupervisorError):
     """The Core process exited or its protocol stream broke."""
 
@@ -59,7 +65,7 @@ class CoreSupervisor:
         startup_timeout_seconds: float = 5.0,
         operation_timeout_seconds: float = 5.0,
         client_name: str = "ledgermind-local",
-        client_version: str = "4.0.7",
+        client_version: str = "4.0.8",
         core_data_dir: str | Path | None = None,
         blocked_data_dirs: Sequence[str | Path] = (),
         require_network_isolation: bool = False,
@@ -182,6 +188,35 @@ class CoreSupervisor:
             except (BrokenPipeError, ConnectionError, FrameError, OSError) as exc:
                 self._terminate_locked()
                 raise CoreSupervisorCrashed("Core protocol stream failed") from exc
+
+    def try_request(
+        self,
+        operation: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        request_id: str | None = None,
+        lock_timeout_seconds: float = 0.05,
+        operation_timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Run a diagnostic request only when the IPC channel is available.
+
+        Regular Core work keeps its existing serialized, blocking semantics.
+        Diagnostics must not queue behind model-result persistence and create
+        a pile of HTTP requests, so lock acquisition has its own short bound.
+        """
+
+        lock_timeout = max(float(lock_timeout_seconds), 0.0)
+        if not self._lock.acquire(timeout=lock_timeout):
+            raise CoreSupervisorBusy("Core IPC channel is busy")
+        try:
+            return self.request(
+                operation,
+                payload,
+                request_id=request_id,
+                timeout_seconds=operation_timeout_seconds,
+            )
+        finally:
+            self._lock.release()
 
     def close(self) -> None:
         with self._lock:

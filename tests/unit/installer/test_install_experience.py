@@ -399,6 +399,25 @@ def test_python_312_compatible_zstandard_bundle_unpack(tmp_path: Path) -> None:
     assert (unpacked / "marker.txt").read_text(encoding="utf-8") == "bundle"
 
 
+def test_bundle_unpack_removes_files_left_by_previous_release(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "current.txt").write_text("current", encoding="utf-8")
+    archive_path = tmp_path / "bundle.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        archive.add(source, arcname="bundle")
+
+    destination = tmp_path / "unpacked"
+    stale = destination / "bundle" / "python" / "local" / "src"
+    stale.mkdir(parents=True)
+    (stale / "old.py").write_text("stale", encoding="utf-8")
+
+    unpacked = unpack_bundle(archive_path, destination)
+
+    assert (unpacked / "current.txt").read_text(encoding="utf-8") == "current"
+    assert not (destination / "bundle" / "python").exists()
+
+
 def test_non_interactive_stdin_tokens_reach_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

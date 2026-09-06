@@ -20,6 +20,7 @@ from ledgermind_local.inference.profile_store import InferenceProfileStore
 from ledgermind_local.inference.profiles import (
     InferenceProfile,
     ProviderCapabilities,
+    generation_profile_fingerprint,
 )
 from ledgermind_local.inference.provider_probe import (
     PROBE_MAX_OUTPUT_TOKENS,
@@ -546,6 +547,61 @@ def test_strict_semantic_request_requires_a_verified_capability(tmp_path) -> Non
             )
         assert failure.value.code == "provider_capability_unverified"
         assert created is False
+    finally:
+        connection.close()
+
+
+def test_expired_verified_capability_does_not_disable_unchanged_profile(
+    tmp_path,
+) -> None:
+    connection, store = _store()
+    try:
+        profile_fingerprint = generation_profile_fingerprint(
+            _profile(), structured_output_override=STRICT_JSON_SCHEMA_MODE
+        )
+        store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id="profile",
+                profile_fingerprint=profile_fingerprint,
+                structured_output_mode=STRICT_JSON_SCHEMA_MODE,
+                structured_json_schema=True,
+                native_schema_strictness=True,
+                probe_contract_digest=STRICT_CONTRACT["schema_digest"],
+                probe_status="passed",
+                probe_result="passed",
+                expires_at="2020-01-01T00:00:00+00:00",
+            )
+        )
+        fake = _FakeProvider(content='{"ok":true}')
+        result = StructuredJsonProvider(
+            profile_resolver=StoreBackedProfileResolver(store),
+            secret_store=_secret_store(tmp_path),
+            capability_store=store,
+            provider_factory=lambda _profile, _secret: fake,
+        ).generate_json(
+            memory_space_id="space",
+            messages=(ChatMessage(role="user", content="return"),),
+            max_output_tokens=20,
+            profile_slot=ProfileSlot.OPERATIONAL,
+            output_contract=STRICT_CONTRACT,
+            structured_output_requirement=strict_requirement_for_contract(
+                STRICT_CONTRACT
+            ),
+            mode=STRICT_JSON_SCHEMA_MODE,
+        )
+
+        assert result.data == {"ok": True}
+        assert len(fake.requests) == 1
+        cached = store.get_capabilities(
+            "profile",
+            profile_fingerprint=profile_fingerprint,
+            fresh_only=True,
+        )
+        assert cached is not None
+        assert cached.is_fresh(
+            profile_fingerprint="changed-profile",
+            now="2099-01-01T00:00:00+00:00",
+        ) is False
     finally:
         connection.close()
 

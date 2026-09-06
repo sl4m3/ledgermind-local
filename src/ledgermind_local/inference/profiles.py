@@ -145,7 +145,7 @@ def _validate_provider_extra_body(value: object) -> dict[str, object]:
     """Validate secret-free provider wire extensions stored with a profile."""
 
     if not isinstance(value, Mapping):
-        raise ValueError("extra_body must be a mapping")
+        raise TypeError("extra_body must be a mapping")
 
     def walk(node: object) -> None:
         if isinstance(node, Mapping):
@@ -182,7 +182,7 @@ GENERATION_PROFILE_DIGEST_SCHEMA_VERSION = 1
 
 
 def generation_profile_fingerprint(
-    profile: "InferenceProfile",
+    profile: InferenceProfile,
     *,
     structured_output_override: str | None = None,
 ) -> str:
@@ -412,7 +412,7 @@ class ProviderCapabilities(BaseModel):
         failed_mode: StructuredOutputMode,
         successful_mode: StructuredOutputMode,
         error_code: str,
-    ) -> "ProviderCapabilities":
+    ) -> ProviderCapabilities:
         """Record a bounded runtime downgrade without forcing a new probe.
 
         A provider response incompatibility is stronger evidence than the
@@ -468,33 +468,24 @@ class ProviderCapabilities(BaseModel):
         return dict(self.detected_capabilities)
 
     def is_fresh(self, *, profile_fingerprint: str, now: str | None = None) -> bool:
-        """Return whether this observation can be used without a probe."""
+        """Return whether this verified observation still matches the profile.
+
+        A successful strict-output probe is an identity-bound capability fact,
+        not a lease.  The persisted ``expires_at`` field remains readable for
+        backward compatibility and optional background revalidation, but time
+        alone must never disable production inference.  Profile changes are
+        detected by the fingerprint and explicit probe failures retain their
+        failed status.
+        """
+
+        del now
 
         if not profile_fingerprint or (
             self.profile_fingerprint
             and self.profile_fingerprint != profile_fingerprint
         ):
             return False
-        if self.probe_result != "passed" and self.probe_status != "passed":
-            return False
-        if not self.expires_at:
-            # Legacy rows have no TTL and remain usable until an explicit
-            # reprobe or profile change invalidates them.
-            return True
-        from datetime import datetime, timezone
-
-        try:
-            expiry = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
-            current = datetime.fromisoformat(
-                (now or datetime.now(timezone.utc).isoformat()).replace("Z", "+00:00")
-            )
-        except ValueError:
-            return False
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        return current < expiry
+        return self.probe_result == "passed" or self.probe_status == "passed"
 
 
 __all__ = [

@@ -14,9 +14,14 @@ from ledgermind_local.core_gateway.contracts import (
     ControlMaintenanceResult,
     CoreHealth,
     ObjectFacetStatistics,
+    RunControlMaintenanceCommand,
 )
 from ledgermind_local.inference.profile_store import InferenceProfileStore
-from ledgermind_local.inference.profiles import InferenceProfile
+from ledgermind_local.inference.profiles import (
+    InferenceProfile,
+    ProviderCapabilities,
+    generation_profile_fingerprint,
+)
 from ledgermind_local.paths import ServicePaths
 from ledgermind_local.persistence import open_sqlite_connection
 from ledgermind_local.persistence import rounds_migrations as migrations
@@ -36,6 +41,7 @@ class _Gateway:
         self.integrity_finding_count = integrity_finding_count
         self.blocking_integrity_finding_count = blocking_integrity_finding_count
         self.control_calls = 0
+        self.control_commands: list[object] = []
 
     def require_capabilities(self, *capabilities: str) -> None:
         del capabilities
@@ -49,7 +55,7 @@ class _Gateway:
         )
 
     def run_control_maintenance(self, command: object) -> ControlMaintenanceResult:
-        del command
+        self.control_commands.append(command)
         self.control_calls += 1
         return ControlMaintenanceResult(
             status="completed",
@@ -120,6 +126,28 @@ def _seed_profiles(database: Path, missing: str | None = None) -> None:
         connection.close()
 
 
+def _seed_verified_operational_capability(database: Path) -> None:
+    connection = open_sqlite_connection(database)
+    try:
+        store = InferenceProfileStore(connection)
+        profile = store.get("operational-profile")
+        assert profile is not None
+        store.upsert_capabilities(
+            ProviderCapabilities(
+                profile_id=profile.profile_id,
+                profile_fingerprint=generation_profile_fingerprint(profile),
+                structured_output_mode="strict_json_schema",
+                structured_json_schema=True,
+                native_schema_strictness=True,
+                probe_status="passed",
+                probe_result="passed",
+            )
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _runtime(tmp_path: Path, *, gateway: _Gateway) -> LocalRuntime:
     paths = ServicePaths(tmp_path / "service")
     database = paths.resolve_rounds_database_path("rounds.db")
@@ -153,6 +181,28 @@ def test_full_readiness_requires_all_four_profile_slots(tmp_path: Path) -> None:
         assert report["missing_profile_slots_by_memory_space"] == {}
         assert report["components"]["control"]["status"] == "not_required"
         assert gateway.control_calls == 0
+    finally:
+        runtime.stop()
+
+
+def test_startup_recovers_only_capability_failures_for_verified_space(
+    tmp_path: Path,
+) -> None:
+    gateway = _Gateway()
+    runtime = _runtime(tmp_path, gateway=gateway)
+    _seed_profiles(runtime.database_path)
+    _seed_verified_operational_capability(runtime.database_path)
+
+    runtime.start()
+    try:
+        assert gateway.control_calls == 1
+        command = gateway.control_commands[0]
+        assert isinstance(command, RunControlMaintenanceCommand)
+        assert command.retry_failed_user_semantic is True
+        assert command.retry_error_code == "provider_capability_unverified"
+        assert command.retry_memory_space_id == "space-c2"
+        assert command.retry_limit == 1_000
+        assert command.retry_only is True
     finally:
         runtime.stop()
 

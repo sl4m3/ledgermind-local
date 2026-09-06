@@ -44,6 +44,8 @@ def create_maintenance_router(
     @router.post("/replay-failed")
     def replay_failed_user_semantic(
         limit: int = 100,
+        error_code: str | None = None,
+        memory_space_id: str | None = None,
         _token: str = Depends(require_token),
     ) -> dict[str, Any]:
         del _token
@@ -56,8 +58,26 @@ def create_maintenance_router(
             raise HTTPException(
                 status_code=422, detail="limit must be between 1 and 1000"
             )
+        if error_code is not None:
+            error_code = error_code.strip()
+            if not error_code or len(error_code) > 128:
+                raise HTTPException(
+                    status_code=422,
+                    detail="error_code must contain 1 to 128 characters",
+                )
+        if memory_space_id is not None:
+            memory_space_id = memory_space_id.strip()
+            if not memory_space_id or len(memory_space_id) > 200:
+                raise HTTPException(
+                    status_code=422,
+                    detail="memory_space_id must contain 1 to 200 characters",
+                )
         try:
-            result = replay(limit=limit)
+            result = replay(
+                limit=limit,
+                error_code=error_code,
+                memory_space_id=memory_space_id,
+            )
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail="Replay failed") from exc
         if not isinstance(result, dict) or result.get("status") != "completed":

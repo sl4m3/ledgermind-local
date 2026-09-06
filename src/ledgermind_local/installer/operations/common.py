@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tarfile
 import tempfile
 from collections.abc import Callable
@@ -119,6 +120,11 @@ def unpack_bundle(source: str | Path, destination: str | Path) -> Path:
         return source_path
     if not source_path.is_file():
         raise TransactionError(f"bundle artifact does not exist: {source_path}")
+    # This path is a reusable download/extraction cache. Leaving files from a
+    # previous, larger bundle here makes a later release silently import stale
+    # Python modules that are no longer present in the new archive.
+    if destination_path.exists():
+        shutil.rmtree(destination_path)
     ensure_private_dir(destination_path)
     decompressed: Path | None = None
     try:

@@ -15,6 +15,7 @@ from ledgermind_local.core_gateway.contracts import CoreHealth, ObjectFacetStati
 from ledgermind_local.core_gateway.security_policy import (
     build_core_isolation_requirements,
 )
+from ledgermind_local.core_gateway.supervisor import CoreSupervisorBusy
 from ledgermind_local.paths import ServicePaths
 
 
@@ -59,6 +60,20 @@ class _ActivityGateway(_Gateway):
             integrity_finding_count=0,
             blocking_integrity_finding_count=0,
         )
+
+
+class _BusyAfterSnapshotGateway(_ActivityGateway):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events, operational=2, background=1, embedding=3)
+        self.calls = 0
+
+    def try_get_object_facet_statistics(
+        self, request_id: str
+    ) -> ObjectFacetStatistics:
+        self.calls += 1
+        if self.calls > 1:
+            raise CoreSupervisorBusy("Core IPC channel is busy")
+        return self.get_object_facet_statistics(request_id)
 
 
 class _BlockingWorker:
@@ -310,6 +325,36 @@ def test_runtime_activity_combines_local_handoff_and_core_backlog(
             "embedding_backlog": 3,
         }
         assert "payload" not in json.dumps(report)
+    finally:
+        runtime.stop()
+
+
+def test_runtime_activity_returns_stale_cached_counts_when_core_is_busy(
+    tmp_path: Path,
+) -> None:
+    gateway = _BusyAfterSnapshotGateway([])
+    runtime = _runtime(
+        tmp_path,
+        config=_minimal_config(),
+        gateway=gateway,
+    )
+    runtime.start()
+    try:
+        fresh = runtime.activity_report()
+        stale = runtime.activity_report()
+
+        assert fresh["known"] is True
+        assert fresh["stale"] is False
+        assert fresh["pending_writes"] == 6
+        assert isinstance(fresh["observed_at"], str)
+
+        assert stale["known"] is False
+        assert stale["stale"] is True
+        assert stale["quiescent"] is False
+        assert stale["error_code"] == "core_activity_busy"
+        assert stale["pending_writes"] == 6
+        assert stale["core"] == fresh["core"]
+        assert stale["observed_at"] == fresh["observed_at"]
     finally:
         runtime.stop()
 

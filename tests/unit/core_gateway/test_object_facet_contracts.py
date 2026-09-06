@@ -217,13 +217,23 @@ def test_control_maintenance_accepts_core_consolidation_counter() -> None:
 def test_control_maintenance_replay_is_explicit_and_bounded() -> None:
     default = RunControlMaintenanceCommand("maintenance")
     replay = RunControlMaintenanceCommand(
-        "replay", retry_failed_user_semantic=True, retry_limit=7
+        "replay",
+        retry_failed_user_semantic=True,
+        retry_limit=7,
+        retry_error_code="provider_capability_unverified",
+        retry_memory_space_id="codex-default",
     )
 
     assert default.to_payload() == {}
     assert replay.to_payload() == {
         "retry_failed_user_semantic": True,
         "retry_limit": 7,
+        "retry_error_code": "provider_capability_unverified",
+        "retry_memory_space_id": "codex-default",
     }
     with pytest.raises(ValueError, match="between 1 and 1000"):
         RunControlMaintenanceCommand("replay", retry_limit=0)
+    with pytest.raises(ValueError, match="128"):
+        RunControlMaintenanceCommand("replay", retry_error_code="x" * 129)
+    with pytest.raises(ValueError, match="200"):
+        RunControlMaintenanceCommand("replay", retry_memory_space_id="x" * 201)

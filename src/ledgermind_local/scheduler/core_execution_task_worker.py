@@ -95,11 +95,198 @@ _SAFE_ERROR_CODES = frozenset(
         "core_rejected_not_found",
         "core_rejected_idempotency_conflict",
         "core_rejected_integrity_violation",
+        "core_rejected_invalid_object_facet_result",
+        "core_rejected_unknown_object_candidate",
+        "core_rejected_unknown_facet",
+        "core_rejected_raw_round_conflict",
+        "core_rejected_value_consolidation_conflict",
+        "core_rejected_embedding_version_mismatch",
+        "core_rejected_object_identity_ambiguous",
+        "core_rejected_object_scope_mismatch",
+        "core_rejected_object_alias_not_in_source",
+        "core_rejected_object_candidate_not_offered",
+        "core_rejected_contour_job_stale",
+        "core_rejected_round_semantic_output_shape_invalid",
+        "core_rejected_round_semantic_user_provenance_invalid",
+        "core_rejected_round_semantic_execution_provenance_invalid",
+        "core_rejected_round_semantic_outcome_inconsistent",
+        "core_rejected_round_semantic_cardinality_exceeded",
+        "core_rejected_round_semantic_object_ref_invalid",
+        "core_rejected_round_semantic_object_refs_duplicate",
+        "core_rejected_round_semantic_object_label_invalid",
+        "core_rejected_round_semantic_object_description_invalid",
+        "core_rejected_round_semantic_object_grounding_missing",
+        "core_rejected_round_semantic_technical_anchors_invalid",
+        "core_rejected_round_semantic_claim_refs_duplicate",
+        "core_rejected_round_semantic_claim_object_ref_invalid",
+        "core_rejected_round_semantic_claim_object_unknown",
+        "core_rejected_round_semantic_claim_content_invalid",
+        "core_rejected_round_semantic_claim_evidence_missing",
+        "core_rejected_round_semantic_claim_refs_invalid",
+        "core_rejected_structured_contract_digest_missing",
+        "core_rejected_structured_contract_digest_mismatch",
+        "core_rejected_structured_contract_missing",
+        "core_rejected_structured_contract_invalid",
+        "core_rejected_structured_contract_mismatch",
+        "core_rejected_semantic_task_input_missing",
+        "core_rejected_semantic_task_input_invalid",
+        "core_rejected_semantic_reference_map_missing",
+        "core_rejected_semantic_reference_map_invalid",
+        "core_rejected_structured_attempt_invalid",
         "retry_exhausted",
         "expired",
         "permanent_failure",
     }
 )
+
+
+_INVALID_REQUEST_REASON_MARKERS: tuple[tuple[str, str], ...] = (
+    (
+        "round_semantic_user_provenance_invalid:",
+        "core_rejected_round_semantic_user_provenance_invalid",
+    ),
+    (
+        "round_semantic_execution_provenance_invalid:",
+        "core_rejected_round_semantic_execution_provenance_invalid",
+    ),
+    (
+        "round semantic output shape is invalid:",
+        "core_rejected_round_semantic_output_shape_invalid",
+    ),
+    (
+        "round semantic outcome, abstention reason, and candidate arrays are inconsistent",
+        "core_rejected_round_semantic_outcome_inconsistent",
+    ),
+    (
+        "round semantic result exceeds its bounded cardinality",
+        "core_rejected_round_semantic_cardinality_exceeded",
+    ),
+    (
+        "round semantic object refs must be unique",
+        "core_rejected_round_semantic_object_refs_duplicate",
+    ),
+    (
+        "round semantic object ref",
+        "core_rejected_round_semantic_object_ref_invalid",
+    ),
+    (
+        "round object label",
+        "core_rejected_round_semantic_object_label_invalid",
+    ),
+    (
+        "round object description",
+        "core_rejected_round_semantic_object_description_invalid",
+    ),
+    (
+        "object_missing_grounding_refs:",
+        "core_rejected_round_semantic_object_grounding_missing",
+    ),
+    (
+        "round technical_anchors",
+        "core_rejected_round_semantic_technical_anchors_invalid",
+    ),
+    (
+        "round claim refs must be unique",
+        "core_rejected_round_semantic_claim_refs_duplicate",
+    ),
+    (
+        "round claim references unknown object ",
+        "core_rejected_round_semantic_claim_object_unknown",
+    ),
+    (
+        "round claim object ref",
+        "core_rejected_round_semantic_claim_object_ref_invalid",
+    ),
+    (
+        "round claim content",
+        "core_rejected_round_semantic_claim_content_invalid",
+    ),
+    (
+        "round claim requires user or execution evidence",
+        "core_rejected_round_semantic_claim_evidence_missing",
+    ),
+    (
+        "user_refs",
+        "core_rejected_round_semantic_claim_refs_invalid",
+    ),
+    (
+        "execution_refs",
+        "core_rejected_round_semantic_claim_refs_invalid",
+    ),
+    (
+        "user_condition_refs",
+        "core_rejected_round_semantic_claim_refs_invalid",
+    ),
+    (
+        "execution_condition_refs",
+        "core_rejected_round_semantic_claim_refs_invalid",
+    ),
+    (
+        "structured result must return the task contract digest",
+        "core_rejected_structured_contract_digest_missing",
+    ),
+    (
+        "returned contract digest ",
+        "core_rejected_structured_contract_digest_mismatch",
+    ),
+    (
+        "structured task is missing output_contract",
+        "core_rejected_structured_contract_missing",
+    ),
+    (
+        "structured task contract cannot be decoded:",
+        "core_rejected_structured_contract_invalid",
+    ),
+    (
+        "structured task contract is invalid:",
+        "core_rejected_structured_contract_invalid",
+    ),
+    (
+        "task has unexpected contract ",
+        "core_rejected_structured_contract_mismatch",
+    ),
+    (
+        " task is missing model input",
+        "core_rejected_semantic_task_input_missing",
+    ),
+    (
+        " input is invalid:",
+        "core_rejected_semantic_task_input_invalid",
+    ),
+    (
+        " task is missing reference map",
+        "core_rejected_semantic_reference_map_missing",
+    ),
+    (
+        " reference map is invalid:",
+        "core_rejected_semantic_reference_map_invalid",
+    ),
+    (
+        "structured generation attempt ",
+        "core_rejected_structured_attempt_invalid",
+    ),
+)
+
+
+def _core_rejection_error_code(exc: DomainRejectedError) -> str:
+    """Return a bounded, content-free reason for a Core rejection.
+
+    Core messages can contain task-local refs or validation text and therefore
+    must not be persisted verbatim.  Known deterministic validation classes
+    are projected onto stable reason codes; unknown messages retain only the
+    public Core error code.
+    """
+
+    core_code = re.sub(r"[^a-z0-9]+", "_", exc.code.lower()).strip("_")
+    if core_code == "invalid_request":
+        detail = exc.detail.lower()
+        for marker, reason_code in _INVALID_REQUEST_REASON_MARKERS:
+            if marker in detail:
+                return reason_code
+    return _safe_error_code(
+        f"core_rejected_{core_code or 'command'}",
+        "core_rejected_command",
+    )
 
 
 def _safe_error_code(value: str | None, fallback: str = "execution_error") -> str:
@@ -166,12 +353,8 @@ def classify_execution_error(exc: BaseException) -> ExecutionFailureClassificati
     if isinstance(exc, TransientCoreError):
         return ExecutionFailureClassification("core_unavailable", True)
     if isinstance(exc, DomainRejectedError):
-        code = re.sub(r"[^a-z0-9]+", "_", exc.code.lower()).strip("_")
         return ExecutionFailureClassification(
-            _safe_error_code(
-                f"core_rejected_{code or 'command'}",
-                "core_rejected_command",
-            ),
+            _core_rejection_error_code(exc),
             False,
             0,
         )

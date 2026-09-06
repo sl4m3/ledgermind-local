@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -13,7 +14,44 @@ from ledgermind_local.core_gateway.isolation import IsolationRequirements
 from ledgermind_local.core_gateway.security_policy import (
     CORE_ALLOWED_RUNTIME_INJECTED_ENVIRONMENT_KEYS,
 )
-from ledgermind_local.core_gateway.supervisor import CoreSupervisor, CoreSupervisorError
+from ledgermind_local.core_gateway.supervisor import (
+    CoreSupervisor,
+    CoreSupervisorBusy,
+    CoreSupervisorError,
+)
+
+
+def test_diagnostic_request_fails_fast_when_core_channel_is_busy(
+    tmp_path: Path,
+) -> None:
+    supervisor = CoreSupervisor(
+        [sys.executable, "-c", "pass"],
+        core_data_dir=tmp_path,
+        semantic_language="ru",
+    )
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_channel() -> None:
+        with supervisor._lock:
+            acquired.set()
+            release.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_channel)
+    holder.start()
+    assert acquired.wait(timeout=1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(CoreSupervisorBusy):
+            supervisor.try_request(
+                "get_object_facet_statistics",
+                lock_timeout_seconds=0.02,
+            )
+    finally:
+        release.set()
+        holder.join(timeout=1)
+
+    assert time.monotonic() - started < 0.25
 
 
 def test_core_child_receives_restricted_environment_cwd_and_fds(
