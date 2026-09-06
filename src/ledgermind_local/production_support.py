@@ -41,7 +41,10 @@ from .inference.profile_store import (
     DatabaseBackedCapabilityStore,
     InferenceProfileStore,
 )
-from .inference.profiles import InferenceProfile
+from .inference.profiles import (
+    DEFAULT_GENERATION_MAX_INPUT_TOKENS,
+    InferenceProfile,
+)
 from .inference.provider_probe import ProviderProbe
 from .inference.secrets import SecretStore
 from .paths import ServicePaths
@@ -244,7 +247,7 @@ def seed_local(
                     secret_ref=secret_ref,
                     timeout_seconds=min(selected_generation.timeout_seconds, 300.0),
                     max_retries=selected_generation.max_retries,
-                    max_input_tokens=12_000,
+                    max_input_tokens=DEFAULT_GENERATION_MAX_INPUT_TOKENS,
                     max_output_tokens=selected_generation.max_output_tokens,
                     extra_body=generation_extra_body,
                     # Keep operational work capability-aware, while the

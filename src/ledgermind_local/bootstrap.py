@@ -482,6 +482,24 @@ class LocalRuntime:
         batch = provider.embed((query,), profile, "retrieval_query")
         return batch.vectors[0], batch.model, batch.model_version
 
+    def embed_object_query_with_metadata(
+        self, memory_space_id: str, query: str
+    ) -> tuple[tuple[float, ...], str, str]:
+        """Compute the asymmetric query vector for object identity passages."""
+
+        resolver = DatabaseBackedProfileResolver(self.database_path)
+        profile = resolver.resolve_profile(memory_space_id, ProfileSlot.EMBEDDING)
+        provider = EmbeddingProvider(
+            vectorizer_factory=_build_runtime_vectorizer_factory(self.config)
+        )
+        batch = provider.embed(
+            (query,),
+            profile,
+            "object_candidate_query",
+            role="query",
+        )
+        return batch.vectors[0], batch.model, batch.model_version
+
     def embedding_profile_metadata(self, memory_space_id: str) -> dict[str, object]:
         """Resolve the active embedding identity without exposing provider secrets."""
 

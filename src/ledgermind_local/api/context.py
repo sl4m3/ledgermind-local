@@ -19,7 +19,6 @@ from ledgermind_local.core_gateway import (
 
 from .http import build_request_id, error_payload, validate_json_request_headers
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -47,6 +46,9 @@ class ContextRetrieveRequest(BaseModel):
     query: str = Field(min_length=1, max_length=20_000)
     limit: int = Field(default=5, ge=1, le=50)
     query_embedding: list[float] | None = Field(default=None, min_length=1, max_length=8_192)
+    object_query_embedding: list[float] | None = Field(
+        default=None, min_length=1, max_length=8_192
+    )
     embedding_model_id: str | None = Field(default=None, min_length=1, max_length=200)
     embedding_model_version: str | None = Field(default=None, min_length=1, max_length=200)
     project_id: str | None = Field(default=None, min_length=1, max_length=200)
@@ -115,6 +117,7 @@ def create_context_router(
             embedding_model_id = payload.embedding_model_id or "retrieval-embedder"
             embedding_model_version = payload.embedding_model_version or "1"
             query_embedding: list[float]
+            object_query_embedding: list[float] | None = None
             if query_embedder is not None:
                 embed_with_metadata = getattr(query_embedder, "embed_query_with_metadata", None)
                 if callable(embed_with_metadata):
@@ -129,10 +132,28 @@ def create_context_router(
                             payload.memory_space_id, payload.query
                         )
                     ]
+                embed_object_with_metadata = getattr(
+                    query_embedder, "embed_object_query_with_metadata", None
+                )
+                if callable(embed_object_with_metadata):
+                    object_embedded, object_model_id, object_model_version = (
+                        embed_object_with_metadata(payload.memory_space_id, payload.query)
+                    )
+                    if (
+                        object_model_id != embedding_model_id
+                        or object_model_version != embedding_model_version
+                    ):
+                        raise TransientCoreError(
+                            "value and object query embedding identities disagree"
+                        )
+                    object_query_embedding = [
+                        float(component) for component in object_embedded
+                    ]
             else:
                 if payload.query_embedding is None:
                     raise TransientCoreError("embedding profile is unavailable")
                 query_embedding = payload.query_embedding
+                object_query_embedding = payload.object_query_embedding
             retrieve = getattr(context_gateway, "retrieve_context", None)
             if not callable(retrieve):
                 raise TransientCoreError("Core retrieval is unavailable")
@@ -142,6 +163,11 @@ def create_context_router(
                     memory_space_id=payload.memory_space_id,
                     query_text=payload.query,
                     query_embedding=tuple(query_embedding),
+                    object_query_embedding=(
+                        tuple(object_query_embedding)
+                        if object_query_embedding is not None
+                        else None
+                    ),
                     embedding_model_id=embedding_model_id,
                     embedding_model_version=embedding_model_version,
                     limit=payload.limit,

@@ -760,6 +760,7 @@ class RetrieveContextCommand:
     memory_space_id: str
     query_text: str
     query_embedding: tuple[float, ...]
+    object_query_embedding: tuple[float, ...] | None = None
     embedding_model_id: str = "retrieval-embedder"
     embedding_model_version: str = "1"
     limit: int = 5
@@ -787,6 +788,18 @@ class RetrieveContextCommand:
             for component in self.query_embedding
         ):
             raise ValueError("query_embedding must contain finite values")
+        if self.object_query_embedding is not None:
+            if len(self.object_query_embedding) != len(self.query_embedding):
+                raise ValueError(
+                    "object_query_embedding must match query_embedding dimensions"
+                )
+            if any(
+                not isinstance(component, (int, float))
+                or isinstance(component, bool)
+                or not math.isfinite(float(component))
+                for component in self.object_query_embedding
+            ):
+                raise ValueError("object_query_embedding must contain finite values")
         _required(self.embedding_model_id, "embedding_model_id")
         _required(self.embedding_model_version, "embedding_model_version")
         if self.query_language is not None:
@@ -812,6 +825,11 @@ class RetrieveContextCommand:
             "memory_space_id": self.memory_space_id,
             "query_text": self.query_text,
             "query_embedding": list(self.query_embedding),
+            "object_query_embedding": (
+                list(self.object_query_embedding)
+                if self.object_query_embedding is not None
+                else None
+            ),
             "embedding_model_id": self.embedding_model_id,
             "embedding_model_version": self.embedding_model_version,
             "limit": self.limit,

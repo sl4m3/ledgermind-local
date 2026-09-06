@@ -26,6 +26,11 @@ ProbeStatus = Literal["unknown", "passed", "failed"]
 
 EMBEDDING_PROFILE_DIGEST_ALGORITHM = "sha256"
 EMBEDDING_PROFILE_DIGEST_SCHEMA_VERSION = 1
+# Round Semantic bounds the complete provider-visible request to 64k
+# characters. Keep the generation input allowance at the same numeric ceiling
+# so Local does not reject a request that Core has already admitted, including
+# conservative estimation for non-ASCII semantic languages.
+DEFAULT_GENERATION_MAX_INPUT_TOKENS = 64_000
 _SENSITIVE_CONFIG_PARTS = (
     "api_key",
     "access_key",
@@ -493,6 +498,7 @@ class ProviderCapabilities(BaseModel):
 
 
 __all__ = [
+    "DEFAULT_GENERATION_MAX_INPUT_TOKENS",
     "EMBEDDING_PROFILE_DIGEST_ALGORITHM",
     "EMBEDDING_PROFILE_DIGEST_SCHEMA_VERSION",
     "GENERATION_PROFILE_DIGEST_ALGORITHM",

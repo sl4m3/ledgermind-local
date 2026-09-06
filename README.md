@@ -1,59 +1,59 @@
 # ledgermind-local
 
-`ledgermind-local` — локальная служба LedgerMind. Она принимает
-структурные `RawRound`, хранит транспортное состояние и общается с закрытым
-Rust Core через IPC. Доменное object-facet состояние и его обработка принадлежат
-Core; Local выполняет только технические generic execution tasks.
+`ledgermind-local` is the local LedgerMind service. It accepts structured
+`RawRound` payloads, stores transport state, and communicates with the closed
+Rust Core over IPC. Core owns the domain-level object-facet state and its
+processing; Local performs only technical generic execution tasks.
 
 ## Trust boundaries and data ownership
 
-- Local владеет `rounds.db`: raw-round metadata/payload, durable Core command
+- Local owns `rounds.db`: raw-round metadata and payloads, durable Core command
   delivery, retention state, inference profile metadata, technical profile-slot
-  bindings и egress audit.
-- Local **никогда не открывает рабочую `knowledge.db`**. Knowledge доступен
-  только через supervised `CoreGateway` к отдельному подписанному Rust process
-  `ledgermind-core`; SQL Core и его миграции не входят в Local.
-- Local не импортирует внутренний код Core и не является владельцем Core
-  storage.
+  bindings, and the egress audit.
+- Local **never opens the live `knowledge.db`**. Knowledge is accessible only
+  through a supervised `CoreGateway` connected to the separate signed Rust
+  process `ledgermind-core`; Core SQL and its migrations are not part of Local.
+- Local does not import internal Core code and does not own Core storage.
 
 ## External APIs and egress
 
-Local вызывает только те внешние API, endpoint и модель которых выбрал и
-настроил пользователь. Поэтому payload, который Local отправляет в provider
-или в выбранный Cloud endpoint, может покинуть машину пользователя. Перед
-включением egress нужно проверить endpoint, retention, регион и policy
-провайдера. Секреты адресуются через Local secret store/`secret_ref`, не
-вшиваются в пакет и не должны попадать в RawRound, обычные журналы или backup.
+Local calls only external APIs whose endpoint and model were selected and
+configured by the user. A payload sent by Local to a provider or a selected
+Cloud endpoint may therefore leave the user's machine. Before enabling egress,
+review the provider's endpoint, retention, region, and policy. Secrets are
+addressed through the Local secret store and `secret_ref`; they are not bundled
+with the package and must not appear in RawRound payloads, ordinary logs, or
+backups.
 
 ## Readiness is deliberately split
 
 ### Capture-ready
 
-Capture-ready означает, что интеграция может наблюдать завершённый раунд,
-создать валидный RawRound и сохранить/доставить его без включённого
-модельного провайдера. В этом режиме важны `rounds.db`, durable spool и
-повторяемая доставка; отсутствие Core или provider не должно уничтожать
-захваченные данные.
+Capture-ready means an integration can observe a completed round, create a
+valid RawRound, and persist or deliver it without an enabled model provider.
+In this mode, `rounds.db`, the durable spool, and repeatable delivery are the
+critical components; temporary Core or provider unavailability must not destroy
+captured data.
 
 ### Full-ready
 
-Full-ready дополнительно требует:
+Full-ready additionally requires:
 
-- доступный и проверенный подписанный `ledgermind-core` binary с signature и
-  public key;
-- рабочий Core IPC и локальную `knowledge.db` в каталоге Core;
-- настроенный пользователем inference endpoint/profile и соответствующий
+- an available and verified signed `ledgermind-core` binary with its signature
+  and public key;
+- working Core IPC and a local `knowledge.db` in the Core directory;
+- a user-configured inference endpoint and profile with the corresponding
   `secret_ref`;
-- готовый generic execution worker и технические profile slots.
+- a ready generic execution worker and technical profile slots.
 
-Capture-ready не следует объявлять full-ready: захват и доставка могут быть
-здоровы, пока inference/Core временно недоступны.
+Capture-ready must not be reported as full-ready: capture and delivery may be
+healthy while inference or Core is temporarily unavailable.
 
-## Signed Core комплект
+## Signed Core bundle
 
-Local не импортирует Python implementation Core. Для process boundary соберите
-Rust binary из соседнего приватного `ledgermind-core` workspace и положите
-подписанный комплект в `$LEDGERMIND_HOME/../core/bin/`:
+Local does not import a Python implementation of Core. For the process
+boundary, build the Rust binary from the adjacent private `ledgermind-core`
+workspace and place the signed bundle in `$LEDGERMIND_HOME/../core/bin/`:
 
 ```text
 ledgermind-core
@@ -61,8 +61,8 @@ ledgermind-core.sig   # raw Ed25519 signature over the exact binary
 ledgermind-core.pub   # raw 32-byte Ed25519 public key
 ```
 
-Для release signing используйте `scripts/sign_core_binary.py` с private key,
-который не хранится в repository:
+For release signing, use `scripts/sign_core_binary.py` with a private key that
+is not stored in the repository:
 
 ```bash
 python scripts/sign_core_binary.py \
@@ -74,13 +74,12 @@ python scripts/sign_core_binary.py \
 
 ## Backup archive sensitivity
 
-Backup archive следует считать чувствительным секретным материалом. В нём
-могут находиться raw conversation/tool payloads, inference metadata, egress
-audit и opaque Core snapshot artifacts. Передавайте
-архив только по доверенному каналу, ограничивайте права файла, шифруйте его
-при переносе и хранении, а перед восстановлением проверяйте источник и
-целостность. Не коммитьте archive в repository и не включайте в публичный
-release artifact.
+A backup archive must be treated as sensitive secret material. It may contain
+raw conversation and tool payloads, inference metadata, the egress audit, and
+opaque Core snapshot artifacts. Transfer an archive only through a trusted
+channel, restrict its file permissions, encrypt it in transit and at rest, and
+verify its source and integrity before restoring it. Never commit an archive to
+the repository or include it in a public release artifact.
 
 ## Local development
 
@@ -91,19 +90,20 @@ pytest -q
 
 ## Docker
 
-Сборка выполняется из workspace-каталога `Проекты/ledgermind`, потому что Core,
-Local и protocol находятся в соседних каталогах. Rust Core собирается в
-отдельном multi-stage builder; старый Python runtime в образ не попадает:
+Build from the LedgerMind workspace root because Core, Local,
+and protocol live in adjacent directories. Rust Core is compiled in a separate
+multi-stage builder; the legacy Python runtime is not included in the image:
 
 ```bash
-cd "$HOME/Проекты/ledgermind"
-docker build -f ledgermind-local/Dockerfile -t ledgermind-local .
+cd /path/to/ledgermind
+docker build -f ledgermind-engine/ledgermind-local/Dockerfile \
+  -t ledgermind-local .
 ```
 
-Образ намеренно не генерирует подпись. Перед запуском нужно примонтировать
-signature/public-key для binary, собранного этим же Docker build. Entrypoint
-завершает запуск с ошибкой, если оба файла подписи не переданы;
-`verify_core_signature` остаётся включённым.
+The image intentionally does not generate a signature. Before starting it,
+mount the signature and public key for the binary produced by the same Docker
+build. The entrypoint fails closed if either signature file is missing;
+`verify_core_signature` remains enabled.
 
 ## Compatibility
 

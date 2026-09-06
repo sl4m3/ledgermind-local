@@ -12,7 +12,10 @@ from typing import Any, cast
 
 from ledgermind_local.config import EmbeddingConfig as LocalEmbeddingConfig
 from ledgermind_local.config import LocalConfig, ProfileSlotsConfig
-from ledgermind_local.inference.profiles import ProviderKind
+from ledgermind_local.inference.profiles import (
+    DEFAULT_GENERATION_MAX_INPUT_TOKENS,
+    ProviderKind,
+)
 
 from .models import InstallerConfig
 from .paths import InstallerPaths
@@ -430,7 +433,9 @@ def write_local_profiles(
         for source, memory_space_id in memory_spaces.items():
             repository.ensure(memory_space_id, source)
         max_retries = config.advanced.retry_attempts
-        max_input = config.advanced.generation_max_input or 12_000
+        max_input = (
+            config.advanced.generation_max_input or DEFAULT_GENERATION_MAX_INPUT_TOKENS
+        )
         profile_ids: list[str] = []
         for profile in build_generation_profiles(config.generation):
             # Each built-in slot declares the largest request Core may send to

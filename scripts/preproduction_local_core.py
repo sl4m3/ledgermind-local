@@ -266,7 +266,7 @@ def _seed_local(
                     secret_ref=secret_ref,
                     timeout_seconds=min(selected_generation.timeout_seconds, 300.0),
                     max_retries=selected_generation.max_retries,
-                    max_input_tokens=12_000,
+                    max_input_tokens=64_000,
                     max_output_tokens=selected_generation.max_output_tokens,
                     extra_body=generation_extra_body,
                     structured_output_preference="auto",

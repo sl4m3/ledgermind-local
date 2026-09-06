@@ -66,6 +66,13 @@ class _Embedder:
         assert query == "deployment"
         return (0.1, 0.2), "embedder", "2026-08"
 
+    def embed_object_query_with_metadata(
+        self, memory_space_id: str, query: str
+    ) -> tuple[tuple[float, ...], str, str]:
+        assert memory_space_id == "space"
+        assert query == "deployment"
+        return (0.3, 0.4), "embedder", "2026-08"
+
 
 def test_context_embeds_query_returns_provenance_and_records_outcome() -> None:
     gateway = _Gateway()
@@ -105,6 +112,7 @@ def test_context_embeds_query_returns_provenance_and_records_outcome() -> None:
     ]
     assert gateway.request is not None
     assert gateway.request.query_embedding == (0.1, 0.2)
+    assert gateway.request.object_query_embedding == (0.3, 0.4)
     assert gateway.request.embedding_model_id == "embedder"
     assert gateway.request.repository_id == "repository-1"
     assert gateway.outcomes[0].candidate_value_ids == ("value-1",)

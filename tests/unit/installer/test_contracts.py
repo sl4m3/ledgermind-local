@@ -281,6 +281,11 @@ def test_installer_materializes_profiles_for_local_resolver(tmp_path: Path) -> N
         if profile.profile_id.startswith("generation-")
     )
     by_id = {profile.profile_id: profile for profile in materialized}
+    assert all(
+        profile.max_input_tokens == 64_000
+        for profile in materialized
+        if profile.profile_id.startswith("generation-")
+    )
     assert by_id["generation-operational"].max_output_tokens == 6_144
     assert by_id["generation-object-resolution"].max_output_tokens == 2_048
     assert by_id["generation-background"].max_output_tokens == 2_048
