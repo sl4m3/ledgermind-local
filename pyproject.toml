@@ -17,6 +17,7 @@ dependencies = [
     "PyYAML>=6.0,<7",
     "zstandard>=0.23,<1",
     "ledgermind-protocol>=2.0.0b1,<2.1",
+    "ledgermind-inference==0.1.0",
     "uvicorn>=0.30,<1"
 ]
 

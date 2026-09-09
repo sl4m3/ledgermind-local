@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from ledgermind_local.inference.provider_telemetry import TELEMETRY_ENV
+from ledgermind_inference.provider_telemetry import TELEMETRY_ENV
 from ledgermind_local.installer.lock import InstallerLock
 from ledgermind_local.installer.paths import InstallerPaths
 

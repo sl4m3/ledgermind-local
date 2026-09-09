@@ -36,13 +36,13 @@ from ledgermind_local.core_gateway.supervisor import (
     CoreSupervisorError,
     CoreSupervisorTimeout,
 )
-from ledgermind_local.inference.core_task_executor import CoreTaskExecutor
+from ledgermind_inference.core_task_executor import CoreTaskExecutor
 from ledgermind_local.inference.embedding_provider import (
     EmbeddingProvider,
     PersistentEmbeddingCache,
 )
 from ledgermind_local.inference.gguf_vectorizer import GGUFVectorizer
-from ledgermind_local.inference.openai_vectorizer import OpenAIEmbeddingVectorizer
+from ledgermind_inference.openai_vectorizer import OpenAIEmbeddingVectorizer
 from ledgermind_local.inference.profile_slots import (
     DatabaseBackedProfileResolver,
     ProfileSlot,
@@ -52,8 +52,8 @@ from ledgermind_local.inference.profile_store import (
     InferenceProfileStore,
 )
 from ledgermind_local.inference.secrets import SecretStore
-from ledgermind_local.inference.strict import STRICT_JSON_SCHEMA_MODE
-from ledgermind_local.inference.structured_json_provider import StructuredJsonProvider
+from ledgermind_inference.strict import STRICT_JSON_SCHEMA_MODE
+from ledgermind_inference.structured_json_provider import StructuredJsonProvider
 from ledgermind_local.maintenance.coordinated_restore import (
     CoordinatedRestoreError,
     CoordinatedRestoreService,

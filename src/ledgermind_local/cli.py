@@ -33,7 +33,7 @@ from ledgermind_local.inference import (
     StoreBackedProfileResolver,
 )
 from ledgermind_local.inference.provider_probe import ProviderProbe
-from ledgermind_local.inference.structured_json_provider import default_provider_factory
+from ledgermind_inference.structured_json_provider import default_provider_factory
 from ledgermind_local.maintenance.coordinated_restore import (
     CoordinatedRestoreError,
     CoordinatedRestoreService,

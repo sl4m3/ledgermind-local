@@ -20,7 +20,7 @@ from ledgermind_local.core_gateway.contracts import (
     TransientCoreError,
 )
 from ledgermind_local.embedding_purpose import validate_embedding_purpose
-from ledgermind_local.inference.core_task_executor import (
+from ledgermind_inference.core_task_executor import (
     CoreTaskExecutor,
     EmbeddingRequestSpec,
     GenericExecutionTask,
@@ -28,8 +28,8 @@ from ledgermind_local.inference.core_task_executor import (
 )
 from ledgermind_local.inference.profile_slots import ProfileSlot
 from ledgermind_local.inference.profile_store import InferenceProfileStore
-from ledgermind_local.inference.profiles import StructuredOutputMode
-from ledgermind_local.inference.providers.base import (
+from ledgermind_inference.profiles import StructuredOutputMode
+from ledgermind_inference.providers.base import (
     ChatMessage,
     ProviderAuthenticationError,
     ProviderConfigurationError,

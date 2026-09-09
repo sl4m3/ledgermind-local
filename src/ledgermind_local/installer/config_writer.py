@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from ledgermind_local.config import EmbeddingConfig as LocalEmbeddingConfig
 from ledgermind_local.config import LocalConfig, ProfileSlotsConfig
-from ledgermind_local.inference.profiles import (
+from ledgermind_inference.profiles import (
     DEFAULT_GENERATION_MAX_INPUT_TOKENS,
     ProviderKind,
 )
@@ -408,7 +408,7 @@ def write_local_profiles(
     """Materialize installer profiles in Local's existing SQLite resolver tables."""
 
     from ledgermind_local.inference.profile_store import InferenceProfileStore
-    from ledgermind_local.inference.profiles import InferenceProfile
+    from ledgermind_inference.profiles import InferenceProfile
     from ledgermind_local.persistence import open_sqlite_connection
     from ledgermind_local.persistence import rounds_migrations as migrations
     from ledgermind_local.persistence.memory_space_repository import (
@@ -522,7 +522,7 @@ def persist_generation_probe(
     """
 
     from ledgermind_local.inference.profile_store import InferenceProfileStore
-    from ledgermind_local.inference.profiles import (
+    from ledgermind_inference.profiles import (
         ProviderCapabilities,
         generation_profile_fingerprint,
     )
