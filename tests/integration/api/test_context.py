@@ -49,6 +49,12 @@ class _Gateway:
                         },
                     }
                 ],
+                "memory_injection": {
+                    "format": "facet_legend",
+                    "text": "How to read memory:\nproperty — a stable characteristic.\n\nM1: [property] Deployment: Deployments require review.",
+                    "legend": ["property — a stable characteristic."],
+                    "item_count": 1,
+                },
             }
         )
 
@@ -106,6 +112,8 @@ def test_context_embeds_query_returns_provenance_and_records_outcome() -> None:
     assert payload["delivered_value_ids"] == ["value-1"]
     assert payload["items"][0]["object_name"] == "Deployment"
     assert payload["items"][0]["facet"] == "property"
+    assert payload["memory_injection"]["format"] == "facet_legend"
+    assert payload["memory_injection"]["item_count"] == 1
     assert "source_kind" not in payload["items"][0]
     assert payload["items"][0]["explanation"]["object_reasons"] == [
         "direct_value_semantic"

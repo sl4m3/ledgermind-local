@@ -80,6 +80,15 @@ class ContextItemResponse(BaseModel):
     explanation: dict[str, object]
 
 
+class MemoryInjectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format: Literal["facet_legend"]
+    text: str = Field(max_length=65_536)
+    legend: list[str] = Field(default_factory=list, max_length=14)
+    item_count: int = Field(ge=0, le=100)
+
+
 class ContextViewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -87,6 +96,7 @@ class ContextViewResponse(BaseModel):
     items: list[ContextItemResponse]
     retrieval_request_id: str
     delivered_value_ids: list[str] = Field(default_factory=list)
+    memory_injection: MemoryInjectionResponse | None = None
 
 
 def create_context_router(
@@ -245,6 +255,7 @@ __all__ = [
     "ContextItemResponse",
     "ContextRetrieveRequest",
     "ContextViewResponse",
+    "MemoryInjectionResponse",
     "QueryEmbedder",
     "create_context_router",
 ]
@@ -268,6 +279,11 @@ def _context_response(payload: dict[str, object]) -> dict[str, Any]:
         "schema_version": 2,
         "retrieval_request_id": response.retrieval_request_id,
         "items": items,
+        "memory_injection": (
+            response.memory_injection.model_dump(mode="json")
+            if response.memory_injection is not None
+            else None
+        ),
     }
 
 
