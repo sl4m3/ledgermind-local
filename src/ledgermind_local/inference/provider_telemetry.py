@@ -195,6 +195,7 @@ def record_http_attempt(
     batch_item_count: int = 1,
     retry_index: int = 0,
     total_tokens: int | None = None,
+    cached_input_tokens: int | None = None,
     reported_cost: float | int | None = None,
     usage_unknown: bool | None = None,
     operation_item_counts: Mapping[str, int] | None = None,
@@ -208,6 +209,8 @@ def record_http_attempt(
     fallback_to: object = None,
     configured_routes: object = None,
     served_by: object = None,
+    wire_reasoning_effort: object = None,
+    wire_thinking: object = None,
 ) -> None:
     """Record one actual HTTP attempt using only safe scalar metadata."""
 
@@ -285,6 +288,7 @@ def record_http_attempt(
         "input_tokens": input_count,
         "output_tokens": output_count,
         "total_tokens": total_count,
+        "cached_input_tokens": _non_negative_int(cached_input_tokens),
         "usage_unknown": bool(usage_unknown),
         "reported_cost": (
             float(reported_cost)
@@ -295,6 +299,8 @@ def record_http_attempt(
         ),
         "batch_item_count": _non_negative_int(batch_item_count) or 0,
         "retry_index": _non_negative_int(retry_index) or 0,
+        "wire_reasoning_effort": _text(wire_reasoning_effort) or None,
+        "wire_thinking": _text(wire_thinking) or None,
         "operation_item_counts": safe_item_counts,
     }
     _append(
@@ -304,7 +310,10 @@ def record_http_attempt(
             "input_tokens",
             "output_tokens",
             "total_tokens",
+            "cached_input_tokens",
             "reported_cost",
+            "wire_reasoning_effort",
+            "wire_thinking",
             "operation_item_counts",
             "fallback_from",
             "fallback_to",

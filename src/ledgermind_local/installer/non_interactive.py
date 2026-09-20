@@ -64,6 +64,12 @@ def load_non_interactive_config(
             raise ConfigurationError(
                 f"required secret environment variable is empty: {env_name}"
             )
+    if config.reranker.mode == "api" and config.reranker.api is not None:
+        env_name = config.reranker.api.token_env
+        if env_name and not os.environ.get(env_name):
+            raise ConfigurationError(
+                f"required secret environment variable is empty: {env_name}"
+            )
     return config, generation_stdin, embedding_stdin
 
 

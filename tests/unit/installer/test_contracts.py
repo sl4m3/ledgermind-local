@@ -21,6 +21,7 @@ from ledgermind_local.inference.secrets import SecretStore
 from ledgermind_local.installer import cli as installer_cli
 from ledgermind_local.installer.cli import _emit, _result, _runtime
 from ledgermind_local.installer.config_writer import (
+    bind_existing_profiles_for_agent,
     load_installer_config,
     persist_generation_probe,
     select_secret_backend,
@@ -294,6 +295,45 @@ def test_installer_materializes_profiles_for_local_resolver(tmp_path: Path) -> N
         for profile in materialized
         if profile.profile_id.startswith("generation-")
     )
+
+
+def test_connecting_agent_binds_only_missing_slots_without_rewriting_profiles(
+    tmp_path: Path,
+) -> None:
+    from ledgermind_local.inference.profile_store import InferenceProfileStore
+    from ledgermind_local.persistence import open_sqlite_connection
+
+    paths = InstallerPaths(home_override=tmp_path)
+    config = _config()
+    result = write_local_profiles(config, paths)
+    connection = open_sqlite_connection(result["database"])
+    try:
+        store = InferenceProfileStore(connection)
+        original = store.get("generation-operational")
+        assert original is not None
+    finally:
+        connection.close()
+
+    connection = open_sqlite_connection(result["database"])
+    try:
+        connection.execute(
+            "INSERT INTO memory_spaces (memory_space_id, source_client, created_at, updated_at) "
+            "VALUES ('opencode-default', 'ledgermind-integrations', 'now', 'now')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    added = bind_existing_profiles_for_agent(config, paths, "opencode")
+    assert set(added) == {"operational", "object_resolution", "background", "embedding"}
+    assert bind_existing_profiles_for_agent(config, paths, "opencode") == {}
+    connection = open_sqlite_connection(result["database"])
+    try:
+        store = InferenceProfileStore(connection)
+        assert store.get("generation-operational") == original
+        assert store.list_slots("opencode-default") == added
+    finally:
+        connection.close()
 
 
 def test_installer_persists_verified_generation_capabilities(tmp_path: Path) -> None:
@@ -836,6 +876,7 @@ def test_installed_local_embedding_uses_its_signed_device_runtime(
 
     assert command[0] == str(runtime_python)
     assert "sentence_transformers" not in " ".join(command)
+    assert command[command.index("--model") + 1] == "nemotron"
     assert command[command.index("--dimensions") + 1] == "2048"
     assert "--token-file" in command
     assert (

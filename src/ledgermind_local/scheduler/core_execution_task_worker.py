@@ -409,6 +409,7 @@ class CoreExecutionTaskWorker:
         self._lease_seconds = lease_seconds
         self._connection_factory = connection_factory
         self._closed = False
+        self._provider_circuit_open = False
         require_capabilities = getattr(gateway, "require_capabilities", None)
         if callable(require_capabilities):
             require_capabilities("execution_tasks")
@@ -416,6 +417,8 @@ class CoreExecutionTaskWorker:
     def process_once(self) -> int:
         if self._closed:
             raise RuntimeError("Core execution task worker is closed")
+        if self._provider_circuit_open:
+            return 0
         connection = self._connection_factory(self._database_path)
         try:
             migrations.apply_migrations(connection)
@@ -456,7 +459,33 @@ class CoreExecutionTaskWorker:
                 continue
             processed += len(polled.tasks)
             self._process_tasks(polled.tasks, memory_space_id)
+            if self._provider_circuit_open:
+                break
         return processed
+
+    @property
+    def provider_circuit_open(self) -> bool:
+        """Whether provider credentials/configuration stopped further task polling."""
+
+        return self._provider_circuit_open
+
+    def _open_provider_circuit_on_failure(self, result: object) -> None:
+        if (
+            getattr(result, "status", None) == "failed"
+            and getattr(result, "error_code", None)
+            in {
+                "authentication_failed",
+                "provider_configuration_error",
+                "provider_secret_missing",
+                "secret_missing",
+            }
+            and not self._provider_circuit_open
+        ):
+            self._provider_circuit_open = True
+            logger.error(
+                "provider configuration failure paused execution task polling until restart",
+                extra={"worker": self._worker_id, "error_code": result.error_code},
+            )
 
     def close(self) -> None:
         self._closed = True
@@ -465,6 +494,7 @@ class CoreExecutionTaskWorker:
         try:
             task = execution_task_from_wire(raw_task, memory_space_id)
             result = self._executor.execute(task)
+            self._open_provider_circuit_on_failure(result)
             self._deliver_result_with_structured_retry(task, result, memory_space_id)
         except Exception as exc:  # noqa: BLE001 - release every leased task
             self._fail_task(raw_task, memory_space_id, exc)
@@ -489,6 +519,7 @@ class CoreExecutionTaskWorker:
                 self._fail_task(task.model_dump(mode="json"), memory_space_id, exc)
             return
         for task, result in zip(converted, results, strict=True):
+            self._open_provider_circuit_on_failure(result)
             try:
                 self._deliver_result_with_structured_retry(
                     task, result, memory_space_id

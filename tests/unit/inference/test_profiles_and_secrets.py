@@ -64,6 +64,24 @@ def test_inference_profile_rejects_invalid_provider_and_limits() -> None:
         )
 
 
+def test_inference_profile_exposes_runinfra_prompt_cache_capability() -> None:
+    runinfra = InferenceProfile(
+        profile_id="generation-runinfra",
+        base_url="https://api.runinfra.ai/v1",
+        model="test-model",
+        secret_ref="generation-test",
+    )
+    openrouter = InferenceProfile(
+        profile_id="generation-openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="test-model",
+        secret_ref="generation-test",
+    )
+
+    assert runinfra.supports_prompt_cache_key is True
+    assert openrouter.supports_prompt_cache_key is False
+
+
 def test_embedding_profile_fingerprint_is_stable_token_free_and_config_sensitive() -> None:
     first = embedding_profile_fingerprint(
         "nvidia/nemotron-3-embed-1b",

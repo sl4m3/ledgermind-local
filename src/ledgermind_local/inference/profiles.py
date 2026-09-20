@@ -332,6 +332,18 @@ class InferenceProfile(BaseModel):
     supports_seed: bool = False
     enabled: bool = True
 
+    @property
+    def supports_prompt_cache_key(self) -> bool:
+        """Return whether the configured transport accepts a cache hint.
+
+        Local persists this model and the shared inference package consumes
+        it. Keep the capability available at that boundary instead of relying
+        on the concrete Pydantic class that happens to construct the profile.
+        """
+
+        host = (urlparse(self.base_url).hostname or "").casefold().rstrip(".")
+        return host == "runinfra.ai" or host.endswith(".runinfra.ai")
+
     @field_validator("profile_id", "model", "secret_ref")
     @classmethod
     def _validate_text_fields(cls, value: str, info: object) -> str:

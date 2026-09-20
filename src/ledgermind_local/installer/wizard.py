@@ -24,6 +24,9 @@ from .models import (
     InstallerConfig,
     IntegrationConfig,
     LocalEmbeddingConfig,
+    RerankerApiConfig,
+    RerankerConfig,
+    RerankerLocalConfig,
     RuntimeConfig,
 )
 from .openrouter import OpenRouterEndpoint, list_openrouter_model_endpoints
@@ -723,6 +726,68 @@ def build_interactive_config(
                 ),
             )
 
+        ui.line("  Optional reranking improves the order of retrieved knowledge")
+        reranker_mode = ui.choose(
+            "Reranker",
+            (
+                _Choice("disabled", "Disabled", "use deterministic Core ranking"),
+                _Choice("api", "API", "send admitted candidates to a reranking endpoint"),
+                _Choice("local", "Local", "Qwen3 0.6B on CPU or GPU"),
+            ),
+        )
+        if reranker_mode == "api":
+            existing_api = existing_config.reranker.api if existing_config else None
+            reranker_endpoint = ui.required(
+                "Reranker API operation URL",
+                default=existing_api.endpoint if existing_api else None,
+            )
+            reuse_token = reranker_endpoint.startswith(endpoint.rstrip("/")) and ui.confirm(
+                "Reuse the generation token", default=True
+            )
+            reranker_token = token if reuse_token else ui.secret("Reranker API token")
+            reranker_model = ui.required(
+                "Reranker model", default=existing_api.model if existing_api else None
+            )
+            reranker = RerankerConfig(
+                mode="api",
+                api=RerankerApiConfig(
+                    endpoint=reranker_endpoint,
+                    token=reranker_token,
+                    model=reranker_model,
+                ),
+            )
+        elif reranker_mode == "local":
+            from ledgermind_local.inference.retrieval_reranker import MODEL_REVISION
+
+            existing_local = existing_config.reranker.local if existing_config else None
+            runtime_path = ui.required(
+                "Installed reranker runtime directory",
+                default=existing_local.runtime_path if existing_local else None,
+            )
+            reranker_device = ui.choose(
+                "Reranker compute device",
+                (
+                    _Choice("cpu", "CPU"),
+                    _Choice("cuda", "NVIDIA CUDA"),
+                    _Choice("rocm", "AMD ROCm"),
+                ),
+            )
+            reranker = RerankerConfig(
+                mode="local",
+                local=RerankerLocalConfig(
+                    model_path=str(
+                        Path(runtime_path).expanduser()
+                        / "model"
+                        / "snapshots"
+                        / MODEL_REVISION
+                    ),
+                    runtime_path=runtime_path,
+                    device=cast(Literal["cpu", "cuda", "rocm"], reranker_device),
+                ),
+            )
+        else:
+            reranker = RerankerConfig()
+
         draft = InstallerConfig(
             semantic_language=semantic_language,
             integrations=integrations,
@@ -741,6 +806,7 @@ def build_interactive_config(
                 model=model,
             ),
             embedding=embedding,
+            reranker=reranker,
             runtime=runtime,
             memory_data_path=(
                 existing_config.memory_data_path
@@ -771,6 +837,15 @@ def build_interactive_config(
             ui.line(
                 f"               {embedding.local.catalog_id} ({embedding.local.device})"
             )
+        if reranker.mode == "local":
+            ui.line(
+                f"  Reranker:    local Qwen3 0.6B on {reranker.device} "
+                f"({reranker.runtime_path})"
+            )
+        elif reranker.mode == "api" and reranker.api is not None:
+            ui.line(f"  Reranker:    API · {reranker.api.model}")
+        else:
+            ui.line("  Reranker:    disabled · Core ranking")
         ui.line(f"  Memory:      {memory_mode}")
         ui.line(
             "  Agents:      " + (", ".join(item.id for item in integrations) or "none")

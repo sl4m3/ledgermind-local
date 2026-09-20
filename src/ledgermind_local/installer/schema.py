@@ -74,6 +74,20 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
                 },
             ],
         },
+        "reranker": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "mode": {"enum": ["disabled", "api", "local"]},
+                "api": {"$ref": "#/$defs/rerankerApi"},
+                "local": {"$ref": "#/$defs/rerankerLocal"},
+            },
+            "oneOf": [
+                {"properties": {"mode": {"const": "disabled"}}},
+                {"properties": {"mode": {"const": "api"}}, "required": ["api"]},
+                {"properties": {"mode": {"const": "local"}}, "required": ["local"]},
+            ],
+        },
         "runtime": {
             "type": "object",
             "additionalProperties": False,
@@ -104,6 +118,29 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
         },
     },
     "$defs": {
+        "rerankerApi": {
+            "type": "object",
+            "required": ["endpoint", "model"],
+            "additionalProperties": False,
+            "properties": {
+                "endpoint": {"type": "string", "format": "uri"},
+                "token": {"type": ["string", "null"]},
+                "token_env": {"type": ["string", "null"]},
+                "secret_ref": {"type": ["string", "null"]},
+                "model": {"type": "string"},
+                "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+            },
+        },
+        "rerankerLocal": {
+            "type": "object",
+            "required": ["model_path", "runtime_path"],
+            "additionalProperties": False,
+            "properties": {
+                "model_path": {"type": "string"},
+                "runtime_path": {"type": "string"},
+                "device": {"enum": ["cpu", "cuda", "rocm"]},
+            },
+        },
         "integration": {
             "type": "object",
             "required": ["id"],

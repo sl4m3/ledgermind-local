@@ -10,7 +10,7 @@ class _Runtime:
     def __init__(self) -> None:
         self.requests: list[tuple[int, str | None, str | None]] = []
 
-    def retry_failed_user_semantic(
+    def retry_failed_round_semantic(
         self,
         *,
         limit: int,
@@ -23,7 +23,7 @@ class _Runtime:
             "error_code": error_code,
             "memory_space_id": memory_space_id,
             "requeued_normalization_commands": 2,
-            "retried_failed_user_semantic": 3,
+            "retried_failed_round_semantic": 3,
         }
 
 
@@ -44,7 +44,7 @@ def test_replay_failed_is_authenticated_explicit_and_bounded() -> None:
         "error_code": "provider_capability_unverified",
         "memory_space_id": "codex-default",
         "requeued_normalization_commands": 2,
-        "retried_failed_user_semantic": 3,
+        "retried_failed_round_semantic": 3,
     }
     assert runtime.requests == [(5, "provider_capability_unverified", "codex-default")]
     assert client.post("/maintenance/replay-failed?limit=0").status_code == 422

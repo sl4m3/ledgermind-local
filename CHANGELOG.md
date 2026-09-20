@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.1.0 - 2026-09-20
+
+- Made the compact Round Semantic schema v4 the only production semantic
+  extraction contract and removed obsolete v1-v3 execution paths from the
+  self-hosted runtime.
+- Improved retrieval with complete facet passages, exact related-object links,
+  related-object scoring, and non-recursive expansion of applicable
+  constraints, decisions, and procedures.
+- Added hybrid context selection: the first six complete knowledge items are
+  retained and additional whole items may be packed up to a 400-token soft
+  target without truncating knowledge.
+- Added an optional retrieval reranker with three installer modes: disabled,
+  provider API, or a separately downloaded local CPU, NVIDIA CUDA, or AMD ROCm
+  runtime. Reranker failure remains fail-open to the deterministic Core order.
+- Hardened provider telemetry, strict-schema validation and recovery while
+  preserving precise terminal failure reasons and existing memory databases.
+- Kept the public self-hosted distribution SQLite-only. LedgerMind Cloud and
+  PostgreSQL components are not included.
+
 ## 4.0.8 - 2026-09-06
 
 - Replaced parallel user and execution claim sections with one coherent

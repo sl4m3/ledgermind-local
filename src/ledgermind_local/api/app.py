@@ -87,6 +87,8 @@ def create_app(
     query_embedder = (
         runtime if callable(getattr(runtime, "embed_query", None)) else None
     )
+    reranker = getattr(runtime, "retrieval_reranker", None)
+    reranker_config = getattr(getattr(runtime, "config", None), "reranker", None)
 
     require_token = build_bearer_token_dependency(settings=settings)
     maybe_token = build_optional_bearer_token_dependency(settings=settings)
@@ -115,6 +117,8 @@ def create_app(
             context_gateway,
             max_body_bytes=settings.max_raw_round_bytes,
             query_embedder=query_embedder,
+            reranker=reranker,
+            reranker_config=reranker_config,
         )
     )
     app.include_router(create_maintenance_router(require_token, runtime))

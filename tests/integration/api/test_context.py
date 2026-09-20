@@ -125,3 +125,61 @@ def test_context_embeds_query_returns_provenance_and_records_outcome() -> None:
     assert gateway.request.repository_id == "repository-1"
     assert gateway.outcomes[0].candidate_value_ids == ("value-1",)
     assert gateway.outcomes[0].delivered_value_ids == ("value-1",)
+
+
+def test_optional_reranker_uses_core_pool_and_records_only_injected_values() -> None:
+    class Gateway(_Gateway):
+        def retrieve_context(self, request: RetrieveContextCommand) -> RetrieveContextResult:
+            assert request.limit == 32
+            original = super().retrieve_context(request).payload
+            original["items"] = [
+                {**original["items"][0], "value_id": f"value-{index}",
+                 "content": f"Rule {index}."} for index in range(1, 9)
+            ]
+            original["memory_injection"]["item_count"] = 8
+            return RetrieveContextResult(original)
+
+    class Reranker:
+        def score(self, query: str, documents: list[str]) -> list[float]:
+            assert len(documents) == 8
+            return [float(index) for index in range(8)]
+
+    gateway = Gateway()
+    app = FastAPI()
+    app.include_router(create_context_router(
+        lambda: "token", gateway, max_body_bytes=100_000,
+        query_embedder=_Embedder(), reranker=Reranker(),
+    ))
+    response = TestClient(app).post(
+        "/context/retrieve", json={"memory_space_id": "space", "query": "deployment"}
+    )
+    assert response.status_code == 200
+    assert response.headers["X-LedgerMind-Selection"] == "reranked"
+    payload = response.json()
+    assert len(payload["items"]) >= 6
+    assert payload["items"][0]["value_id"] == "value-8"
+    assert payload["delivered_value_ids"] == [item["value_id"] for item in payload["items"]]
+    assert payload["selection_diagnostics"]["status"] == "reranked"
+    assert payload["selection_diagnostics"]["candidate_count"] == 8
+    assert len(gateway.outcomes[0].candidate_value_ids) == 8
+    assert gateway.outcomes[0].delivered_value_ids == tuple(payload["delivered_value_ids"])
+
+
+def test_reranker_failure_uses_core_order() -> None:
+    class Broken:
+        def score(self, query: str, documents: list[str]) -> list[float]:
+            raise RuntimeError("unavailable")
+
+    gateway = _Gateway()
+    app = FastAPI()
+    app.include_router(create_context_router(
+        lambda: "token", gateway, max_body_bytes=100_000,
+        query_embedder=_Embedder(), reranker=Broken(),
+    ))
+    response = TestClient(app).post(
+        "/context/retrieve", json={"memory_space_id": "space", "query": "deployment"}
+    )
+    assert response.status_code == 200
+    assert response.headers["X-LedgerMind-Selection"] == "core_fallback"
+    assert response.json()["delivered_value_ids"] == ["value-1"]
+    assert response.json()["selection_diagnostics"]["fallback_reason"] == "RuntimeError"

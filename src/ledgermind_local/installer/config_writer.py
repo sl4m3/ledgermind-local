@@ -10,12 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
-from ledgermind_local.config import EmbeddingConfig as LocalEmbeddingConfig
-from ledgermind_local.config import LocalConfig, ProfileSlotsConfig
 from ledgermind_inference.profiles import (
     DEFAULT_GENERATION_MAX_INPUT_TOKENS,
     ProviderKind,
 )
+
+from ledgermind_local.config import EmbeddingConfig as LocalEmbeddingConfig
+from ledgermind_local.config import LocalConfig, ProfileSlotsConfig
+from ledgermind_local.config import RerankerConfig as LocalRerankerConfig
 
 from .models import InstallerConfig
 from .paths import InstallerPaths
@@ -27,6 +29,7 @@ from .secret_refs import (
     LEGACY_EMBEDDING_SECRET_REF,
     LEGACY_GENERATION_SECRET_REF,
     LOCAL_EMBEDDING_SECRET_REF,
+    RERANKER_SECRET_REF,
 )
 from .secrets.base import SecretBackend
 from .secrets.file_store import FileSecretStore
@@ -177,6 +180,23 @@ def resolve_provider_tokens(
     return generation, embedding
 
 
+def resolve_reranker_token(config: InstallerConfig, paths: InstallerPaths) -> str | None:
+    """Resolve the API reranker credential without exposing it in config files."""
+
+    if config.reranker.mode != "api" or config.reranker.api is None:
+        return None
+    api = config.reranker.api
+    backend = select_secret_backend(paths)
+    token = (
+        api.token
+        or (os.environ.get(api.token_env, "") if api.token_env else None)
+        or _stored_secret_value(backend, api.secret_ref, RERANKER_SECRET_REF)
+    )
+    if not token:
+        raise ValueError("a reranker provider token could not be resolved")
+    return token
+
+
 def _safe_config_payload(config: InstallerConfig) -> dict[str, Any]:
     payload = config.model_dump(mode="json", exclude_none=True)
     generation = dict(payload.get("generation", {}))
@@ -195,6 +215,15 @@ def _safe_config_payload(config: InstallerConfig) -> dict[str, Any]:
         api["secret_ref"] = EMBEDDING_SECRET_REF
         embedding["api"] = api
     payload["embedding"] = embedding
+    reranker = dict(payload.get("reranker", {}))
+    api = reranker.get("api")
+    if isinstance(api, dict):
+        api = dict(api)
+        api.pop("token", None)
+        api.pop("token_env", None)
+        api["secret_ref"] = RERANKER_SECRET_REF
+        reranker["api"] = api
+    payload["reranker"] = reranker
     return payload
 
 
@@ -234,6 +263,15 @@ def write_installer_config(
                 "secret_ref": generation_ref,
             }
         )
+    if config.reranker.mode == "api" and config.reranker.api is not None:
+        reranker_token = _secret_value(
+            config.reranker.api.token,
+            config.reranker.api.token_env,
+            None,
+            secret_ref=config.reranker.api.secret_ref,
+            backend=backend,
+        )
+        backend.put(RERANKER_SECRET_REF, reranker_token)
     if config.embedding.mode == "api":
         assert config.embedding.api is not None
         embedding_ref = EMBEDDING_SECRET_REF
@@ -347,6 +385,7 @@ def build_local_config(
             model=config.embedding.local.catalog_id,
             dimensions=config.embedding.local.dimensions,
             batch_size=config.embedding.local.batch_size,
+            secret_ref=LOCAL_EMBEDDING_SECRET_REF,
         )
     elif config.embedding.mode == "api" and config.embedding.api is not None:
         embedding = LocalEmbeddingConfig(
@@ -384,6 +423,18 @@ def build_local_config(
             ),
         ),
         embedding=embedding,
+        reranker=LocalRerankerConfig(
+            mode=config.reranker.mode,
+            model_path=config.reranker.model_path,
+            runtime_path=config.reranker.runtime_path,
+            device=config.reranker.device,
+            endpoint=(config.reranker.api.endpoint if config.reranker.api else None),
+            model=(config.reranker.api.model if config.reranker.api else None),
+            secret_ref=(RERANKER_SECRET_REF if config.reranker.api else None),
+            timeout_seconds=(
+                config.reranker.api.timeout_seconds if config.reranker.api else 30.0
+            ),
+        ),
     )
 
 
@@ -507,6 +558,56 @@ def write_local_profiles(
         "memory_space_ids": sorted(memory_spaces.values()),
         "profile_ids": profile_ids,
     }
+
+
+def bind_existing_profiles_for_agent(
+    config: InstallerConfig, paths: InstallerPaths, target_id: str
+) -> dict[str, str]:
+    """Bind missing slots for a newly connected agent without rewriting profiles.
+
+    An installer-only test setup may not have a Local database yet. In an
+    installed system the profile rows must already exist; missing rows are an
+    error rather than silently creating a different provider configuration.
+    """
+    from ledgermind_local.inference.profile_store import InferenceProfileStore
+    from ledgermind_local.persistence import open_sqlite_connection
+    from ledgermind_local.persistence.memory_space_repository import SQLiteMemorySpaceRepository
+
+    local = build_local_config(config, paths)
+    database_path = Path(local.rounds_database_path).expanduser()
+    if not database_path.is_file():
+        return {}
+    connection = open_sqlite_connection(database_path)
+    try:
+        store = InferenceProfileStore(connection)
+        memory_space_id = config.memory_space_id_for(target_id)
+        repository = SQLiteMemorySpaceRepository(connection)
+        if repository.get(memory_space_id) is None:
+            repository.ensure(
+                memory_space_id, "hermes" if config.memory_mode == "shared" else target_id
+            )
+        profile_ids = {
+            str(profile["slot"]): str(profile["profile_id"])
+            for profile in build_generation_profiles(config.generation)
+        }
+        profile_ids["embedding"] = (
+            "embedding-default" if config.embedding.mode == "api" else "embedding-local"
+        )
+        added: dict[str, str] = {}
+        for slot, profile_id in profile_ids.items():
+            if store.get_slot(memory_space_id, slot) is not None:
+                continue
+            if store.get(profile_id) is None:
+                raise ValueError(f"installed inference profile {profile_id!r} is missing")
+            store.bind_slot(memory_space_id, slot=slot, profile_id=profile_id)
+            added[slot] = profile_id
+        connection.commit()
+        return added
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def persist_generation_probe(

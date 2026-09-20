@@ -24,6 +24,9 @@ from ledgermind_local.installer.models import (
     GenerationConfig,
     InstallerConfig,
     IntegrationConfig,
+    LocalEmbeddingConfig as InstallerLocalEmbeddingConfig,
+    RerankerApiConfig,
+    RerankerConfig,
 )
 from ledgermind_local.installer.operations.common import unpack_bundle
 from ledgermind_local.installer.operations.integrations import (
@@ -55,6 +58,87 @@ def _config() -> InstallerConfig:
             ),
         ),
     )
+
+
+def test_installer_projects_explicit_local_reranker_without_enabling_legacy_installs(
+    tmp_path: Path,
+) -> None:
+    from ledgermind_local.installer.config_writer import build_local_config
+    from ledgermind_local.installer.models import RerankerConfig
+
+    paths = InstallerPaths(home_override=tmp_path)
+    assert not build_local_config(_config(), paths).reranker.enabled
+    configured = _config().model_copy(
+        update={
+            "reranker": RerankerConfig(
+                enabled=True,
+                model_path="/models/pinned/snapshots/revision",
+                runtime_path="/runtime/pinned",
+                device="cpu",
+            )
+        }
+    )
+    local = build_local_config(configured, paths)
+    assert local.reranker.enabled
+    assert local.reranker.model_path == "/models/pinned/snapshots/revision"
+    assert local.reranker.runtime_path == "/runtime/pinned"
+    assert local.reranker.min_k == 6
+    assert local.reranker.soft_budget == 400
+
+
+def test_installer_projects_api_reranker_without_persisting_token(tmp_path: Path) -> None:
+    from ledgermind_local.installer.config_writer import build_local_config
+
+    paths = InstallerPaths(home_override=tmp_path)
+    configured = _config().model_copy(
+        update={
+            "reranker": RerankerConfig(
+                mode="api",
+                api=RerankerApiConfig(
+                    endpoint="https://reranker.example/v1/rerank",
+                    token="reranker-secret",
+                    model="rerank-model",
+                ),
+            )
+        }
+    )
+    write_installer_config(configured, paths)
+
+    persisted = paths.config_file.read_text(encoding="utf-8")
+    local = build_local_config(configured, paths)
+    assert "reranker-secret" not in persisted
+    assert local.reranker.mode == "api"
+    assert local.reranker.endpoint == "https://reranker.example/v1/rerank"
+    assert local.reranker.model == "rerank-model"
+    assert local.reranker.secret_ref == "reranker-api"
+
+
+def test_installer_projects_local_embedding_service_credential(tmp_path: Path) -> None:
+    from ledgermind_local.installer.config_writer import build_local_config
+
+    paths = InstallerPaths(home_override=tmp_path)
+    configured = _config().model_copy(
+        update={
+            "embedding": EmbeddingConfig(
+                mode="local",
+                local=InstallerLocalEmbeddingConfig(
+                    catalog_id="nemotron",
+                    device="cpu",
+                    model_storage_path="/models/nemotron",
+                    runtime_id="sentence-transformers-nemotron",
+                    runtime_path="/runtime/nemotron",
+                    dimensions=2048,
+                ),
+            )
+        }
+    )
+
+    local = build_local_config(configured, paths)
+
+    assert local.embedding.provider_mode == "api"
+    assert local.embedding.endpoint == "http://127.0.0.1:8766"
+    assert local.embedding.model == "nemotron"
+    assert local.embedding.secret_ref == "embedding-local"
 
 
 def test_legacy_target_migrates_to_current_integration() -> None:
@@ -156,6 +240,7 @@ def test_terminal_wizard_uses_reference_openrouter_configuration(
             "",  # same API base
             "",  # reuse token
             "",  # reference embedding model
+            "",  # keep Core ranking; reranker is opt-in
             "",  # install
         )
     )
@@ -306,8 +391,9 @@ def test_terminal_wizard_offers_local_embedding_only_from_signed_catalog(
             "https://provider.example/v1",
             "generation-model",
             "2",  # local embeddings
-            "",  # automatic device
-            "",  # install
+                "",  # automatic device
+                "",  # keep Core ranking; reranker is opt-in
+                "",  # install
         )
     )
 
@@ -720,8 +806,9 @@ def test_provider_reconfiguration_preserves_memory_and_agents() -> None:
             "",  # API embeddings
             "",  # same endpoint
             "",  # reuse generation token
-            "new-embedding",
-            "",  # apply
+                "new-embedding",
+                "",  # keep Core ranking; reranker is opt-in
+                "",  # apply
         )
     )
 

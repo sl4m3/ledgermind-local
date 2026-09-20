@@ -13,6 +13,7 @@ from ledgermind_local.runtime.supervisor import RuntimeSupervisor
 from ..config_writer import (
     persist_generation_probe,
     resolve_provider_tokens,
+    resolve_reranker_token,
     write_installer_config,
     write_local_config,
     write_local_profiles,
@@ -47,6 +48,21 @@ def configure(
             probes["embedding"] = probe_embedding_api(
                 config.embedding.api, token=embedding_token
             )
+        if config.reranker.mode == "api" and config.reranker.api is not None:
+            from ledgermind_local.inference.retrieval_reranker import ApiReranker
+
+            reranker_token = resolve_reranker_token(config, paths)
+            assert reranker_token is not None
+            scorer = ApiReranker(
+                config.reranker.api.endpoint,
+                reranker_token,
+                config.reranker.api.model,
+                timeout_seconds=config.reranker.api.timeout_seconds,
+            )
+            scores = scorer.score("configuration check", ["configuration check"])
+            if len(scores) != 1:
+                raise ValueError("incomplete reranker API smoke response")
+            probes["reranker"] = {"status": "passed"}
     if dry_run:
         return {"status": "dry_run", "probes": probes}
     # A provider reconfiguration is explicit, but it must not race a live
@@ -148,6 +164,15 @@ def configure(
             "core": "restart-on-next-agent-use",
             "generation": generation_readiness,
             "embeddings": embedding_readiness,
+            "reranker": (
+                f"api-ready; model={config.reranker.api.model}"
+                if config.reranker.api is not None
+                else (
+                    f"local-configured; device={config.reranker.device}"
+                    if config.reranker.mode == "local"
+                    else "disabled; Core ranking"
+                )
+            ),
             "agents": f"{len(config.integrations)} preserved",
             "memory_mode": config.memory_mode,
         },

@@ -182,6 +182,17 @@ def normalize_usage(response: ModelResponse | Mapping[str, object]) -> dict[str,
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 normalized[target] = value
                 break
+    if "cached_input_tokens" not in normalized and isinstance(usage, Mapping):
+        for container, field in (
+            ("prompt_tokens_details", "cached_tokens"),
+            ("input_tokens_details", "cached_tokens"),
+            ("runinfra", "cached_input_tokens"),
+        ):
+            details = usage.get(container)
+            value = details.get(field) if isinstance(details, Mapping) else None
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                normalized["cached_input_tokens"] = value
+                break
     if isinstance(usage, Mapping):
         for name in ("reported_cost", "cost", "cost_usd"):
             value = usage.get(name)

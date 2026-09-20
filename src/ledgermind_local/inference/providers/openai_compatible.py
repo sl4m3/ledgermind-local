@@ -686,6 +686,11 @@ class OpenAICompatibleProvider(InferenceProvider):
                     if isinstance(normalized_usage.get("total_tokens"), int)
                     else None
                 ),
+                cached_input_tokens=(
+                    normalized_usage.get("cached_input_tokens")
+                    if isinstance(normalized_usage.get("cached_input_tokens"), int)
+                    else None
+                ),
                 reported_cost=(
                     normalized_usage.get("reported_cost")
                     if isinstance(normalized_usage.get("reported_cost"), (int, float))
@@ -696,6 +701,12 @@ class OpenAICompatibleProvider(InferenceProvider):
                 metadata=prepared.metadata,
                 configured_routes=configured_routes,
                 served_by=result.metadata.get("provider"),
+                wire_reasoning_effort=payload.get("reasoning_effort"),
+                wire_thinking=(
+                    payload["thinking"].get("type")
+                    if isinstance(payload.get("thinking"), Mapping)
+                    else None
+                ),
             )
             return result
 

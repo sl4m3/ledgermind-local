@@ -275,6 +275,102 @@ class EmbeddingConfig(BaseModel):
         return self
 
 
+class RerankerApiConfig(BaseModel):
+    """One Cohere-compatible HTTP reranking endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+    endpoint: str
+    token: str | None = None
+    token_env: str | None = None
+    secret_ref: str | None = None
+    model: str
+    timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        # Unlike generation and embeddings this is an operation URL: vendors
+        # expose either /rerank or /ranking and neither may be inferred safely.
+        normalized = _text(value, "endpoint").rstrip("/")
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("endpoint must be an absolute http(s) URL")
+        return normalized
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _text(value, "model")
+
+
+class RerankerLocalConfig(BaseModel):
+    """Separately downloaded, signed Qwen reranker runtime."""
+
+    model_config = ConfigDict(extra="forbid")
+    model_path: str
+    runtime_path: str
+    device: Literal["cpu", "cuda", "rocm"] = "cpu"
+
+    @field_validator("model_path", "runtime_path")
+    @classmethod
+    def validate_paths(cls, value: str, info: object) -> str:
+        return _text(value, getattr(info, "field_name", "path"))
+
+
+class RerankerConfig(BaseModel):
+    """Retrieval reranker: disabled, remote API, or local CPU/GPU."""
+
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["disabled", "api", "local"] = "disabled"
+    api: RerankerApiConfig | None = None
+    local: RerankerLocalConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_local_only_config(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "enabled" not in value:
+            return value
+        legacy = dict(value)
+        enabled = bool(legacy.pop("enabled", False))
+        if not enabled:
+            return {"mode": "disabled"}
+        return {
+            "mode": "local",
+            "local": {
+                "model_path": legacy.pop("model_path", None),
+                "runtime_path": legacy.pop("runtime_path", None),
+                "device": legacy.pop("device", "cpu"),
+            },
+        }
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> RerankerConfig:
+        if self.mode == "api" and self.api is None:
+            raise ValueError("reranker.api is required in API mode")
+        if self.mode == "local" and self.local is None:
+            raise ValueError("reranker.local is required in local mode")
+        if self.mode != "api" and self.api is not None:
+            raise ValueError("reranker.api is allowed only in API mode")
+        if self.mode != "local" and self.local is not None:
+            raise ValueError("reranker.local is allowed only in local mode")
+        return self
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "disabled"
+
+    @property
+    def model_path(self) -> str | None:
+        return self.local.model_path if self.local is not None else None
+
+    @property
+    def runtime_path(self) -> str | None:
+        return self.local.runtime_path if self.local is not None else None
+
+    @property
+    def device(self) -> Literal["cpu", "cuda", "rocm"]:
+        return self.local.device if self.local is not None else "cpu"
+
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -326,6 +422,7 @@ class InstallerConfig(BaseModel):
     memory_data_path: str | None = None
     generation: GenerationConfig
     embedding: EmbeddingConfig
+    reranker: RerankerConfig = Field(default_factory=RerankerConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
 
@@ -403,5 +500,8 @@ __all__ = [
     "IntegrationConfig",
     "LocalEmbeddingConfig",
     "ProfileBinding",
+    "RerankerApiConfig",
+    "RerankerConfig",
+    "RerankerLocalConfig",
     "RuntimeConfig",
 ]

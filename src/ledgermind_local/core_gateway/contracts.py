@@ -898,11 +898,12 @@ class CoreHealth:
 class RunControlMaintenanceCommand:
     request_id: str
     embedding_profiles: dict[str, dict[str, Any]] | None = None
-    retry_failed_user_semantic: bool = False
+    retry_failed_round_semantic: bool = False
     retry_limit: int = 100
     retry_error_code: str | None = None
     retry_memory_space_id: str | None = None
     retry_only: bool = False
+    automatic_recovery: bool = False
 
     def __post_init__(self) -> None:
         _required(self.request_id, "request_id")
@@ -916,8 +917,8 @@ class RunControlMaintenanceCommand:
                 for memory_space_id, profile in self.embedding_profiles.items()
             ):
                 raise TypeError("embedding_profiles must map ids to objects")
-        if not isinstance(self.retry_failed_user_semantic, bool):
-            raise TypeError("retry_failed_user_semantic must be boolean")
+        if not isinstance(self.retry_failed_round_semantic, bool):
+            raise TypeError("retry_failed_round_semantic must be boolean")
         if not isinstance(self.retry_limit, int) or not 1 <= self.retry_limit <= 1_000:
             raise ValueError("retry_limit must be between 1 and 1000")
         if self.retry_error_code is not None:
@@ -930,15 +931,19 @@ class RunControlMaintenanceCommand:
                 raise ValueError("retry_memory_space_id must not exceed 200 characters")
         if not isinstance(self.retry_only, bool):
             raise TypeError("retry_only must be boolean")
-        if self.retry_only and not self.retry_failed_user_semantic:
-            raise ValueError("retry_only requires retry_failed_user_semantic")
+        if not isinstance(self.automatic_recovery, bool):
+            raise TypeError("automatic_recovery must be boolean")
+        if self.retry_only and not self.retry_failed_round_semantic:
+            raise ValueError("retry_only requires retry_failed_round_semantic")
+        if self.automatic_recovery and not self.retry_failed_round_semantic:
+            raise ValueError("automatic_recovery requires retry_failed_round_semantic")
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {}
         if self.embedding_profiles is not None:
             payload["embedding_profiles"] = self.embedding_profiles
-        if self.retry_failed_user_semantic:
-            payload["retry_failed_user_semantic"] = True
+        if self.retry_failed_round_semantic:
+            payload["retry_failed_round_semantic"] = True
             payload["retry_limit"] = self.retry_limit
             if self.retry_error_code is not None:
                 payload["retry_error_code"] = self.retry_error_code
@@ -946,6 +951,8 @@ class RunControlMaintenanceCommand:
                 payload["retry_memory_space_id"] = self.retry_memory_space_id
             if self.retry_only:
                 payload["retry_only"] = True
+            if self.automatic_recovery:
+                payload["automatic_recovery"] = True
         return payload
 
 
@@ -964,7 +971,7 @@ class ControlMaintenanceResult:
     terminal_task_rows_deleted: int = 0
     cleanup_candidate_count: int = 0
     objects_consolidated: int = 0
-    retried_failed_user_semantic: int = 0
+    retried_failed_round_semantic: int = 0
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> ControlMaintenanceResult:
@@ -984,7 +991,7 @@ class ControlMaintenanceResult:
                 "diagnostic_rows_deleted",
                 "terminal_task_rows_deleted",
                 "cleanup_candidate_count",
-                "retried_failed_user_semantic",
+                "retried_failed_round_semantic",
             },
             "control maintenance result",
         )
@@ -1010,9 +1017,9 @@ class ControlMaintenanceResult:
             objects_consolidated=_non_negative_int(
                 payload.get("objects_consolidated", 0), "objects_consolidated"
             ),
-            retried_failed_user_semantic=_non_negative_int(
-                payload.get("retried_failed_user_semantic", 0),
-                "retried_failed_user_semantic",
+            retried_failed_round_semantic=_non_negative_int(
+                payload.get("retried_failed_round_semantic", 0),
+                "retried_failed_round_semantic",
             ),
             missing_card_embeddings=_non_negative_int(
                 payload.get("missing_card_embeddings"), "missing_card_embeddings"

@@ -39,6 +39,46 @@ class EmbeddingConfig(BaseModel):
     secret_ref: str | None = None
 
 
+class RerankerConfig(BaseModel):
+    """Optional retrieval reranker selected during installation."""
+
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["disabled", "api", "local"] = "disabled"
+    model_path: str | None = None
+    runtime_path: str | None = None
+    device: Literal["cpu", "cuda", "rocm"] = "cpu"
+    endpoint: str | None = None
+    model: str | None = None
+    secret_ref: str | None = None
+    timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+    min_k: int = Field(default=6, ge=1, le=32)
+    soft_budget: int = Field(default=400, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_local_only_config(cls, value: object) -> object:
+        if not isinstance(value, dict) or "enabled" not in value:
+            return value
+        data = dict(value)
+        enabled = bool(data.pop("enabled", False))
+        data.setdefault("mode", "local" if enabled else "disabled")
+        return data
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> RerankerConfig:
+        if self.mode == "local" and (not self.model_path or not self.runtime_path):
+            raise ValueError("local reranker requires model_path and runtime_path")
+        if self.mode == "api" and (
+            not self.endpoint or not self.model or not self.secret_ref
+        ):
+            raise ValueError("API reranker requires endpoint, model, and secret_ref")
+        return self
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "disabled"
+
+
 class WorkerConfig(BaseModel):
     """Lifecycle settings shared by one guarded background worker."""
 
@@ -187,6 +227,7 @@ class LocalConfig(BaseModel):
     raw_round_retention_days: int = Field(default=30, ge=1)
     allow_remote_bind: bool = False
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    reranker: RerankerConfig = Field(default_factory=RerankerConfig)
 
     @field_validator("semantic_language")
     @classmethod

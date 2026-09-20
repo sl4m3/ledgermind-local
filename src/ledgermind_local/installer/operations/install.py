@@ -11,6 +11,7 @@ from ..config_writer import (
     build_local_config,
     persist_generation_probe,
     resolve_provider_tokens,
+    resolve_reranker_token,
     write_installer_config,
     write_local_config,
     write_local_profiles,
@@ -83,10 +84,63 @@ def install_plan(
         "platform": _platform_name(),
         "memory_data_path": config.memory_data_path or str(paths.memory_data_dir),
         "profiles": profiles,
+        "reranker": config.reranker.model_dump(mode="json"),
         "runtime": config.runtime.model_dump(mode="json"),
         "release_version": manifest.release_version if manifest else None,
         "requires_signed_bundle": True,
     }
+
+
+def _prepare_opt_in_reranker(
+    config: InstallerConfig, paths: InstallerPaths,
+    report: Callable[[str, str], None],
+) -> InstallerConfig:
+    """Never commit a configuration that would silently fall back forever."""
+    if not config.reranker.enabled:
+        return config
+    try:
+        from ledgermind_local.inference.retrieval_reranker import (
+            ApiReranker,
+            QwenWorkerReranker,
+            Reranker,
+        )
+
+        scorer: Reranker
+        if config.reranker.mode == "api":
+            assert config.reranker.api is not None
+            token = resolve_reranker_token(config, paths)
+            assert token is not None
+            report("reranker", "Checking reranker API")
+            scorer = ApiReranker(
+                config.reranker.api.endpoint,
+                token,
+                config.reranker.api.model,
+                timeout_seconds=config.reranker.api.timeout_seconds,
+            )
+        else:
+            model_path = config.reranker.model_path
+            if not model_path or not config.reranker.runtime_path:
+                raise ValueError(
+                    "signed, separately installed reranker runtime is required"
+                )
+            report("reranker", "Checking separately installed local reranker")
+            scorer = QwenWorkerReranker(
+                model_path,
+                config.reranker.device,
+                runtime_path=config.reranker.runtime_path,
+            )
+        try:
+            scores = scorer.score("installation check", ["content: installation check"])
+        finally:
+            scorer.close()
+        if len(scores) != 1:
+            raise ValueError("incomplete reranker smoke response")
+        return config
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"reranker preflight failed ({type(exc).__name__}); "
+            "check its API/runtime settings or select Core-only ranking"
+        ) from exc
 
 
 def _platform_name() -> str:
@@ -137,6 +191,7 @@ def install(
         plan = install_plan(config, paths=paths, manifest=manifest)
         plan["status"] = "dry_run"
         return plan
+    config = _prepare_opt_in_reranker(config, paths, report)
     if manifest is None:
         report("download", "Downloading the signed release manifest")
         fetched_manifest, fetched_signature, manifest = fetch_manifest(
@@ -431,6 +486,18 @@ def install(
         "core": doctor_report.get("status", "unknown"),
         "generation": generation_readiness,
         "embeddings": embedding_readiness,
+        "reranker": (
+            (
+                f"local-ready; model=Qwen3-Reranker-0.6B; "
+                f"device={effective_config.reranker.device}"
+            )
+            if effective_config.reranker.mode == "local"
+            else (
+                f"api-ready; model={effective_config.reranker.api.model}"
+                if effective_config.reranker.api is not None
+                else "disabled; Core ranking"
+            )
+        ),
         "smoke_test": doctor_report.get("smoke_test", {}).get("status", "unknown"),
         "agents": f"{connected_agents}/{total_agents} connected"
         if total_agents

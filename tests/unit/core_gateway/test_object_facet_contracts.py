@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from ledgermind_local.core_gateway.contracts import (
     ControlMaintenanceResult,
     CoreExecutionResult,
@@ -218,18 +217,20 @@ def test_control_maintenance_replay_is_explicit_and_bounded() -> None:
     default = RunControlMaintenanceCommand("maintenance")
     replay = RunControlMaintenanceCommand(
         "replay",
-        retry_failed_user_semantic=True,
+        retry_failed_round_semantic=True,
         retry_limit=7,
         retry_error_code="provider_capability_unverified",
         retry_memory_space_id="codex-default",
+        automatic_recovery=True,
     )
 
     assert default.to_payload() == {}
     assert replay.to_payload() == {
-        "retry_failed_user_semantic": True,
+        "retry_failed_round_semantic": True,
         "retry_limit": 7,
         "retry_error_code": "provider_capability_unverified",
         "retry_memory_space_id": "codex-default",
+        "automatic_recovery": True,
     }
     with pytest.raises(ValueError, match="between 1 and 1000"):
         RunControlMaintenanceCommand("replay", retry_limit=0)
@@ -237,3 +238,5 @@ def test_control_maintenance_replay_is_explicit_and_bounded() -> None:
         RunControlMaintenanceCommand("replay", retry_error_code="x" * 129)
     with pytest.raises(ValueError, match="200"):
         RunControlMaintenanceCommand("replay", retry_memory_space_id="x" * 201)
+    with pytest.raises(ValueError, match="requires"):
+        RunControlMaintenanceCommand("replay", automatic_recovery=True)

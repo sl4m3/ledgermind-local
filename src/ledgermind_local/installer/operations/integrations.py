@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..config_writer import load_installer_config, persist_installer_config
+from ..config_writer import bind_existing_profiles_for_agent, load_installer_config, persist_installer_config
 from ..errors import AdapterError, ConfigurationError
 from ..models import InstallerConfig, IntegrationConfig
 from ..paths import InstallerPaths
@@ -84,6 +84,7 @@ def connect_integration(
     try:
         installed = adapter.install(context)
         verified = adapter.verify(context)
+        bound_profiles = bind_existing_profiles_for_agent(updated, paths, target_id)
         persist_installer_config(updated, paths)
     except Exception:
         try:
@@ -111,6 +112,7 @@ def connect_integration(
         "preflight": preflight,
         "install": installed,
         "verify": verified,
+        "bound_profiles": bound_profiles,
         "summary": {
             "label": adapter.label,
             "agent_location": str(discovery.config_dir or discovery.home or ""),

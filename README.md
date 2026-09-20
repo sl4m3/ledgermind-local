@@ -88,6 +88,33 @@ pip install -e .[dev]
 pytest -q
 ```
 
+## Optional retrieval reranker
+
+The setup wizard offers three explicit modes: disabled, API, or local. Existing
+installations migrate to disabled/Core ranking unless they had already enabled
+the local runtime. When enabled, Core first supplies up to 32 eligible
+candidates and the selected reranker reorders only those candidates. Injection keeps
+the first six complete knowledge items, then adds later complete items while
+the rendered context fits the 400-token soft target. A long seventh item can
+be skipped for a shorter eighth. A failed or timed-out reranker falls back to
+Core order; `selection_diagnostics` reports the fallback. API credentials are
+stored only in LedgerMind's private secret store. The endpoint must be the full
+Cohere-compatible `/rerank` operation URL or NVIDIA NIM `/ranking` or
+`/reranking` URL.
+
+The reranker runtime is a separate downloadable, signed archive, not part of
+the main platform bundle. Download its `.tar.zst`, `.json`, and `.sig` files
+together. Install with `scripts/install-reranker-runtime.py`, passing the
+installed release's `signatures/manifest.pub` as `--trusted-public-key` and a
+new private `--destination`. The installer verifies the signature, archive
+size and SHA-256 before extraction, and rejects unsafe archive members. Set
+`reranker.runtime_path` to that destination and `reranker.model_path` to its
+`model/snapshots/<pinned-revision>` directory. Use
+`scripts/smoke-reranker-runtime.py` for an offline inference check. Source
+installs can instead use `pip install -e '.[reranker]'`. Inference never calls a
+model provider or downloads files in local mode; the main Local service does
+not import PyTorch. The wizard exposes CPU, NVIDIA CUDA, and AMD ROCm choices.
+
 ## Docker
 
 Build from the LedgerMind workspace root because Core, Local,
@@ -135,7 +162,8 @@ Without arguments, `install.sh` starts a navigable terminal wizard (with a
 line-mode fallback for restricted terminals and SSH). It checks the Linux
 host, lets the user choose English, Spanish, German, French, Russian, or any
 custom BCP-47 memory language, detects agents, selects shared or per-agent
-memory, and then configures generation and embeddings. One generation model is
+memory, and then configures generation, embeddings, and the optional reranker.
+One generation model is
 used throughout the complete knowledge pipeline; there is no separate Object
 Resolution model prompt. The token is entered privately and displayed only as
 a masked fingerprint during review. Nothing is installed before confirmation.
@@ -232,9 +260,9 @@ interactive installer requires one explicit action:
    provider configuration, agents, and memory.
 3. **Repair** restores binaries, links, permissions, and already-selected
    integrations, then runs diagnostics. It does not select new models.
-4. **Reconfigure providers** probes and replaces only generation and embedding
-   profiles. Memory, agents, language, runtime settings, and storage remain
-   unchanged.
+4. **Reconfigure providers** probes and replaces generation, embedding, and
+   reranker profiles. Memory, agents, language, runtime settings, and storage
+   remain unchanged.
 5. **Exit** makes no changes.
 
 The same actions are available without prompts:

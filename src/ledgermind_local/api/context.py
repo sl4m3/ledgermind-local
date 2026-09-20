@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, Protocol
 
@@ -15,6 +16,11 @@ from ledgermind_local.core_gateway import (
     RetrieveContextCommand,
     RetrieveContextResult,
     TransientCoreError,
+)
+from ledgermind_local.inference.retrieval_reranker import (
+    Reranker,
+    pack_items,
+    rank_items,
 )
 
 from .http import build_request_id, error_payload, validate_json_request_headers
@@ -74,6 +80,7 @@ class ContextItemResponse(BaseModel):
     target_breadcrumb: list[str] = Field(default_factory=list, max_length=16)
     facet: str
     content: str
+    scope_text: str | None = None
     content_language: str | None = None
     conditions: list[dict[str, str]] = Field(default_factory=list)
     relevance: float = Field(ge=0.0, le=1.0)
@@ -97,6 +104,7 @@ class ContextViewResponse(BaseModel):
     retrieval_request_id: str
     delivered_value_ids: list[str] = Field(default_factory=list)
     memory_injection: MemoryInjectionResponse | None = None
+    selection_diagnostics: dict[str, object] | None = None
 
 
 def create_context_router(
@@ -105,6 +113,8 @@ def create_context_router(
     *,
     max_body_bytes: int,
     query_embedder: QueryEmbedder | None = None,
+    reranker: Reranker | None = None,
+    reranker_config: object | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -180,7 +190,9 @@ def create_context_router(
                     ),
                     embedding_model_id=embedding_model_id,
                     embedding_model_version=embedding_model_version,
-                    limit=payload.limit,
+                    # The public caller limit remains the old safety cap in
+                    # Core-only mode. Reranking requires the Core-admitted pool.
+                    limit=32 if reranker is not None else payload.limit,
                     project_id=payload.project_id,
                     repository_id=payload.repository_id,
                     task_id=payload.task_id,
@@ -194,25 +206,77 @@ def create_context_router(
                 )
             )
             response_payload = _context_response(result.payload)
+            core_items = response_payload["items"]
+            candidate_ids = tuple(str(item["value_id"]) for item in core_items)
+            if reranker is not None and core_items:
+                original = response_payload.get("memory_injection") or {}
+                started = time.monotonic()
+                fallback_reason: str | None = None
+                try:
+                    ranked = rank_items(payload.query, core_items, reranker)
+                    selection_status = "reranked"
+                except (
+                    ImportError,
+                    OSError,
+                    RuntimeError,
+                    TimeoutError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    logger.warning("local reranker fallback to Core order: %s", type(exc).__name__)
+                    ranked = core_items
+                    selection_status = "core_fallback"
+                    fallback_reason = type(exc).__name__
+                try:
+                    selected, injection, tokens = pack_items(
+                        ranked, original, payload.query_language,
+                        min_k=int(getattr(reranker_config, "min_k", 6)),
+                        soft_budget=int(getattr(reranker_config, "soft_budget", 400)),
+                    )
+                    response_payload["items"] = selected
+                    response_payload["memory_injection"] = injection
+                    response_payload["selection_diagnostics"] = {
+                        "status": selection_status,
+                        "candidate_count": len(core_items),
+                        "injected_count": len(selected),
+                        "estimated_injection_tokens": tokens,
+                        "latency_ms": round((time.monotonic() - started) * 1000, 2),
+                        "fallback_reason": fallback_reason,
+                    }
+                    response.headers["X-LedgerMind-Selection"] = selection_status
+                    logger.info(
+                        "retrieval selection status=%s candidates=%d injected=%d tokens=%d",
+                        selection_status, len(core_items), len(selected), tokens,
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    # A formatting mismatch must not suppress recall. Keep
+                    # Core's intact response and make the fallback visible.
+                    logger.warning("local injection fallback to Core: %s", type(exc).__name__)
+                    response.headers["X-LedgerMind-Selection"] = "core_fallback"
+                    response_payload["selection_diagnostics"] = {
+                        "status": "core_fallback", "candidate_count": len(core_items),
+                        "injected_count": len(core_items),
+                        "estimated_injection_tokens": None,
+                        "latency_ms": round((time.monotonic() - started) * 1000, 2),
+                        "fallback_reason": type(exc).__name__,
+                    }
             record_outcome = getattr(
                 context_gateway, "record_retrieval_outcome", None
             )
             retrieval_request_id = response_payload["retrieval_request_id"]
             response_items = response_payload["items"]
-            candidate_ids = tuple(str(item["value_id"]) for item in response_items)
+            delivered_ids = tuple(str(item["value_id"]) for item in response_items)
             if callable(record_outcome) and candidate_ids:
-                # Core returns the authoritative candidate set.  The HTTP
-                # response represents all returned candidates as delivered;
-                # the two lists remain separate in the durable outcome event.
+                # Core's candidate set and the injected subset are distinct.
                 record_outcome(
                     RecordRetrievalOutcomeCommand(
                         request_id=request_id,
                         retrieval_request_id=retrieval_request_id,
                         candidate_value_ids=candidate_ids,
-                        delivered_value_ids=candidate_ids,
+                        delivered_value_ids=delivered_ids,
                     )
                 )
-            response_payload["delivered_value_ids"] = list(candidate_ids)
+            response_payload["delivered_value_ids"] = list(delivered_ids)
             return ContextViewResponse.model_validate(response_payload)
         except DomainRejectedError as exc:
             logger.warning("context retrieval rejected: %s", exc.code)

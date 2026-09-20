@@ -302,6 +302,8 @@ def _runtime(paths: InstallerPaths) -> RuntimeSupervisor:
             module_bootstrap,
             "--model-path",
             str(Path(model_path).expanduser()),
+            "--model",
+            local_config.catalog_id,
             "--device",
             device,
             "--threads",
@@ -509,6 +511,7 @@ def _existing_install(
         update={
             "generation": candidate.generation,
             "embedding": candidate.embedding,
+            "reranker": candidate.reranker,
         }
     )
     return configure(

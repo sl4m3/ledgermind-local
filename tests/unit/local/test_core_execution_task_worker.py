@@ -59,6 +59,61 @@ def test_process_once_closes_discovery_connection_before_provider_work(
     assert events == ["migrate", "commit", "close", "poll"]
 
 
+def test_auth_failure_stops_polling_other_spaces_and_future_cycles(monkeypatch) -> None:
+    polls: list[str] = []
+
+    class Connection:
+        def commit(self) -> None:
+            pass
+
+        def execute(self, _query: str):
+            return SimpleNamespace(fetchall=lambda: [("space-1",), ("space-2",)])
+
+        def close(self) -> None:
+            pass
+
+    class Gateway:
+        def require_capabilities(self, _capability: str) -> None:
+            pass
+
+        def poll_execution_tasks(self, command):
+            polls.append(command.memory_space_id)
+            return SimpleNamespace(tasks=[{"task_id": "task-1"}])
+
+    monkeypatch.setattr(worker_module.migrations, "apply_migrations", lambda _connection: None)
+    worker = CoreExecutionTaskWorker(
+        database_path="unused.db",
+        gateway=Gateway(),
+        executor=SimpleNamespace(),  # type: ignore[arg-type]
+        worker_id="test-worker",
+        connection_factory=lambda _path: Connection(),
+    )
+
+    def process_tasks(_tasks: object, _space: str) -> None:
+        worker._open_provider_circuit_on_failure(
+            SimpleNamespace(status="failed", error_code="authentication_failed")
+        )
+
+    monkeypatch.setattr(worker, "_process_tasks", process_tasks)
+    assert worker.process_once() == 1
+    assert worker.provider_circuit_open
+    assert worker.process_once() == 0
+    assert polls == ["space-1"]
+
+
+def test_non_auth_provider_failure_does_not_open_circuit() -> None:
+    worker = CoreExecutionTaskWorker(
+        database_path="unused.db",
+        gateway=SimpleNamespace(),  # type: ignore[arg-type]
+        executor=SimpleNamespace(),  # type: ignore[arg-type]
+        worker_id="test-worker",
+    )
+    worker._open_provider_circuit_on_failure(
+        SimpleNamespace(status="failed", error_code="provider_unavailable")
+    )
+    assert not worker.provider_circuit_open
+
+
 def test_transient_provider_result_is_retryable() -> None:
     result = SimpleNamespace(status="failed", error_code="transient_provider_error")
 

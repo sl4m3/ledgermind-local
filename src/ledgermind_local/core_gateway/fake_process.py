@@ -290,7 +290,7 @@ def main() -> int:
                         "missing_card_embeddings": 0,
                         "missing_facet_embeddings": 0,
                         "integrity_errors": 0,
-                        "retried_failed_user_semantic": 0,
+                        "retried_failed_round_semantic": 0,
                     },
                 )
             )

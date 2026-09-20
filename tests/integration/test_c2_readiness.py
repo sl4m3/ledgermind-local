@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from ledgermind_local.bootstrap import LocalRuntime
 from ledgermind_local.config import LocalConfig
 from ledgermind_local.core_gateway.compatibility import (
@@ -148,7 +147,9 @@ def _seed_verified_operational_capability(database: Path) -> None:
         connection.close()
 
 
-def _runtime(tmp_path: Path, *, gateway: _Gateway) -> LocalRuntime:
+def _runtime(
+    tmp_path: Path, *, gateway: _Gateway, model_worker: object | None = None
+) -> LocalRuntime:
     paths = ServicePaths(tmp_path / "service")
     database = paths.resolve_rounds_database_path("rounds.db")
 
@@ -165,8 +166,35 @@ def _runtime(tmp_path: Path, *, gateway: _Gateway) -> LocalRuntime:
         api_token="token",
         database_path=database,
         core_gateway_factory=lambda: gateway,
-        worker_factories={"core_model_tasks": lambda _runtime: NoopWorker()},
+        worker_factories={
+            "core_model_tasks": lambda _runtime: model_worker or NoopWorker()
+        },
     )
+
+
+def test_provider_auth_circuit_is_visible_in_readiness(tmp_path: Path) -> None:
+    class AuthBlockedWorker:
+        provider_circuit_open = True
+
+        def process_once(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    runtime = _runtime(
+        tmp_path, gateway=_Gateway(), model_worker=AuthBlockedWorker()
+    )
+    _seed_profiles(runtime.database_path)
+    runtime.start()
+    try:
+        report = runtime.health_report()
+        worker = report["components"]["workers"]["core_model_tasks"]
+        assert worker["ready"] is False
+        assert worker["error_code"] == "provider_configuration_error"
+        assert report["full_ready"] is False
+    finally:
+        runtime.stop()
 
 
 def test_full_readiness_requires_all_four_profile_slots(tmp_path: Path) -> None:
@@ -185,7 +213,7 @@ def test_full_readiness_requires_all_four_profile_slots(tmp_path: Path) -> None:
         runtime.stop()
 
 
-def test_startup_recovers_only_capability_failures_for_verified_space(
+def test_startup_recovers_one_stalled_round_for_verified_space(
     tmp_path: Path,
 ) -> None:
     gateway = _Gateway()
@@ -198,11 +226,12 @@ def test_startup_recovers_only_capability_failures_for_verified_space(
         assert gateway.control_calls == 1
         command = gateway.control_commands[0]
         assert isinstance(command, RunControlMaintenanceCommand)
-        assert command.retry_failed_user_semantic is True
-        assert command.retry_error_code == "provider_capability_unverified"
+        assert command.retry_failed_round_semantic is True
+        assert command.retry_error_code is None
         assert command.retry_memory_space_id == "space-c2"
-        assert command.retry_limit == 1_000
+        assert command.retry_limit == 1
         assert command.retry_only is True
+        assert command.automatic_recovery is True
     finally:
         runtime.stop()
 

@@ -7,12 +7,19 @@ import os
 import secrets
 import sqlite3
 import tempfile
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from ledgermind_inference.core_task_executor import CoreTaskExecutor
+from ledgermind_inference.embedding_provider import EmbeddingProvider
+from ledgermind_inference.openai_vectorizer import OpenAIEmbeddingVectorizer
+from ledgermind_inference.strict import STRICT_JSON_SCHEMA_MODE
+from ledgermind_inference.structured_json_provider import StructuredJsonProvider
 
 from ledgermind_local.config import CURRENT_CONFIG_VERSION, LocalConfig, WorkerConfig
 from ledgermind_local.core_gateway import (
@@ -36,13 +43,8 @@ from ledgermind_local.core_gateway.supervisor import (
     CoreSupervisorError,
     CoreSupervisorTimeout,
 )
-from ledgermind_inference.core_task_executor import CoreTaskExecutor
-from ledgermind_local.inference.embedding_provider import (
-    EmbeddingProvider,
-    PersistentEmbeddingCache,
-)
+from ledgermind_local.inference.embedding_provider import PersistentEmbeddingCache
 from ledgermind_local.inference.gguf_vectorizer import GGUFVectorizer
-from ledgermind_inference.openai_vectorizer import OpenAIEmbeddingVectorizer
 from ledgermind_local.inference.profile_slots import (
     DatabaseBackedProfileResolver,
     ProfileSlot,
@@ -52,8 +54,6 @@ from ledgermind_local.inference.profile_store import (
     InferenceProfileStore,
 )
 from ledgermind_local.inference.secrets import SecretStore
-from ledgermind_inference.strict import STRICT_JSON_SCHEMA_MODE
-from ledgermind_inference.structured_json_provider import StructuredJsonProvider
 from ledgermind_local.maintenance.coordinated_restore import (
     CoordinatedRestoreError,
     CoordinatedRestoreService,
@@ -270,6 +270,7 @@ class LocalRuntime:
         self._object_facet_statistics: dict[str, object] | None = None
         self._object_facet_bootstrap_pending = False
         self._last_core_activity_snapshot: dict[str, object] | None = None
+        self._last_automatic_recovery_at = 0.0
 
     @property
     def started(self) -> bool:
@@ -483,6 +484,35 @@ class LocalRuntime:
 
         return self.embed_query_with_metadata(memory_space_id, query)[0]
 
+    @property
+    def retrieval_reranker(self) -> Any | None:
+        """Create the configured scorer lazily; disabled installs stay Core-only."""
+        if not self.config.reranker.enabled:
+            return None
+        from ledgermind_local.inference.retrieval_reranker import (
+            ApiReranker,
+            QwenWorkerReranker,
+        )
+
+        scorer = getattr(self, "_retrieval_reranker", None)
+        if scorer is None:
+            if self.config.reranker.mode == "api":
+                secret_ref = self.config.reranker.secret_ref or ""
+                token = SecretStore(self.config.inference_secrets_path).get(secret_ref)
+                scorer = ApiReranker(
+                    self.config.reranker.endpoint or "",
+                    token,
+                    self.config.reranker.model or "",
+                    timeout_seconds=self.config.reranker.timeout_seconds,
+                )
+            else:
+                scorer = QwenWorkerReranker(
+                    self.config.reranker.model_path or "", self.config.reranker.device,
+                    runtime_path=self.config.reranker.runtime_path,
+                )
+            self._retrieval_reranker = scorer
+        return scorer
+
     def embed_query_with_metadata(
         self, memory_space_id: str, query: str
     ) -> tuple[tuple[float, ...], str, str]:
@@ -597,6 +627,10 @@ class LocalRuntime:
         self._shutdown_incomplete = False
         self._shutdown_timed_out_workers = []
         self._workers.clear()
+        reranker = getattr(self, "_retrieval_reranker", None)
+        if reranker is not None:
+            reranker.close()
+            self._retrieval_reranker = None
         self._context_gateway = None
         self._backup_service = None
         self._restore_service = None
@@ -667,10 +701,23 @@ class LocalRuntime:
             state = handle.state.snapshot()
             loop_thread = getattr(handle.loop, "_thread", None)
             alive = bool(loop_thread is not None and loop_thread.is_alive())
-            ready = bool(alive and state.healthy and name not in self._component_errors)
+            provider_circuit_open = bool(
+                getattr(handle.worker, "provider_circuit_open", False)
+            )
+            ready = bool(
+                alive
+                and state.healthy
+                and name not in self._component_errors
+                and not provider_circuit_open
+            )
             worker_reports[name] = {
                 "enabled": True,
                 "ready": ready,
+                "error_code": (
+                    "provider_configuration_error"
+                    if provider_circuit_open
+                    else self._component_errors.get(name)
+                ),
                 "state": {
                     "running": state.running,
                     "healthy": state.healthy,
@@ -1480,7 +1527,7 @@ class LocalRuntime:
             },
         }
 
-    def retry_failed_user_semantic(
+    def retry_failed_round_semantic(
         self,
         *,
         limit: int = 100,
@@ -1541,7 +1588,7 @@ class LocalRuntime:
             RunControlMaintenanceCommand(
                 f"local-replay:{os.getpid()}:{uuid.uuid4()}",
                 embedding_profiles=self._embedding_profiles_by_memory_space(),
-                retry_failed_user_semantic=True,
+                retry_failed_round_semantic=True,
                 retry_limit=limit,
                 retry_error_code=error_code,
                 retry_memory_space_id=memory_space_id,
@@ -1552,11 +1599,16 @@ class LocalRuntime:
             "error_code": error_code,
             "memory_space_id": memory_space_id,
             "requeued_normalization_commands": len(command_ids),
-            "retried_failed_user_semantic": result.retried_failed_user_semantic,
+            "retried_failed_round_semantic": result.retried_failed_round_semantic,
         }
 
     def _recover_verified_provider_capability_failures(self) -> None:
-        """Requeue safe pre-materialization failures for verified profiles."""
+        """Requeue one stalled round after its provider became usable.
+
+        Recovery is intentionally serialized.  A completed round can change
+        the memory snapshot used by KR, so bulk requeueing independent rounds
+        here would manufacture avoidable stale-snapshot conflicts.
+        """
 
         gateway = self.core_gateway
         if gateway is None or not self._core_ready:
@@ -1587,11 +1639,11 @@ class LocalRuntime:
                         RunControlMaintenanceCommand(
                             f"startup-recovery:{os.getpid()}:{uuid.uuid4()}",
                             embedding_profiles=self._embedding_profiles_by_memory_space(),
-                            retry_failed_user_semantic=True,
-                            retry_limit=1_000,
-                            retry_error_code="provider_capability_unverified",
+                            retry_failed_round_semantic=True,
+                            retry_limit=1,
                             retry_memory_space_id=memory_space_id,
                             retry_only=True,
+                            automatic_recovery=True,
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 - isolate memory spaces
@@ -1722,7 +1774,20 @@ class LocalRuntime:
     ) -> None:
         """Keep result observation content-free at the worker boundary."""
 
-        del name, result, state
+        del result, state
+        if name != "core_model_tasks" or self._stop_requested:
+            return
+        now = time.monotonic()
+        if now - self._last_automatic_recovery_at < 2.0:
+            return
+        self._last_automatic_recovery_at = now
+        try:
+            self._recover_verified_provider_capability_failures()
+        except Exception as exc:  # noqa: BLE001 - recovery must not stop workers
+            logger.warning(
+                "automatic stalled-round recovery failed",
+                extra={"error_code": _safe_error_code(exc)},
+            )
 
     def _build_context_gateway(self) -> None:
         if self.core_gateway is None:

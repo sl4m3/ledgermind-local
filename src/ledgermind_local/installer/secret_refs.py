@@ -3,6 +3,7 @@
 GENERATION_SECRET_REF = "generation-api"
 EMBEDDING_SECRET_REF = "embedding-api"
 LOCAL_EMBEDDING_SECRET_REF = "embedding-local"
+RERANKER_SECRET_REF = "reranker-api"
 
 # Releases predating the Local inference boundary used slash-separated JSON
 # keys. Keep them readable for import and cleanup, but do not write them into
@@ -16,4 +17,5 @@ __all__ = [
     "LEGACY_EMBEDDING_SECRET_REF",
     "LEGACY_GENERATION_SECRET_REF",
     "LOCAL_EMBEDDING_SECRET_REF",
+    "RERANKER_SECRET_REF",
 ]

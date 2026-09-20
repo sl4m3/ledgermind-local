@@ -42,7 +42,7 @@ def create_maintenance_router(
         return result
 
     @router.post("/replay-failed")
-    def replay_failed_user_semantic(
+    def replay_failed_round_semantic(
         limit: int = 100,
         error_code: str | None = None,
         memory_space_id: str | None = None,
@@ -51,7 +51,7 @@ def create_maintenance_router(
         del _token
         if runtime is None:
             raise HTTPException(status_code=503, detail="Local runtime is unavailable")
-        replay = getattr(runtime, "retry_failed_user_semantic", None)
+        replay = getattr(runtime, "retry_failed_round_semantic", None)
         if not callable(replay):
             raise HTTPException(status_code=503, detail="Replay is unavailable")
         if not 1 <= limit <= 1_000:
