@@ -30,6 +30,7 @@ class Lease:
     session_id: str
     created_at: float
     expires_at: float
+    ttl_seconds: float
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -38,6 +39,7 @@ class Lease:
             "session_id": self.session_id,
             "created_at": _iso(self.created_at),
             "expires_at": _iso(self.expires_at),
+            "ttl_seconds": self.ttl_seconds,
         }
 
 
@@ -62,6 +64,7 @@ class LeaseStore:
                 session_id=str(payload["session_id"]),
                 created_at=float(payload["created_at_epoch"]),
                 expires_at=float(payload["expires_at_epoch"]),
+                ttl_seconds=float(payload.get("ttl_seconds", self.ttl_seconds)),
             )
         except (OSError, ValueError, KeyError, TypeError):
             path.unlink(missing_ok=True)
@@ -89,14 +92,50 @@ class LeaseStore:
                 expired.append(lease.lease_id)
         return tuple(sorted(expired))
 
-    def acquire(self, *, client: str, session_id: str) -> Lease:
+    def acquire(
+        self, *, client: str, session_id: str, ttl_seconds: float | None = None
+    ) -> Lease:
         client = client.strip()
         session_id = session_id.strip()
         if not client or not session_id:
             raise ValueError("client and session_id are required")
         now = _now()
+        effective_ttl = (
+            self.ttl_seconds
+            if ttl_seconds is None
+            else max(float(ttl_seconds), self.ttl_seconds)
+        )
+        matching = [
+            lease
+            for lease in self.active()
+            if lease.client == client and lease.session_id == session_id
+        ]
+        if matching:
+            # Acquisition is idempotent for one logical agent session.  Hook
+            # retries and concurrent lifecycle events must refresh the same
+            # lease instead of keeping the runtime alive with duplicates.
+            canonical = min(matching, key=lambda item: (item.created_at, item.lease_id))
+            for duplicate in matching:
+                if duplicate.lease_id != canonical.lease_id:
+                    self.release(duplicate.lease_id)
+            refreshed_ttl = max(effective_ttl, canonical.ttl_seconds)
+            refreshed = Lease(
+                canonical.lease_id,
+                canonical.client,
+                canonical.session_id,
+                canonical.created_at,
+                now + refreshed_ttl,
+                refreshed_ttl,
+            )
+            self._write(refreshed)
+            return refreshed
         lease = Lease(
-            f"lease-{uuid4().hex}", client, session_id, now, now + self.ttl_seconds
+            f"lease-{uuid4().hex}",
+            client,
+            session_id,
+            now,
+            now + effective_ttl,
+            effective_ttl,
         )
         self._write(lease)
         return lease
@@ -115,7 +154,8 @@ class LeaseStore:
             lease.client,
             lease.session_id,
             lease.created_at,
-            now + self.ttl_seconds,
+            now + lease.ttl_seconds,
+            lease.ttl_seconds,
         )
         self._write(refreshed)
         return refreshed

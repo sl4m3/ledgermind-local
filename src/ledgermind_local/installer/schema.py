@@ -92,6 +92,15 @@ INSTALL_CONFIG_SCHEMA: dict[str, Any] = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
+                "residency_mode": {
+                    "type": "string",
+                    "enum": ["session", "idle", "always_on"],
+                },
+                "idle_timeout_seconds": {"type": "number", "minimum": 0},
+                "session_safety_ttl_seconds": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                },
                 "idle_shutdown_seconds": {"type": "number", "minimum": 0},
                 "lease_ttl_seconds": {"type": "number", "exclusiveMinimum": 0},
                 "heartbeat_seconds": {"type": "number", "exclusiveMinimum": 0},

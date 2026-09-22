@@ -30,6 +30,11 @@ def create_runtime_router(
                 _supervisor().acquire(
                     client=str(payload.get("client", "")),
                     session_id=str(payload.get("session_id", "")),
+                    ttl_seconds=(
+                        float(payload["ttl_seconds"])
+                        if payload.get("ttl_seconds") is not None
+                        else None
+                    ),
                 )
             )
         except ValueError as exc:

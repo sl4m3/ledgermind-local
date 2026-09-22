@@ -72,7 +72,7 @@ def _assert_generation_capabilities_ready(database: Path) -> None:
         connection.close()
 
 
-def update(
+def _update_transaction(
     *,
     config: InstallerConfig,
     paths: InstallerPaths,
@@ -178,6 +178,46 @@ def update(
             raise RuntimeError(
                 f"update failed and previous release was retained: {exc}"
             ) from exc
+
+
+def update(
+    *,
+    config: InstallerConfig,
+    paths: InstallerPaths,
+    manifest_path: str | Path,
+    bundle: str | Path,
+    dry_run: bool = False,
+    skip_provider_probe: bool = False,
+    generation_stdin: str | None = None,
+    embedding_stdin: str | None = None,
+) -> dict[str, Any]:
+    """Run one update while preventing hooks from restarting the old runtime."""
+
+    if dry_run:
+        return {"status": "dry_run", "operation": "update"}
+    paths.runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    barrier = paths.runtime_dir / "update-in-progress"
+    try:
+        descriptor = os.open(barrier, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError("another runtime update is already in progress") from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(f"pid={os.getpid()}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return _update_transaction(
+            config=config,
+            paths=paths,
+            manifest_path=manifest_path,
+            bundle=bundle,
+            dry_run=False,
+            skip_provider_probe=skip_provider_probe,
+            generation_stdin=generation_stdin,
+            embedding_stdin=embedding_stdin,
+        )
+    finally:
+        barrier.unlink(missing_ok=True)
 
 
 __all__ = ["update"]

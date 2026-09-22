@@ -82,10 +82,7 @@ class _TerminalWizard:
         brand = "  LEDGERMIND SETUP"
         self.line("  ╭" + "─" * inside + "╮")
         self.line(
-            "  │"
-            + self._style(brand, "1;36")
-            + " " * (inside - len(brand))
-            + "│"
+            "  │" + self._style(brand, "1;36") + " " * (inside - len(brand)) + "│"
         )
         self.line("  │" + "  Private memory for your local agents".ljust(inside) + "│")
         self.line("  ╰" + "─" * inside + "╯")
@@ -141,7 +138,9 @@ class _TerminalWizard:
             self.line()
         self._brand()
         self._brand_visible = True
-        self.line(self._style("  Esc/Q cancels menus · Ctrl+C or :q exits anytime", "2"))
+        self.line(
+            self._style("  Esc/Q cancels menus · Ctrl+C or :q exits anytime", "2")
+        )
 
     def section(self, number: int, title: str, detail: str, *, total: int = 8) -> None:
         if self.navigation:
@@ -343,9 +342,7 @@ class _TerminalWizard:
                         elif tail == b"[B":
                             cursor = (cursor + 1) % len(discovered)
                         else:
-                            raise UserCancelledError(
-                                "installation cancelled by user"
-                            )
+                            raise UserCancelledError("installation cancelled by user")
                     elif key == b" ":
                         if cursor in selected:
                             selected.remove(cursor)
@@ -471,23 +468,7 @@ def build_interactive_config(
                     _Choice("shared", "Shared by all agents", "one knowledge space"),
                 ),
             )
-            customize_runtime = ui.confirm(
-                "Customize runtime lifecycle settings", default=False
-            )
-            if customize_runtime:
-                runtime = RuntimeConfig(
-                    idle_shutdown_seconds=float(
-                        ui.required("Idle shutdown seconds", default="60")
-                    ),
-                    lease_ttl_seconds=float(
-                        ui.required("Lease TTL seconds", default="30")
-                    ),
-                    heartbeat_seconds=float(
-                        ui.required("Heartbeat seconds", default="10")
-                    ),
-                )
-            else:
-                runtime = RuntimeConfig()
+            runtime = RuntimeConfig()
         else:
             semantic_language = existing_config.semantic_language
             memory_mode = existing_config.memory_mode
@@ -731,7 +712,9 @@ def build_interactive_config(
             "Reranker",
             (
                 _Choice("disabled", "Disabled", "use deterministic Core ranking"),
-                _Choice("api", "API", "send admitted candidates to a reranking endpoint"),
+                _Choice(
+                    "api", "API", "send admitted candidates to a reranking endpoint"
+                ),
                 _Choice("local", "Local", "Qwen3 0.6B on CPU or GPU"),
             ),
         )
@@ -741,9 +724,9 @@ def build_interactive_config(
                 "Reranker API operation URL",
                 default=existing_api.endpoint if existing_api else None,
             )
-            reuse_token = reranker_endpoint.startswith(endpoint.rstrip("/")) and ui.confirm(
-                "Reuse the generation token", default=True
-            )
+            reuse_token = reranker_endpoint.startswith(
+                endpoint.rstrip("/")
+            ) and ui.confirm("Reuse the generation token", default=True)
             reranker_token = token if reuse_token else ui.secret("Reranker API token")
             reranker_model = ui.required(
                 "Reranker model", default=existing_api.model if existing_api else None
@@ -787,6 +770,48 @@ def build_interactive_config(
             )
         else:
             reranker = RerankerConfig()
+
+        if existing_config is None:
+            ui.line("  Choose how long local embedding and reranker models stay loaded")
+            residency_mode = ui.choose(
+                "Local model residency",
+                (
+                    _Choice(
+                        "session",
+                        "Session (recommended)",
+                        "keep models loaded until the agent turn finishes",
+                    ),
+                    _Choice(
+                        "idle",
+                        "Idle timeout",
+                        "keep models warm for a period after the last request",
+                    ),
+                    _Choice(
+                        "always_on",
+                        "Always on",
+                        "keep models resident for minimum recall latency",
+                    ),
+                ),
+            )
+            idle_timeout_seconds = 900.0
+            if residency_mode == "idle":
+                idle_minutes = ui.choose(
+                    "Unload after idle time",
+                    (
+                        _Choice("5", "5 minutes"),
+                        _Choice("10", "10 minutes"),
+                        _Choice("15", "15 minutes (recommended)"),
+                        _Choice("30", "30 minutes"),
+                    ),
+                    default=3,
+                )
+                idle_timeout_seconds = float(idle_minutes) * 60.0
+            runtime = RuntimeConfig(
+                residency_mode=cast(
+                    Literal["session", "idle", "always_on"], residency_mode
+                ),
+                idle_timeout_seconds=idle_timeout_seconds,
+            )
 
         draft = InstallerConfig(
             semantic_language=semantic_language,
@@ -846,6 +871,12 @@ def build_interactive_config(
             ui.line(f"  Reranker:    API · {reranker.api.model}")
         else:
             ui.line("  Reranker:    disabled · Core ranking")
+        residency_labels = {
+            "session": "session · unload after the agent turn",
+            "idle": f"idle · unload after {runtime.idle_timeout_seconds / 60:g} min",
+            "always_on": "always on · keep local models resident",
+        }
+        ui.line(f"  Residency:   {residency_labels[runtime.residency_mode]}")
         ui.line(f"  Memory:      {memory_mode}")
         ui.line(
             "  Agents:      " + (", ".join(item.id for item in integrations) or "none")

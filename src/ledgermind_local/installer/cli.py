@@ -204,6 +204,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _runtime_flags(acquire)
     acquire.add_argument("--client", required=True)
     acquire.add_argument("--session-id", required=True)
+    acquire.add_argument("--ttl-seconds", type=float)
     heartbeat = runtime_subparsers.add_parser("heartbeat")
     _runtime_flags(heartbeat)
     heartbeat.add_argument("--lease-id", required=True)
@@ -233,7 +234,9 @@ def _runtime(paths: InstallerPaths) -> RuntimeSupervisor:
     settings: dict[str, float] = {
         "idle_shutdown_seconds": 60.0,
         "lease_ttl_seconds": 30.0,
+        "max_session_ttl_seconds": 3_600.0,
     }
+    automatic_shutdown = True
     if paths.config_file.is_file():
         try:
             from .config_writer import load_installer_config
@@ -241,15 +244,23 @@ def _runtime(paths: InstallerPaths) -> RuntimeSupervisor:
             config = load_installer_config(paths.config_file)
             settings.update(
                 {
-                    "idle_shutdown_seconds": config.runtime.idle_shutdown_seconds,
+                    "idle_shutdown_seconds": (
+                        config.runtime.idle_timeout_seconds
+                        if config.runtime.residency_mode == "idle"
+                        else 0.0
+                    ),
                     "lease_ttl_seconds": config.runtime.lease_ttl_seconds,
+                    "max_session_ttl_seconds": config.runtime.session_safety_ttl_seconds,
                 }
             )
+            automatic_shutdown = config.runtime.residency_mode != "always_on"
         except (OSError, ValueError):
             return RuntimeSupervisor(
                 paths,
                 idle_shutdown_seconds=settings["idle_shutdown_seconds"],
                 lease_ttl_seconds=settings["lease_ttl_seconds"],
+                max_session_ttl_seconds=settings["max_session_ttl_seconds"],
+                residency_mode="idle",
             )
     local = paths.current_link / "bin" / "ledgermind-local"
     commands: dict[str, Sequence[str]] = {}
@@ -321,6 +332,11 @@ def _runtime(paths: InstallerPaths) -> RuntimeSupervisor:
         paths,
         idle_shutdown_seconds=settings["idle_shutdown_seconds"],
         lease_ttl_seconds=settings["lease_ttl_seconds"],
+        automatic_shutdown=automatic_shutdown,
+        max_session_ttl_seconds=settings["max_session_ttl_seconds"],
+        residency_mode=(
+            config.runtime.residency_mode if config is not None else "idle"
+        ),
         commands=commands,
     )
 
@@ -781,8 +797,7 @@ def _terminal_progress(phase: str, message: str) -> None:
     if previous is not None and previous != phase:
         print(file=sys.stderr)
     print(
-        "\r\033[2K"
-        f"  {stage} [{labels.get(phase, phase.upper())}] {message}",
+        f"\r\033[2K  {stage} [{labels.get(phase, phase.upper())}] {message}",
         end="\n" if phase == "complete" else "",
         file=sys.stderr,
         flush=True,
@@ -1029,7 +1044,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             supervisor = _runtime(paths)
             if args.runtime_command == "acquire":
                 payload = supervisor.acquire(
-                    client=args.client, session_id=args.session_id
+                    client=args.client,
+                    session_id=args.session_id,
+                    ttl_seconds=args.ttl_seconds,
                 )
             elif args.runtime_command == "heartbeat":
                 payload = supervisor.heartbeat(args.lease_id)

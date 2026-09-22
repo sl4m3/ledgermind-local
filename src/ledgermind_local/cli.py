@@ -15,6 +15,8 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, TypeVar, cast
 
+from ledgermind_inference.structured_json_provider import default_provider_factory
+
 from ledgermind_local.api.app import create_app
 from ledgermind_local.api.dependencies import Settings
 from ledgermind_local.bootstrap import (
@@ -33,7 +35,6 @@ from ledgermind_local.inference import (
     StoreBackedProfileResolver,
 )
 from ledgermind_local.inference.provider_probe import ProviderProbe
-from ledgermind_inference.structured_json_provider import default_provider_factory
 from ledgermind_local.maintenance.coordinated_restore import (
     CoordinatedRestoreError,
     CoordinatedRestoreService,
@@ -923,26 +924,26 @@ def _build_runtime_supervisor(
     from ledgermind_local.runtime.supervisor import RuntimeSupervisor
 
     endpoint_host = host if host in {"127.0.0.1", "localhost", "::1"} else "127.0.0.1"
-    embedding_command: tuple[str, ...] | None = None
-    if config.embedding.enabled and config.embedding.provider_mode == "local":
-        embedding_command = (
-            sys.executable,
-            "-m",
-            "ledgermind_local.installer.embeddings.serve",
-            "--model-path",
-            str(Path(config.embedding.model_path).expanduser()),
-            "--gpu-layers",
-            str(config.embedding.gpu_layers),
-            "--port",
-            "8766",
-        )
     return RuntimeSupervisor(
         InstallerPaths(),
         endpoint=f"http://{endpoint_host}:{port}",
-        idle_shutdown_seconds=60.0,
-        lease_ttl_seconds=30.0,
+        idle_shutdown_seconds=(
+            config.runtime_residency.idle_timeout_seconds
+            if config.runtime_residency.mode == "idle"
+            else 0.0
+        ),
+        lease_ttl_seconds=config.runtime_residency.lease_ttl_seconds,
+        # This supervisor is embedded in the Local process and owns only the
+        # HTTP lease bridge.  The outer installer supervisor owns the Local
+        # and embedding processes and runs the single detached idle reaper.
+        # Letting both instances manage process lifetime races on the shared
+        # runtime state and can erase the authoritative PID records while the
+        # services are still alive.
+        automatic_shutdown=False,
+        process_owner=False,
+        max_session_ttl_seconds=(config.runtime_residency.session_safety_ttl_seconds),
+        residency_mode=config.runtime_residency.mode,
         commands={},
-        embedding_command=embedding_command,
         activity_probe=activity_probe,
     )
 

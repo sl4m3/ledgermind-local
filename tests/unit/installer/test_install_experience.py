@@ -24,9 +24,11 @@ from ledgermind_local.installer.models import (
     GenerationConfig,
     InstallerConfig,
     IntegrationConfig,
-    LocalEmbeddingConfig as InstallerLocalEmbeddingConfig,
     RerankerApiConfig,
     RerankerConfig,
+)
+from ledgermind_local.installer.models import (
+    LocalEmbeddingConfig as InstallerLocalEmbeddingConfig,
 )
 from ledgermind_local.installer.operations.common import unpack_bundle
 from ledgermind_local.installer.operations.integrations import (
@@ -86,7 +88,9 @@ def test_installer_projects_explicit_local_reranker_without_enabling_legacy_inst
     assert local.reranker.soft_budget == 400
 
 
-def test_installer_projects_api_reranker_without_persisting_token(tmp_path: Path) -> None:
+def test_installer_projects_api_reranker_without_persisting_token(
+    tmp_path: Path,
+) -> None:
     from ledgermind_local.installer.config_writer import build_local_config
 
     paths = InstallerPaths(home_override=tmp_path)
@@ -229,7 +233,6 @@ def test_terminal_wizard_uses_reference_openrouter_configuration(
             "",  # English
             "",  # all detected agents
             "2",  # shared memory
-            "",  # recommended runtime settings
             "",  # OpenRouter
             "",  # reference generation model
             "",  # choose discovered routes
@@ -241,6 +244,7 @@ def test_terminal_wizard_uses_reference_openrouter_configuration(
             "",  # reuse token
             "",  # reference embedding model
             "",  # keep Core ranking; reranker is opt-in
+            "",  # session model residency
             "",  # install
         )
     )
@@ -277,6 +281,8 @@ def test_terminal_wizard_uses_reference_openrouter_configuration(
     assert config.generation.endpoint == "https://openrouter.ai/api/v1"
     assert config.generation.route == "baidu/fp8"
     assert config.generation.fallback_routes == ("deepinfra/fp8",)
+    assert config.runtime.residency_mode == "session"
+    assert config.runtime.session_safety_ttl_seconds == 3_600.0
     assert config.generation.model == wizard.REFERENCE_GENERATION_MODEL
     assert config.embedding.api is not None
     assert config.embedding.api.endpoint == "https://openrouter.ai/api/v1"
@@ -386,14 +392,14 @@ def test_terminal_wizard_offers_local_embedding_only_from_signed_catalog(
         (
             "",  # English
             "",  # per-agent memory
-            "",  # runtime defaults
             "3",  # custom generation endpoint
             "https://provider.example/v1",
             "generation-model",
             "2",  # local embeddings
-                "",  # automatic device
-                "",  # keep Core ranking; reranker is opt-in
-                "",  # install
+            "",  # automatic device
+            "",  # keep Core ranking; reranker is opt-in
+            "",  # session model residency
+            "",  # install
         )
     )
 
@@ -806,9 +812,9 @@ def test_provider_reconfiguration_preserves_memory_and_agents() -> None:
             "",  # API embeddings
             "",  # same endpoint
             "",  # reuse generation token
-                "new-embedding",
-                "",  # keep Core ranking; reranker is opt-in
-                "",  # apply
+            "new-embedding",
+            "",  # keep Core ranking; reranker is opt-in
+            "",  # apply
         )
     )
 

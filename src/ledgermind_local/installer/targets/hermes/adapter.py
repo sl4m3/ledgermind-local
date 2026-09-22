@@ -98,6 +98,10 @@ class HermesTargetAdapter(BaseTargetAdapter):
             "runtime_command": str(context.paths.bin_link),
             "lease_ttl_seconds": context.config.runtime.lease_ttl_seconds,
             "heartbeat_seconds": context.config.runtime.heartbeat_seconds,
+            "model_residency_mode": context.config.runtime.residency_mode,
+            "session_safety_ttl_seconds": (
+                context.config.runtime.session_safety_ttl_seconds
+            ),
         }
         result = install_plugin(
             hermes_home=home,
@@ -120,6 +124,10 @@ class HermesTargetAdapter(BaseTargetAdapter):
                 endpoint="http://127.0.0.1:8765",
                 lease_ttl_seconds=context.config.runtime.lease_ttl_seconds,
                 heartbeat_seconds=context.config.runtime.heartbeat_seconds,
+                model_residency_mode=context.config.runtime.residency_mode,
+                session_safety_ttl_seconds=(
+                    context.config.runtime.session_safety_ttl_seconds
+                ),
             ),
         }
 

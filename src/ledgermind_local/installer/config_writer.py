@@ -16,7 +16,11 @@ from ledgermind_inference.profiles import (
 )
 
 from ledgermind_local.config import EmbeddingConfig as LocalEmbeddingConfig
-from ledgermind_local.config import LocalConfig, ProfileSlotsConfig
+from ledgermind_local.config import (
+    LocalConfig,
+    ProfileSlotsConfig,
+    RuntimeResidencyConfig,
+)
 from ledgermind_local.config import RerankerConfig as LocalRerankerConfig
 
 from .models import InstallerConfig
@@ -180,7 +184,9 @@ def resolve_provider_tokens(
     return generation, embedding
 
 
-def resolve_reranker_token(config: InstallerConfig, paths: InstallerPaths) -> str | None:
+def resolve_reranker_token(
+    config: InstallerConfig, paths: InstallerPaths
+) -> str | None:
     """Resolve the API reranker credential without exposing it in config files."""
 
     if config.reranker.mode != "api" or config.reranker.api is None:
@@ -435,6 +441,13 @@ def build_local_config(
                 config.reranker.api.timeout_seconds if config.reranker.api else 30.0
             ),
         ),
+        runtime_residency=RuntimeResidencyConfig(
+            mode=config.runtime.residency_mode,
+            idle_timeout_seconds=config.runtime.idle_timeout_seconds,
+            session_safety_ttl_seconds=config.runtime.session_safety_ttl_seconds,
+            lease_ttl_seconds=config.runtime.lease_ttl_seconds,
+            heartbeat_seconds=config.runtime.heartbeat_seconds,
+        ),
     )
 
 
@@ -458,8 +471,9 @@ def write_local_profiles(
 ) -> dict[str, Any]:
     """Materialize installer profiles in Local's existing SQLite resolver tables."""
 
-    from ledgermind_local.inference.profile_store import InferenceProfileStore
     from ledgermind_inference.profiles import InferenceProfile
+
+    from ledgermind_local.inference.profile_store import InferenceProfileStore
     from ledgermind_local.persistence import open_sqlite_connection
     from ledgermind_local.persistence import rounds_migrations as migrations
     from ledgermind_local.persistence.memory_space_repository import (
@@ -571,7 +585,9 @@ def bind_existing_profiles_for_agent(
     """
     from ledgermind_local.inference.profile_store import InferenceProfileStore
     from ledgermind_local.persistence import open_sqlite_connection
-    from ledgermind_local.persistence.memory_space_repository import SQLiteMemorySpaceRepository
+    from ledgermind_local.persistence.memory_space_repository import (
+        SQLiteMemorySpaceRepository,
+    )
 
     local = build_local_config(config, paths)
     database_path = Path(local.rounds_database_path).expanduser()
@@ -584,7 +600,8 @@ def bind_existing_profiles_for_agent(
         repository = SQLiteMemorySpaceRepository(connection)
         if repository.get(memory_space_id) is None:
             repository.ensure(
-                memory_space_id, "hermes" if config.memory_mode == "shared" else target_id
+                memory_space_id,
+                "hermes" if config.memory_mode == "shared" else target_id,
             )
         profile_ids = {
             str(profile["slot"]): str(profile["profile_id"])
@@ -598,7 +615,9 @@ def bind_existing_profiles_for_agent(
             if store.get_slot(memory_space_id, slot) is not None:
                 continue
             if store.get(profile_id) is None:
-                raise ValueError(f"installed inference profile {profile_id!r} is missing")
+                raise ValueError(
+                    f"installed inference profile {profile_id!r} is missing"
+                )
             store.bind_slot(memory_space_id, slot=slot, profile_id=profile_id)
             added[slot] = profile_id
         connection.commit()
@@ -622,11 +641,12 @@ def persist_generation_probe(
     provider calls immediately after installation.
     """
 
-    from ledgermind_local.inference.profile_store import InferenceProfileStore
     from ledgermind_inference.profiles import (
         ProviderCapabilities,
         generation_profile_fingerprint,
     )
+
+    from ledgermind_local.inference.profile_store import InferenceProfileStore
     from ledgermind_local.persistence import open_sqlite_connection
     from ledgermind_local.persistence import rounds_migrations as migrations
 

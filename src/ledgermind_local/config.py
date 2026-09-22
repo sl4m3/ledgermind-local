@@ -79,6 +79,28 @@ class RerankerConfig(BaseModel):
         return self.mode != "disabled"
 
 
+class RuntimeResidencyConfig(BaseModel):
+    """Installed process/model residency policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["session", "idle", "always_on"] = "idle"
+    idle_timeout_seconds: float = Field(default=60.0, ge=0.0, le=86_400.0)
+    session_safety_ttl_seconds: float = Field(default=3_600.0, gt=0.0, le=86_400.0)
+    lease_ttl_seconds: float = Field(default=30.0, gt=0.0, le=3_600.0)
+    heartbeat_seconds: float = Field(default=10.0, gt=0.0, le=1_200.0)
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> RuntimeResidencyConfig:
+        if self.heartbeat_seconds >= self.lease_ttl_seconds:
+            raise ValueError("heartbeat_seconds must be less than lease_ttl_seconds")
+        if self.session_safety_ttl_seconds < self.lease_ttl_seconds:
+            raise ValueError(
+                "session_safety_ttl_seconds must not be less than lease_ttl_seconds"
+            )
+        return self
+
+
 class WorkerConfig(BaseModel):
     """Lifecycle settings shared by one guarded background worker."""
 
@@ -228,6 +250,9 @@ class LocalConfig(BaseModel):
     allow_remote_bind: bool = False
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     reranker: RerankerConfig = Field(default_factory=RerankerConfig)
+    runtime_residency: RuntimeResidencyConfig = Field(
+        default_factory=RuntimeResidencyConfig
+    )
 
     @field_validator("semantic_language")
     @classmethod

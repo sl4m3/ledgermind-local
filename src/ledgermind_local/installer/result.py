@@ -4,9 +4,28 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .errors import ExitCode
+
+
+def _json_safe(value: Any) -> Any:
+    """Normalize result metadata before it reaches either CLI renderer.
+
+    Installer operations may legitimately return paths discovered or created
+    during a transaction.  Keeping those values as ``Path`` objects inside
+    Python is useful, but the public result contract is JSON and must never
+    turn a successfully committed install into a failing CLI invocation.
+    """
+
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 @dataclass(slots=True)
@@ -21,7 +40,7 @@ class ResultStep:
         if self.detail:
             result["detail"] = self.detail
         if self.data:
-            result["data"] = dict(self.data)
+            result["data"] = _json_safe(self.data)
         return result
 
 
@@ -68,10 +87,10 @@ class InstallResult:
             "steps": [step.as_dict() for step in self.steps],
             "warnings": list(self.warnings),
             "errors": list(self.errors),
-            "paths": dict(self.paths),
-            "profiles": list(self.profiles),
-            "runtime": dict(self.runtime),
-            "smoke_test": dict(self.smoke_test),
+            "paths": _json_safe(self.paths),
+            "profiles": _json_safe(self.profiles),
+            "runtime": _json_safe(self.runtime),
+            "smoke_test": _json_safe(self.smoke_test),
         }
 
     def to_json(self) -> str:

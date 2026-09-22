@@ -2,8 +2,8 @@
 
 ## 4.1.0 - 2026-09-20
 
-- Made the compact Round Semantic schema v4 the only production semantic
-  extraction contract and removed obsolete v1-v3 execution paths from the
+- Made the compact Round Semantic schema version 4 the only production semantic
+  extraction contract and removed obsolete versions 1 through 3 execution paths from the
   self-hosted runtime.
 - Improved retrieval with complete facet passages, exact related-object links,
   related-object scoring, and non-recursive expansion of applicable

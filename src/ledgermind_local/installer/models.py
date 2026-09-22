@@ -371,18 +371,44 @@ class RerankerConfig(BaseModel):
     def device(self) -> Literal["cpu", "cuda", "rocm"]:
         return self.local.device if self.local is not None else "cpu"
 
+
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    idle_shutdown_seconds: float = Field(default=60.0, ge=0, le=86_400)
+    residency_mode: Literal["session", "idle", "always_on"] = "session"
+    idle_timeout_seconds: float = Field(default=900.0, ge=0, le=86_400)
+    session_safety_ttl_seconds: float = Field(default=3_600.0, gt=0, le=86_400)
     lease_ttl_seconds: float = Field(default=30.0, gt=0, le=3_600)
     heartbeat_seconds: float = Field(default=10.0, gt=0, le=1_200)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_idle_shutdown(cls, value: Any) -> Any:
+        """Preserve the exact lifecycle of pre-residency installer configs."""
+
+        if not isinstance(value, dict) or "idle_shutdown_seconds" not in value:
+            return value
+        payload = dict(value)
+        legacy = payload.pop("idle_shutdown_seconds")
+        payload.setdefault("residency_mode", "idle")
+        payload.setdefault("idle_timeout_seconds", legacy)
+        return payload
 
     @model_validator(mode="after")
     def validate_heartbeat(self) -> RuntimeConfig:
         if self.heartbeat_seconds >= self.lease_ttl_seconds:
             raise ValueError("heartbeat_seconds must be less than lease_ttl_seconds")
+        if self.session_safety_ttl_seconds < self.lease_ttl_seconds:
+            raise ValueError(
+                "session_safety_ttl_seconds must not be less than lease_ttl_seconds"
+            )
         return self
+
+    @property
+    def idle_shutdown_seconds(self) -> float:
+        """Compatibility view for runtime callers during the format transition."""
+
+        return self.idle_timeout_seconds
 
 
 class AdvancedConfig(BaseModel):

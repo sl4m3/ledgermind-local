@@ -244,10 +244,13 @@ installation.
 
 Install data follows XDG directories. Signed manifests, bundle artifacts,
 Core, model files, and embedding runtimes are verified before `current` is
-switched. The default runtime is on-demand: an enabled Hermes integration
-acquires a TTL lease before memory work, heartbeats while active, and releases
-it on shutdown. Ordinary uninstall preserves user memory, configuration, and
-secrets.
+switched. The installer asks how local embedding and reranker models should
+remain resident. `Session` (the default) holds one crash-safe lease from prompt
+recall through the agent's final response, so a long-running turn does not
+unload and reload the models. `Idle timeout` keeps them warm for 5, 10, 15, or
+30 minutes after work, while `Always on` disables automatic shutdown. The
+session safety TTL releases abandoned leases after a crashed agent. Ordinary
+uninstall preserves user memory, configuration, and secrets.
 
 ### Existing installations
 

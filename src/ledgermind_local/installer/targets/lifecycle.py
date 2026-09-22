@@ -304,6 +304,10 @@ class LifecycleTargetAdapter(BaseTargetAdapter):
             "spool_dir": str(self._integration_dir(context) / "spool"),
             "runtime_command": str(context.paths.bin_link),
             "heartbeat_seconds": context.config.runtime.heartbeat_seconds,
+            "model_residency_mode": context.config.runtime.residency_mode,
+            "session_safety_ttl_seconds": (
+                context.config.runtime.session_safety_ttl_seconds
+            ),
         }
         _write_object(config_path, runtime)
         payload = _read_object(target)
@@ -444,6 +448,10 @@ class PluginTargetAdapter(LifecycleTargetAdapter):
                 "spool_dir": str(integration_dir / "spool"),
                 "runtime_command": str(context.paths.bin_link),
                 "heartbeat_seconds": context.config.runtime.heartbeat_seconds,
+                "model_residency_mode": context.config.runtime.residency_mode,
+                "session_safety_ttl_seconds": (
+                    context.config.runtime.session_safety_ttl_seconds
+                ),
             },
         )
         return path

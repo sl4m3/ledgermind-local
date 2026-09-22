@@ -42,6 +42,7 @@ from ledgermind_local.installer.models import (
 )
 from ledgermind_local.installer.paths import InstallerPaths
 from ledgermind_local.installer.verify import verify_ed25519
+from ledgermind_local.runtime.process import process_start_ticks
 from ledgermind_local.runtime.supervisor import RuntimeSupervisor
 
 
@@ -429,6 +430,138 @@ def test_runtime_supports_multiple_leases_and_ttl_cleanup(
     assert supervisor.status()["running"] is False
 
 
+def test_runtime_reuses_lease_for_the_same_client_session(tmp_path: Path) -> None:
+    supervisor = RuntimeSupervisor(
+        InstallerPaths(home_override=tmp_path),
+        lease_ttl_seconds=0.1,
+        max_session_ttl_seconds=10.0,
+        idle_shutdown_seconds=0,
+    )
+    first = supervisor.acquire(client="codex", session_id="thread-1", ttl_seconds=2.0)
+    second = supervisor.acquire(client="codex", session_id="thread-1", ttl_seconds=2.0)
+    try:
+        assert second["lease_id"] == first["lease_id"]
+        assert second["started"] is False
+        assert len(supervisor.status()["active_leases"]) == 1
+    finally:
+        supervisor.stop(force=True)
+
+
+def test_runtime_lease_bridge_does_not_mutate_process_ownership(
+    tmp_path: Path,
+) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    paths.ensure()
+    original = {
+        "running": True,
+        "endpoint": "http://127.0.0.1:8765",
+        "processes": {"local": {"pid": os.getpid(), "command": ["local"]}},
+    }
+    paths.runtime_state.write_text(json.dumps(original), encoding="utf-8")
+    bridge = RuntimeSupervisor(
+        paths,
+        commands={},
+        automatic_shutdown=False,
+        process_owner=False,
+    )
+
+    first = bridge.acquire(client="codex", session_id="thread-1")
+    second = bridge.acquire(client="codex", session_id="thread-1")
+    state = json.loads(paths.runtime_state.read_text(encoding="utf-8"))
+
+    assert first["lease_id"] == second["lease_id"]
+    assert state["running"] is True
+    assert state["processes"] == original["processes"]
+    assert len(bridge.status()["active_leases"]) == 1
+    bridge.heartbeat(str(first["lease_id"]))
+    assert paths.runtime_state.read_text(encoding="utf-8") == json.dumps(original)
+    bridge.release(str(first["lease_id"]))
+    assert paths.runtime_state.read_text(encoding="utf-8") == json.dumps(original)
+
+
+def test_runtime_recovers_live_processes_from_registry_without_respawning(
+    tmp_path: Path,
+) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    commands = {
+        "local": ("/bin/sleep", "60"),
+        "embedding": ("/bin/sleep", "60"),
+    }
+    original = RuntimeSupervisor(paths, commands=commands, automatic_shutdown=False)
+    original.acquire(client="codex", session_id="first")
+    initial = original.status()["processes"]
+    assert set(initial) == set(commands)
+    assert (paths.runtime_dir / "processes.json").is_file()
+    paths.runtime_state.write_text(
+        json.dumps({"running": False, "processes": {}}), encoding="utf-8"
+    )
+
+    recovered = RuntimeSupervisor(paths, commands=commands, automatic_shutdown=False)
+    try:
+        assert recovered.status()["running"] is True
+        assert recovered.status()["processes"] == initial
+        lease = recovered.acquire(client="codex", session_id="second")
+        assert lease["started"] is False
+        assert recovered.status()["processes"] == initial
+    finally:
+        recovered.stop(force=True)
+    assert not (paths.runtime_dir / "processes.json").exists()
+    assert recovered.status()["running"] is False
+
+
+def test_runtime_rejects_recycled_pid_in_registry(tmp_path: Path) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    paths.ensure()
+    start_ticks = process_start_ticks(os.getpid())
+    assert start_ticks is not None
+    registry = paths.runtime_dir / "processes.json"
+    registry.write_text(
+        json.dumps(
+            {"processes": {"local": {"pid": os.getpid(), "start_ticks": start_ticks + 1}}}
+        ),
+        encoding="utf-8",
+    )
+    supervisor = RuntimeSupervisor(
+        paths, commands={"local": ("/bin/sleep", "60")}, automatic_shutdown=False
+    )
+    assert supervisor.status()["running"] is False
+    assert not registry.exists()
+
+
+def test_runtime_session_lease_uses_extended_safety_ttl(tmp_path: Path) -> None:
+    supervisor = RuntimeSupervisor(
+        InstallerPaths(home_override=tmp_path),
+        lease_ttl_seconds=0.1,
+        max_session_ttl_seconds=10.0,
+        idle_shutdown_seconds=0,
+    )
+    lease = supervisor.acquire(client="codex", session_id="long-turn", ttl_seconds=2.0)
+    try:
+        time.sleep(0.15)
+        active = supervisor.status()["active_leases"]
+        assert len(active) == 1
+        assert active[0]["lease_id"] == lease["lease_id"]
+        assert active[0]["ttl_seconds"] == 2.0
+    finally:
+        supervisor.stop(force=True)
+
+
+def test_runtime_always_on_ignores_idle_shutdown(tmp_path: Path) -> None:
+    supervisor = RuntimeSupervisor(
+        InstallerPaths(home_override=tmp_path),
+        commands={"local": ("/bin/sleep", "60")},
+        idle_shutdown_seconds=0,
+        automatic_shutdown=False,
+    )
+    lease = supervisor.acquire(client="agent", session_id="always-on")
+    try:
+        supervisor.release(str(lease["lease_id"]))
+        assert supervisor.watch_idle()["reason"] == "automatic_shutdown_disabled"
+        assert supervisor.status()["running"] is True
+    finally:
+        supervisor.stop(force=True)
+
+
 def test_runtime_enables_persistent_content_free_provider_telemetry(
     tmp_path: Path,
 ) -> None:
@@ -474,6 +607,22 @@ def test_runtime_restarts_missing_process_while_a_lease_is_active(
         assert supervisor.status()["processes"]
     finally:
         supervisor.stop(force=True)
+
+
+def test_runtime_does_not_start_or_restart_during_update(tmp_path: Path) -> None:
+    paths = InstallerPaths(home_override=tmp_path)
+    paths.runtime_dir.mkdir(parents=True)
+    barrier = paths.runtime_dir / "update-in-progress"
+    barrier.write_text("pid=123\n", encoding="utf-8")
+    supervisor = RuntimeSupervisor(
+        paths,
+        commands={"local": ("/bin/sleep", "60")},
+    )
+
+    with pytest.raises(RuntimeError, match="update is in progress"):
+        supervisor.acquire(client="agent", session_id="one")
+
+    assert supervisor.processes.running() == {}
 
 
 def test_runtime_reuses_live_process_after_last_lease_is_released(
@@ -836,6 +985,27 @@ def test_api_embedding_profile_does_not_spawn_local_embedding_service() -> None:
     supervisor = _build_runtime_supervisor(config=config, host="127.0.0.1", port=8765)
 
     assert "embedding" not in supervisor.commands
+    assert supervisor.automatic_shutdown is False
+    assert supervisor.process_owner is False
+
+
+def test_local_embedding_profile_does_not_give_bridge_process_ownership() -> None:
+    config = LocalConfig(
+        config_version=2,
+        semantic_language="en",
+        embedding=LocalEmbeddingConfig(
+            enabled=True,
+            provider_mode="local",
+            model="embedding-model",
+            model_path="/tmp/embedding-model",
+            dimensions=3,
+        ),
+    )
+
+    supervisor = _build_runtime_supervisor(config=config, host="127.0.0.1", port=8765)
+
+    assert supervisor.commands == {}
+    assert supervisor.process_owner is False
 
 
 def test_installed_local_embedding_uses_its_signed_device_runtime(

@@ -110,7 +110,7 @@ def _fake_worker(connection: object, model_path: str, device: str) -> None:
 
 
 def _items() -> list[dict[str, object]]:
-    return [{"value_id": f"v{index}", "object_name": "Project", "facet": "constraint",
+    return [{"value_id": f"item{index}", "object_name": "Project", "facet": "constraint",
              "content": f"Rule {index} is required.", "conditions": []}
             for index in range(1, 9)]
 
@@ -129,7 +129,7 @@ class _Scores:
 
 def test_reranking_stable_ties_and_complete_items() -> None:
     ranked = rank_items("rules", _items(), _Scores())
-    assert [row["value_id"] for row in ranked[:3]] == ["v2", "v3", "v7"]
+    assert [row["value_id"] for row in ranked[:3]] == ["item2", "item3", "item7"]
     selected, injection, count = pack_items(ranked, _injection(), "en", soft_budget=1)
     assert len(selected) == 6
     assert injection["item_count"] == 6
@@ -151,7 +151,7 @@ def test_long_seventh_is_skipped_for_short_eighth() -> None:
     items[6]["content"] = "long " * 250
     minimum = len(TOKEN_RE.findall(render_injection(items[:6], _injection(), "en")["text"]))
     selected, _, _ = pack_items(items, _injection(), "en", soft_budget=minimum + 12)
-    assert [row["value_id"] for row in selected] == ["v1", "v2", "v3", "v4", "v5", "v6", "v8"]
+    assert [row["value_id"] for row in selected] == ["item1", "item2", "item3", "item4", "item5", "item6", "item8"]
 
 
 def test_invalid_scores_rejected() -> None:

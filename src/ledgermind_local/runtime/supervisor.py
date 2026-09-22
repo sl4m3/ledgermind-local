@@ -9,16 +9,18 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from ledgermind_inference.provider_telemetry import TELEMETRY_ENV
+
 from ledgermind_local.installer.lock import InstallerLock
 from ledgermind_local.installer.paths import InstallerPaths
 
 from .endpoint import DEFAULT_ENDPOINT, validate_endpoint
 from .leases import LeaseStore
-from .process import ProcessManager
+from .process import ProcessManager, process_start_ticks
 from .shutdown import should_shutdown
 from .state import load_state, write_state
 
@@ -63,6 +65,10 @@ class RuntimeSupervisor:
         endpoint: str = DEFAULT_ENDPOINT,
         idle_shutdown_seconds: float = 60.0,
         lease_ttl_seconds: float = 30.0,
+        automatic_shutdown: bool = True,
+        process_owner: bool = True,
+        max_session_ttl_seconds: float = 3_600.0,
+        residency_mode: str = "idle",
         commands: dict[str, Sequence[str]] | None = None,
         embedding_command: Sequence[str] | None = None,
         activity_probe: Callable[[], Mapping[str, object]] | None = None,
@@ -70,6 +76,14 @@ class RuntimeSupervisor:
         self.paths = paths
         self.endpoint = validate_endpoint(endpoint)
         self.idle_shutdown_seconds = max(float(idle_shutdown_seconds), 0.0)
+        self.automatic_shutdown = bool(automatic_shutdown)
+        self.process_owner = bool(process_owner)
+        self.max_session_ttl_seconds = max(
+            float(max_session_ttl_seconds), float(lease_ttl_seconds)
+        )
+        if residency_mode not in {"session", "idle", "always_on"}:
+            raise ValueError("invalid runtime residency mode")
+        self.residency_mode = residency_mode
         self.leases = LeaseStore(paths.leases_dir, ttl_seconds=lease_ttl_seconds)
         self.embedding_command = (
             tuple(str(part) for part in embedding_command)
@@ -121,6 +135,10 @@ class RuntimeSupervisor:
             command.extend(("--home", str(self.paths.home_override)))
         return tuple(command)
 
+    def _assert_update_not_in_progress(self) -> None:
+        if (self.paths.runtime_dir / "update-in-progress").is_file():
+            raise RuntimeError("runtime update is in progress")
+
     @staticmethod
     def _reaper_environment() -> dict[str, str]:
         environment: dict[str, str] = {}
@@ -142,6 +160,9 @@ class RuntimeSupervisor:
 
     def _ensure_idle_reaper(self) -> int | None:
         """Keep exactly one detached watcher for an installed runtime."""
+
+        if not self.automatic_shutdown:
+            return None
 
         state = load_state(self.paths.runtime_state)
         existing = self._live_pid(state.get("idle_reaper_pid"))
@@ -325,6 +346,11 @@ class RuntimeSupervisor:
             try:
                 pid = int(raw["pid"])
                 os.kill(pid, 0)
+                expected_ticks = raw.get("start_ticks")
+                if expected_ticks is not None and process_start_ticks(pid) != int(
+                    expected_ticks
+                ):
+                    continue
             except (
                 KeyError,
                 TypeError,
@@ -337,6 +363,49 @@ class RuntimeSupervisor:
             live[str(name)] = dict(raw)
         return live
 
+    @property
+    def _process_registry_path(self) -> Path:
+        return self.paths.runtime_dir / "processes.json"
+
+    def _registered_processes(self) -> dict[str, object]:
+        if not self._process_registry_path.is_file():
+            return {}
+        try:
+            return self._live_records(load_state(self._process_registry_path).get("processes"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+
+    def _register_processes(self, records: dict[str, object]) -> None:
+        if records:
+            write_state(self._process_registry_path, {"processes": records})
+        else:
+            self._process_registry_path.unlink(missing_ok=True)
+
+    def _reconcile_process_state(self) -> dict[str, object]:
+        """Recover owner state from independently recorded, verified PIDs."""
+
+        state = load_state(self.paths.runtime_state)
+        if not self.commands:
+            return state
+        registered = self._registered_processes()
+        recorded = self._live_records(state.get("processes", {}))
+        processes = {**recorded, **registered}
+        if processes != registered or (not processes and self._process_registry_path.exists()):
+            self._register_processes(processes)
+        if processes and self._all_commands_running(processes):
+            if not state.get("running") or state.get("processes") != processes:
+                state.update(
+                    running=True,
+                    endpoint=self.endpoint,
+                    processes=processes,
+                    last_transition=time.time(),
+                )
+                write_state(self.paths.runtime_state, state)
+        elif state.get("running") or state.get("processes"):
+            state.update(running=False, endpoint=None, processes=processes)
+            write_state(self.paths.runtime_state, state)
+        return state
+
     def _write(self, *, running: bool, last_release_at: float | None = None) -> None:
         current = load_state(self.paths.runtime_state)
         own_processes = {
@@ -344,6 +413,7 @@ class RuntimeSupervisor:
         }
         processes = {
             **self._live_records(current.get("processes", {})),
+            **self._registered_processes(),
             **own_processes,
         }
         current.update(
@@ -367,11 +437,21 @@ class RuntimeSupervisor:
         return set(self.commands).issubset(live)
 
     def _start(self) -> None:
+        # A previous owner may have died after recording only some children.
+        # Never spawn replacements alongside those verified survivors.
+        survivors = self._registered_processes()
+        if survivors:
+            ProcessManager.stop_external(survivors)
+            self._register_processes({})
         self.processes.start(self.commands)
+        self._register_processes(
+            {name: item.as_dict() for name, item in self.processes.running().items()}
+        )
         try:
             self._wait_for_owned_local()
         except BaseException:
             self.processes.stop()
+            self._register_processes({})
             self._write(running=False)
             raise
         self._write(running=True)
@@ -432,24 +512,57 @@ class RuntimeSupervisor:
     def _stop(self, *, force: bool = False) -> dict[str, object]:
         if not force and self.leases.active():
             raise RuntimeError("runtime has active leases")
-        state = load_state(self.paths.runtime_state)
+        state = self._reconcile_process_state()
         stopped = self.processes.stop()
-        if not stopped:
-            stopped = ProcessManager.stop_external(
-                self._live_records(state.get("processes", {}))
-            )
+        external = {
+            **self._live_records(state.get("processes", {})),
+            **self._registered_processes(),
+        }
+        for name in stopped:
+            external.pop(name, None)
+        stopped.update(ProcessManager.stop_external(external))
+        self._register_processes({})
+        state = load_state(self.paths.runtime_state)
+        state["processes"] = {}
+        write_state(self.paths.runtime_state, state)
         self._write(running=False, last_release_at=time.time())
         return {"stopped": True, "processes": stopped}
 
-    def acquire(self, *, client: str, session_id: str) -> dict[str, object]:
+    def acquire(
+        self,
+        *,
+        client: str,
+        session_id: str,
+        ttl_seconds: float | None = None,
+    ) -> dict[str, object]:
         with InstallerLock(self.paths.state_dir / "runtime.lock"):
+            self._assert_update_not_in_progress()
             self.leases.reap_expired()
-            state = load_state(self.paths.runtime_state)
+            requested_ttl = (
+                None
+                if ttl_seconds is None
+                else min(
+                    max(float(ttl_seconds), self.leases.ttl_seconds),
+                    self.max_session_ttl_seconds,
+                )
+            )
+            lease = self.leases.acquire(
+                client=client,
+                session_id=session_id,
+                ttl_seconds=requested_ttl,
+            )
+            if not self.process_owner:
+                return {
+                    "lease_id": lease.lease_id,
+                    "endpoint": self.endpoint,
+                    "expires_at": lease.as_dict()["expires_at"],
+                    "started": False,
+                }
+            state = self._reconcile_process_state()
             recorded_processes = self._live_records(state.get("processes", {}))
             started = not bool(state.get("running")) or not self._all_commands_running(
                 recorded_processes
             )
-            lease = self.leases.acquire(client=client, session_id=session_id)
             try:
                 if started:
                     self._start()
@@ -469,8 +582,11 @@ class RuntimeSupervisor:
 
     def heartbeat(self, lease_id: str) -> dict[str, object]:
         with InstallerLock(self.paths.state_dir / "runtime.lock"):
+            self._assert_update_not_in_progress()
             lease = self.leases.heartbeat(lease_id)
-            state = load_state(self.paths.runtime_state)
+            if not self.process_owner:
+                return {**lease.as_dict(), "endpoint": self.endpoint}
+            state = self._reconcile_process_state()
             if not state.get("running") or (
                 not self._all_commands_running(state.get("processes", {}))
             ):
@@ -484,6 +600,13 @@ class RuntimeSupervisor:
         with InstallerLock(self.paths.state_dir / "runtime.lock"):
             released = self.leases.release(lease_id)
             active = self.leases.active()
+            if not self.process_owner:
+                return {
+                    "released": released,
+                    "active_leases": len(active),
+                    "stopped": False,
+                    "activity": None,
+                }
             stopped = False
             activity: RuntimeActivity | None = None
             if not active:
@@ -497,13 +620,17 @@ class RuntimeSupervisor:
                     active_leases=0,
                     now=released_at,
                 )
-                if idle_since is not None and should_shutdown(
-                    active_leases=0,
-                    leased_tasks=activity.leased_tasks,
-                    pending_writes=activity.pending_writes,
-                    last_release_at=idle_since,
-                    idle_grace_seconds=self.idle_shutdown_seconds,
-                    now=released_at,
+                if (
+                    self.automatic_shutdown
+                    and idle_since is not None
+                    and should_shutdown(
+                        active_leases=0,
+                        leased_tasks=activity.leased_tasks,
+                        pending_writes=activity.pending_writes,
+                        last_release_at=idle_since,
+                        idle_grace_seconds=self.idle_shutdown_seconds,
+                        now=released_at,
+                    )
                 ):
                     active = self.leases.active()
                     activity, idle_since = self._update_idle_boundary(
@@ -530,10 +657,21 @@ class RuntimeSupervisor:
             expired = self.leases.reap_expired()
             active = self.leases.active()
             state = load_state(self.paths.runtime_state)
+            if not self.process_owner:
+                return {
+                    "running": bool(state.get("running")),
+                    "residency_mode": self.residency_mode,
+                    "endpoint": state.get("endpoint") or self.endpoint,
+                    "active_leases": [lease.as_dict() for lease in active],
+                    "expired_leases": list(expired),
+                    "processes": state.get("processes", {}),
+                    "activity": state.get("activity"),
+                }
+            state = self._reconcile_process_state()
             running = bool(state.get("running"))
             if running and not self._all_commands_running(state.get("processes", {})):
                 self._write(running=False)
-                state = load_state(self.paths.runtime_state)
+                state = self._reconcile_process_state()
                 running = False
             activity: RuntimeActivity | None = None
             if running:
@@ -542,13 +680,17 @@ class RuntimeSupervisor:
                     active_leases=len(active),
                     now=now,
                 )
-                if idle_since is not None and should_shutdown(
-                    active_leases=len(active),
-                    leased_tasks=activity.leased_tasks,
-                    pending_writes=activity.pending_writes,
-                    last_release_at=idle_since,
-                    idle_grace_seconds=self.idle_shutdown_seconds,
-                    now=now,
+                if (
+                    self.automatic_shutdown
+                    and idle_since is not None
+                    and should_shutdown(
+                        active_leases=len(active),
+                        leased_tasks=activity.leased_tasks,
+                        pending_writes=activity.pending_writes,
+                        last_release_at=idle_since,
+                        idle_grace_seconds=self.idle_shutdown_seconds,
+                        now=now,
+                    )
                 ):
                     # Re-read both lease and work state immediately before stop.
                     active = self.leases.active()
@@ -561,6 +703,7 @@ class RuntimeSupervisor:
                         state = load_state(self.paths.runtime_state)
             return {
                 "running": bool(state.get("running")),
+                "residency_mode": self.residency_mode,
                 "endpoint": state.get("endpoint"),
                 "active_leases": [lease.as_dict() for lease in active],
                 "expired_leases": list(expired),
@@ -575,12 +718,15 @@ class RuntimeSupervisor:
     def watch_idle(self, *, poll_interval_seconds: float = 0.5) -> dict[str, object]:
         """Watch leases until the installed runtime reaches its idle deadline."""
 
+        if not self.automatic_shutdown:
+            return {"stopped": False, "reason": "automatic_shutdown_disabled"}
+
         poll_interval = max(float(poll_interval_seconds), 0.05)
         while True:
             with InstallerLock(self.paths.state_dir / "runtime.lock"):
                 self.leases.reap_expired()
                 active = self.leases.active()
-                state = load_state(self.paths.runtime_state)
+                state = self._reconcile_process_state()
                 if not state.get("running"):
                     return {"stopped": False, "reason": "runtime_not_running"}
                 if not self._all_commands_running(state.get("processes", {})):

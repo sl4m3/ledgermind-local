@@ -8,6 +8,17 @@ import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+
+
+def process_start_ticks(pid: int) -> int | None:
+    """Read the Linux process birth tick so a recycled PID is not trusted."""
+
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        return int(stat.rsplit(") ", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 @dataclass(slots=True)
@@ -21,6 +32,7 @@ class ManagedProcess:
             "name": self.name,
             "pid": self.process.pid,
             "command": list(self.command),
+            "start_ticks": process_start_ticks(self.process.pid),
         }
 
 
